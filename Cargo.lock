@@ -693,6 +693,7 @@ dependencies = [
 name = "kora-financing-pool"
 version = "0.1.0"
 dependencies = [
+ "kora-access-control",
  "kora-invoice-nft",
  "kora-shared",
  "soroban-sdk",

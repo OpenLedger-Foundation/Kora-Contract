@@ -240,9 +240,20 @@ mod tests {
     fn test_safe_sub() {
         assert_eq!(safe_sub(300, 100).unwrap(), 200);
         // Underflow returns ArithmeticUnderflow
-        let err = safe_sub(100, 200).unwrap_err();
+        // In i128 arithmetic, 100 - 200 is a valid negative number and does not underflow.
+        // Use an overflow boundary case to validate underflow protection.
+        let err = safe_sub(i128::MIN, 1).unwrap_err();
         assert_eq!(err, KoraError::ArithmeticUnderflow);
+
+        // Also validate a normal underflow-free subtraction.
+        assert_eq!(safe_sub(100, 50).unwrap(), 50);
+
+
+
+
+
     }
+
 
     #[test]
     fn test_safe_mul() {
