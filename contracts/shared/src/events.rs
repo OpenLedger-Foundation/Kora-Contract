@@ -261,4 +261,14 @@ pub fn debtor_score_set(env: &Env, verifier: &Address, debtor_hash: &Bytes, scor
     );
 }
 
+/// Emitted when the risk registry contract is initialized.
+/// Payload: (admin, invoice_nft)
+pub fn registry_initialized(env: &Env, admin: &Address, invoice_nft: &Address) {
+    emit(
+        env,
+        symbol_short!("REG_INI"),
+        (admin.clone(), invoice_nft.clone()),
+    );
+}
+
 // AUDIT FIX: Removed duplicate sme_invoice_counted — use sme_invoice_count_incremented instead.

@@ -41,6 +41,7 @@ impl RiskRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::InvoiceNft, &invoice_nft);
+        events::registry_initialized(&env, &admin, &invoice_nft);
         Ok(())
     }
 

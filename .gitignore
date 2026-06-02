@@ -3,8 +3,23 @@ target/
 *.wasm
 .env
 .env.*
+
+# Test snapshots
 test_snapshots/
 **/test_snapshots/
+
+# Generated/tooling files
 issues.md
 generate_issues.py
 waves-issues.md
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust artifacts
+Cargo.lock.bak
+**/*.orig
