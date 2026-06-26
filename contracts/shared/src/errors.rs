@@ -41,11 +41,16 @@ pub enum KoraError {
     InvalidFeeRate = 40,
     WithdrawalFailed = 41,
     TokenNotWhitelisted = 42,
+    NotArchivable = 43,
 
     // Risk
     SMENotRegistered = 50,
     DebtorNotRegistered = 51,
     RiskScoreOutOfRange = 52,
+
+    // Two-step admin transfer
+    NoPendingAdminProposal = 44,
+    NotPendingAdmin = 45,
 
     // General
     ArithmeticOverflow = 90,
@@ -61,4 +66,13 @@ pub enum KoraError {
     // Upgrade
     NoUpgradeProposed = 100,
     UpgradeTimelockNotElapsed = 101,
+    // Multisig
+    InvalidThreshold = 102,
+    ProposalNotFound = 103,
+    ProposalAlreadyExecuted = 104,
+    ProposalExpired = 105,
+    AlreadyApproved = 106,
+    ThresholdNotMet = 107,
+    MultisigNotConfigured = 108,
+    SignerNotFound = 109,
 }

@@ -379,6 +379,24 @@ impl FinancingPoolContract {
         Ok(())
     }
 
+    /// Archive a closed pool, removing Pool and Positions from persistent storage to reclaim rent.
+    /// Only admin can call this. Pool must be closed (is_closed == true).
+    pub fn archive_pool(env: Env, admin: Address, invoice_id: u64) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+        if !pool.is_closed {
+            return Err(KoraError::InvalidInvoiceStatus);
+        }
+        env.storage().persistent().remove(&DataKey::Pool(invoice_id));
+        env.storage().persistent().remove(&DataKey::Positions(invoice_id));
+        Ok(())
+    }
+
     // ── Views ─────────────────────────────────────────────────────────────────
 
     pub fn get_pool(env: Env, invoice_id: u64) -> Result<Pool, KoraError> {

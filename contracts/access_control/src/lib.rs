@@ -18,6 +18,8 @@ const PERSISTENT_TTL_BUMP: u32 = 518_400;
 pub enum DataKey {
     /// Admin address — persistent so it survives ledger archival.
     Admin,
+    /// Pending new-admin address (two-step transfer).
+    PendingAdmin,
     /// Protocol pause flag — persistent so pause state is never silently lost.
     Paused,
     /// Per-address role mapping.
@@ -103,7 +105,7 @@ impl AccessControlContract {
     // ── Role management ───────────────────────────────────────────────────────
 
     /// Assign a role to an address. Admin only.
-    /// - Cannot grant `Role::Admin` (use `transfer_admin`).
+    /// - Cannot grant `Role::Admin` (use `propose_admin` + `accept_admin`).
     /// - Cannot grant `Role::None` (use `revoke_role`).
     /// - Cannot grant a role to the current admin address.
     pub fn grant_role(
@@ -161,27 +163,23 @@ impl AccessControlContract {
 
     // ── Admin transfer ────────────────────────────────────────────────────────
 
-    /// Transfer admin to a new address. Current admin must sign.
-    /// - Cannot transfer to self.
-    /// - Cannot transfer to an address that already holds a non-None role
-    ///   (would silently overwrite it). The caller must revoke first.
-    pub fn transfer_admin(
+    // ── Admin transfer (two-step) ─────────────────────────────────────────────
+
+    /// Step 1: current admin proposes a new admin. Does not transfer yet.
+    /// - Cannot propose self.
+    /// - Cannot propose an address already holding a non-Admin role (must revoke first).
+    pub fn propose_admin(
         env: Env,
         current_admin: Address,
         new_admin: Address,
     ) -> Result<(), KoraError> {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
-
         if current_admin == new_admin {
             return Err(KoraError::InvalidAddress);
         }
         kora_shared::validation::require_not_self(&env, &new_admin)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().persistent().set(&DataKey::Role(new_admin.clone()), &Role::Admin);
-        env.storage().persistent().set(&DataKey::Role(current_admin), &Role::None);
-        // Guard: new_admin must not already hold a role (Operator/Verifier)
-        // to prevent silent role overwrite.
+        // Guard: new_admin must not already hold a non-Admin role
         let existing = env
             .storage()
             .persistent()
@@ -190,18 +188,50 @@ impl AccessControlContract {
         if existing != Role::None && existing != Role::Admin {
             return Err(KoraError::Unauthorized);
         }
-        env.storage()
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        events::admin_proposed(&env, &current_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2: proposed new admin accepts, proving they control the address.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), KoraError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
             .instance()
-            .set(&DataKey::Admin, &new_admin);
+            .get(&DataKey::PendingAdmin)
+            .ok_or(KoraError::NoPendingAdminProposal)?;
+        if pending != new_admin {
+            return Err(KoraError::NotPendingAdmin);
+        }
+        // Get old admin to clean up its role entry
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(KoraError::NotInitialized)?;
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage()
             .persistent()
             .set(&DataKey::Role(new_admin.clone()), &Role::Admin);
         Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
-        // Remove old admin's role entry to reclaim storage
         env.storage()
             .persistent()
-            .remove(&DataKey::Role(current_admin));
+            .remove(&DataKey::Role(old_admin));
         events::admin_transferred(&env, &new_admin);
+        Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(KoraError::NoPendingAdminProposal);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        events::admin_proposal_cancelled(&env, &admin);
         Ok(())
     }
 
@@ -912,13 +942,14 @@ mod tests {
         assert_eq!(client.get_role(&user), Role::Operator);
     }
 
-    // ── transfer_admin ────────────────────────────────────────────────────────
+    // ── propose_admin / accept_admin ──────────────────────────────────────────
 
     #[test]
     fn test_transfer_admin_success() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
         assert_eq!(client.get_admin(), new_admin);
         assert_eq!(client.get_role(&new_admin), Role::Admin);
         assert_eq!(client.get_role(&admin), Role::None);
@@ -932,12 +963,12 @@ mod tests {
             address: &admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &client.address,
-                fn_name: "transfer_admin",
+                fn_name: "propose_admin",
                 args: (&admin, &new_admin).into_val(&env),
                 sub_invokes: &[],
             },
         }]);
-        assert!(client.try_transfer_admin(&admin, &new_admin).is_ok());
+        assert!(client.try_propose_admin(&admin, &new_admin).is_ok());
     }
 
     #[test]
@@ -945,14 +976,14 @@ mod tests {
         let (env, _, client) = setup();
         let stranger = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        let result = client.try_transfer_admin(&stranger, &new_admin);
+        let result = client.try_propose_admin(&stranger, &new_admin);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
     }
 
     #[test]
     fn test_transfer_admin_to_self_returns_invalid_address() {
         let (_, admin, client) = setup();
-        let result = client.try_transfer_admin(&admin, &admin);
+        let result = client.try_propose_admin(&admin, &admin);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidAddress);
     }
 
@@ -961,7 +992,7 @@ mod tests {
         let (env, admin, client) = setup();
         let operator = Address::generate(&env);
         client.grant_role(&admin, &operator, &Role::Operator);
-        let result = client.try_transfer_admin(&admin, &operator);
+        let result = client.try_propose_admin(&admin, &operator);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
     }
 
@@ -970,15 +1001,14 @@ mod tests {
         let (env, admin, client) = setup();
         let verifier = Address::generate(&env);
         client.grant_role(&admin, &verifier, &Role::Verifier);
-        let result = client.try_transfer_admin(&admin, &verifier);
+        let result = client.try_propose_admin(&admin, &verifier);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
     }
 
     #[test]
     fn test_transfer_admin_state_unchanged_after_failed_transfer() {
-        // After a rejected transfer, original admin must still be admin
         let (env, admin, client) = setup();
-        let _ = client.try_transfer_admin(&admin, &admin);
+        let _ = client.try_propose_admin(&admin, &admin);
         assert_eq!(client.get_admin(), admin);
         assert_eq!(client.get_role(&admin), Role::Admin);
     }
@@ -987,27 +1017,23 @@ mod tests {
     fn test_transfer_admin_old_admin_loses_all_privileges() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
-        // Old admin cannot pause
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
         assert!(client.try_pause(&admin).is_err());
-        // Old admin cannot grant roles
         let target = Address::generate(&env);
         assert!(client.try_grant_role(&admin, &target, &Role::Verifier).is_err());
-        // Old admin cannot transfer admin again
-        assert!(client.try_transfer_admin(&admin, &target).is_err());
+        assert!(client.try_propose_admin(&admin, &target).is_err());
     }
 
     #[test]
     fn test_transfer_admin_new_admin_has_full_privileges() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
-        client.transfer_admin(&admin, &new_admin);
-        // New admin can pause
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
         client.pause(&new_admin);
         assert!(client.is_paused());
-        // New admin can unpause
         client.unpause(&new_admin);
-        // New admin can grant roles
         let target = Address::generate(&env);
         client.grant_role(&new_admin, &target, &Role::Verifier);
         assert_eq!(client.get_role(&target), Role::Verifier);
@@ -1018,9 +1044,11 @@ mod tests {
         let (env, admin_a, client) = setup();
         let admin_b = Address::generate(&env);
         let admin_c = Address::generate(&env);
-        client.transfer_admin(&admin_a, &admin_b);
+        client.propose_admin(&admin_a, &admin_b);
+        client.accept_admin(&admin_b);
         assert_eq!(client.get_admin(), admin_b);
-        client.transfer_admin(&admin_b, &admin_c);
+        client.propose_admin(&admin_b, &admin_c);
+        client.accept_admin(&admin_c);
         assert_eq!(client.get_admin(), admin_c);
         assert_eq!(client.get_role(&admin_a), Role::None);
         assert_eq!(client.get_role(&admin_b), Role::None);
@@ -1029,11 +1057,28 @@ mod tests {
 
     #[test]
     fn test_transfer_admin_to_clean_address_succeeds() {
-        // Transfer to an address with no prior role must succeed
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
         assert_eq!(client.get_role(&new_admin), Role::None);
-        assert!(client.try_transfer_admin(&admin, &new_admin).is_ok());
+        assert!(client.try_propose_admin(&admin, &new_admin).is_ok());
+    }
+
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        assert!(client.try_accept_admin(&impostor).is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_blocks_accept() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.cancel_admin_proposal(&admin);
+        assert!(client.try_accept_admin(&new_admin).is_err());
     }
 
     // ── get_admin ─────────────────────────────────────────────────────────────
@@ -1061,7 +1106,7 @@ mod tests {
     fn test_transfer_admin_to_self_contract_rejected() {
         let (env, admin, client) = setup();
         let contract_id = client.address.clone();
-        let result = client.try_transfer_admin(&admin, &contract_id);
+        let result = client.try_propose_admin(&admin, &contract_id);
         assert!(result.is_err());
     }
 }    #[test]
@@ -1088,7 +1133,7 @@ mod tests {
         let (env, client) = deploy_uninit();
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        let result = client.try_transfer_admin(&admin, &new_admin);
+        let result = client.try_propose_admin(&admin, &new_admin);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::NotInitialized);
     }
 
@@ -1157,7 +1202,8 @@ mod tests {
         client.grant_role(&admin, &user, &Role::Operator);
         client.revoke_role(&admin, &user);
         assert_eq!(client.get_role(&user), Role::None);
-        assert!(client.try_transfer_admin(&admin, &user).is_ok());
+        assert!(client.try_propose_admin(&admin, &user).is_ok());
+        client.accept_admin(&user);
         assert_eq!(client.get_admin(), user);
     }
 
@@ -1183,14 +1229,14 @@ mod tests {
         assert!(client.is_paused()); // still paused
     }
 
-    // ── Admin transfer ────────────────────────────────────────────────────────
+    // ── Additional admin transfer tests ──────────────────────────────────────
 
     #[test]
     fn test_transfer_admin() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);
-
-        client.transfer_admin(&admin, &new_admin);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
         assert_eq!(client.get_admin(), new_admin);
         assert_eq!(client.get_role(&new_admin), Role::Admin);
         assert_eq!(client.get_role(&admin), Role::None);
@@ -1199,7 +1245,7 @@ mod tests {
     #[test]
     fn test_transfer_admin_self_rejected() {
         let (_, admin, client) = setup();
-        assert!(client.try_transfer_admin(&admin, &admin).is_err());
+        assert!(client.try_propose_admin(&admin, &admin).is_err());
     }
 
     #[test]
@@ -1207,7 +1253,7 @@ mod tests {
         let (env, _admin, client) = setup();
         let stranger = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        assert!(client.try_transfer_admin(&stranger, &new_admin).is_err());
+        assert!(client.try_propose_admin(&stranger, &new_admin).is_err());
     }
 
     // ── has_role view ─────────────────────────────────────────────────────────

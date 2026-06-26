@@ -56,6 +56,8 @@ pub enum DataKey {
     NextId,
     /// Instance key: admin address for privileged operations
     Admin,
+    /// Instance key: pending new admin address (two-step transfer)
+    PendingAdmin,
     /// Instance key: access control contract address for pause checks
     AccessControl,
     /// Instance key: current schema migration version (starts at 1)
@@ -280,6 +282,20 @@ impl InvoiceNftContract {
 
     // ── Views ────────────────────────────────────────────────────────────────
 
+    /// Archive a terminal invoice, removing it from persistent storage to reclaim rent.
+    /// Only admin can call this. Invoice must be in Repaid or Defaulted status.
+    pub fn archive_invoice(env: Env, admin: Address, invoice_id: u64) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.status != InvoiceStatus::Repaid && invoice.status != InvoiceStatus::Defaulted {
+            return Err(KoraError::InvalidInvoiceStatus);
+        }
+        events::invoice_archived(&env, invoice_id, &invoice.sme, invoice.amount, invoice.status.clone());
+        env.storage().persistent().remove(&DataKey::Invoice(invoice_id));
+        Ok(())
+    }
+
     /// Retrieve a full invoice by ID.
     ///
     /// **Parameters:**
@@ -311,6 +327,50 @@ impl InvoiceNftContract {
             .get::<_, u64>(&DataKey::NextId)
             .unwrap_or(1)
             .saturating_sub(1)
+    }
+
+    // ── Admin transfer (two-step) ──────────────────────────────────────────────
+
+    /// Step 1: current admin proposes a new admin. Does not transfer yet.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if admin == new_admin {
+            return Err(KoraError::InvalidAddress);
+        }
+        kora_shared::validation::require_not_self(&env, &new_admin)?;
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        events::admin_proposed(&env, &admin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2: proposed new admin accepts, completing the transfer.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), KoraError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(KoraError::NoPendingAdminProposal)?;
+        if pending != new_admin {
+            return Err(KoraError::NotPendingAdmin);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        events::admin_transferred(&env, &new_admin);
+        Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(KoraError::NoPendingAdminProposal);
+        }
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        events::admin_proposal_cancelled(&env, &admin);
+        Ok(())
     }
 
     // ── Upgrade ────────────────────────────────────────────────────────────────
@@ -1348,5 +1408,108 @@ mod tests {
             client.get_invoice(&invoice_id).status,
             InvoiceStatus::Listed
         );
+    }
+
+    // ── archive_invoice ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_archive_invoice_fails_for_non_terminal_status() {
+        let (env, admin, client) = setup();
+        let id = mint_default(&env, &client, 10u32);
+        // Invoice is Created — not terminal, must fail
+        let result = client.try_archive_invoice(&admin, &id);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidInvoiceStatus);
+    }
+
+    #[test]
+    fn test_archive_invoice_requires_admin() {
+        let (env, _admin, client) = setup();
+        let id = mint_default(&env, &client, 10u32);
+        let non_admin = Address::generate(&env);
+        let result = client.try_archive_invoice(&non_admin, &id);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+    }
+
+    #[test]
+    fn test_archive_invoice_repaid_succeeds() {
+        let (env, admin, client) = setup();
+        let id = mint_default(&env, &client, 10u32);
+        let marketplace = Address::generate(&env);
+        client.set_listed(&marketplace, &id);
+        let pool = Address::generate(&env);
+        client.set_funded(&pool, &id);
+        client.set_repaid(&pool, &id);
+        // Should archive without error
+        client.archive_invoice(&admin, &id);
+        // Invoice should no longer be found
+        let result = client.try_get_invoice(&id);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvoiceNotFound);
+    }
+
+    #[test]
+    fn test_archive_invoice_defaulted_succeeds() {
+        let (env, admin, client) = setup();
+        let id = mint_default(&env, &client, 10u32);
+        let marketplace = Address::generate(&env);
+        client.set_listed(&marketplace, &id);
+        let pool = Address::generate(&env);
+        client.set_funded(&pool, &id);
+        // Advance past due_date so set_defaulted works
+        let invoice = client.get_invoice(&id);
+        env.ledger().set(LedgerInfo {
+            timestamp: invoice.due_date + 1,
+            ..env.ledger().get()
+        });
+        client.set_defaulted(&admin, &id);
+        client.archive_invoice(&admin, &id);
+        let result = client.try_get_invoice(&id);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvoiceNotFound);
+    }
+
+    // ── propose_admin / accept_admin ──────────────────────────────────────────
+
+    #[test]
+    fn test_propose_then_accept_transfers_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+        // new admin can call admin-only archive
+        let id = mint_default(&env, &client, 10u32);
+        assert!(client.try_archive_invoice(&new_admin, &id).is_err()); // Created, not terminal — proves auth passes
+        assert!(client.try_archive_invoice(&admin, &id).is_err()); // old admin is rejected
+    }
+
+    #[test]
+    fn test_propose_admin_requires_admin() {
+        let (env, _admin, client) = setup();
+        let stranger = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        assert!(client.try_propose_admin(&stranger, &new_admin).is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        assert!(client.try_accept_admin(&impostor).is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_blocks_accept() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.cancel_admin_proposal(&admin);
+        assert!(client.try_accept_admin(&new_admin).is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_without_proposal_fails() {
+        let (env, _admin, client) = setup();
+        let stranger = Address::generate(&env);
+        assert!(client.try_accept_admin(&stranger).is_err());
     }
 }

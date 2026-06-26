@@ -1,4 +1,5 @@
 use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol};
+use crate::types::InvoiceStatus;
 
 fn emit(env: &Env, topic: Symbol, data: impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
     env.events().publish((topic,), data);
@@ -57,6 +58,14 @@ pub fn invoice_defaulted(env: &Env, invoice_id: u64, sme: &Address) {
         env,
         symbol_short!("INV_DFT"),
         (invoice_id, sme.clone(), env.ledger().timestamp()),
+    );
+}
+
+pub fn invoice_archived(env: &Env, invoice_id: u64, sme: &Address, amount: i128, _status: InvoiceStatus) {
+    emit(
+        env,
+        symbol_short!("INV_ARC"),
+        (invoice_id, sme.clone(), amount, env.ledger().timestamp()),
     );
 }
 
@@ -174,6 +183,18 @@ pub fn token_whitelisted(env: &Env, token: &Address) {
 
 pub fn admin_transferred(env: &Env, new_admin: &Address) {
     emit(env, symbol_short!("ADM_TRF"), new_admin.clone());
+}
+
+pub fn admin_proposed(env: &Env, proposer: &Address, proposed: &Address) {
+    emit(
+        env,
+        symbol_short!("ADM_PRP"),
+        (proposer.clone(), proposed.clone(), env.ledger().timestamp()),
+    );
+}
+
+pub fn admin_proposal_cancelled(env: &Env, admin: &Address) {
+    emit(env, symbol_short!("ADM_CXL"), (admin.clone(), env.ledger().timestamp()));
 }
 
 pub fn role_granted(env: &Env, admin: &Address, target: &Address) {
