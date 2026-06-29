@@ -60,12 +60,12 @@ fi
 
 # ── Read contract IDs from deployment manifest ──────────────────────────────
 
-ACCESS_CONTROL_ID=$(jq -r '.contracts.access_control' "$DEPLOY_LOG")
-INVOICE_NFT_ID=$(jq -r '.contracts.invoice_nft' "$DEPLOY_LOG")
-TREASURY_ID=$(jq -r '.contracts.treasury' "$DEPLOY_LOG")
-POOL_ID=$(jq -r '.contracts.financing_pool' "$DEPLOY_LOG")
-MARKETPLACE_ID=$(jq -r '.contracts.marketplace' "$DEPLOY_LOG")
-RISK_REGISTRY_ID=$(jq -r '.contracts.risk_registry' "$DEPLOY_LOG")
+ACCESS_CONTROL_ID=$(jq -r '.contracts.access_control.address' "$DEPLOY_LOG")
+INVOICE_NFT_ID=$(jq -r '.contracts.invoice_nft.address' "$DEPLOY_LOG")
+TREASURY_ID=$(jq -r '.contracts.treasury.address' "$DEPLOY_LOG")
+POOL_ID=$(jq -r '.contracts.financing_pool.address' "$DEPLOY_LOG")
+MARKETPLACE_ID=$(jq -r '.contracts.marketplace.address' "$DEPLOY_LOG")
+RISK_REGISTRY_ID=$(jq -r '.contracts.risk_registry.address' "$DEPLOY_LOG")
 
 echo "=== Kora TTL Keeper ==="
 echo "Network : $NETWORK"

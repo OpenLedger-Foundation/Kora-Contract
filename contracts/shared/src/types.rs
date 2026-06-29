@@ -37,6 +37,12 @@ impl RiskTier {
 }
 
 /// Core invoice NFT data stored on-chain
+///
+/// Schema version: 2 (see docs/MIGRATIONS.md for upgrade history)
+///
+/// Version history:
+///   v1 — original fields through `repaid_at`
+///   v2 — added `notes: Option<String>` for optional free-text memo (migration in invoice_nft::migrate)
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Invoice {
@@ -47,12 +53,16 @@ pub struct Invoice {
     pub currency: Symbol,   // e.g. USDC, EURC
     pub due_date: u64,      // Unix timestamp
     pub ipfs_cid: String,   // IPFS CID of full invoice metadata
-    pub risk_score: u32,    // 0–100
+    pub metadata_hash: Bytes, // SHA-256 content commitment of the off-chain metadata document (empty until committed)
+    pub risk_score: u32,      // 0–100
     pub risk_tier: RiskTier,
     pub status: InvoiceStatus,
     pub created_at: u64,
     pub funded_at: Option<u64>,
     pub repaid_at: Option<u64>,
+    /// Optional free-text memo attached at minting time. Added in schema v2.
+    /// Pre-existing records will have this field set to None by invoice_nft::migrate.
+    pub notes: Option<String>,
 }
 
 /// A marketplace listing for an invoice
@@ -95,6 +105,28 @@ pub struct Pool {
     pub penalty_applied: bool,
 }
 
+/// An active offer to sell an investor position on the secondary market
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PositionSaleOffer {
+    pub seller: Address,
+    pub invoice_id: u64,
+    pub token: Address,
+    pub price: i128,
+/// An SME's early-termination buyout offer for a funded invoice.
+///
+/// The SME escrows `amount` (a discount to `total_owed`) into the pool; investors then
+/// accept, and once investors representing 100% of pool shares have accepted, the escrow
+/// is distributed pro-rata and the pool closes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EarlySettlementOffer {
+    pub invoice_id: u64,
+    pub amount: i128,      // escrowed buyout amount, denominated in the pool token
+    pub accepted_bps: u32, // cumulative share_bps of investors that have accepted
+    pub accepted: Vec<Address>, // investors that have already accepted (dedup guard)
+}
+
 /// Protocol-level configuration.
 ///
 /// Note: pause state is NOT stored here — it is owned exclusively by the
@@ -119,6 +151,7 @@ pub struct SmeProfile {
     pub total_invoices: u32,
     pub defaults: u32,
     pub registered_at: u64,
+    pub compliance_attested: bool,
 }
 
 /// Action types that can be proposed for multisig execution
@@ -151,4 +184,28 @@ pub struct Proposal {
 pub struct MultisigConfig {
     pub threshold: u32,
     pub signers: Vec<Address>,
+}
+
+/// A tunable protocol parameter governed by the parameter-change process.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ParameterKey {
+    FeeBps,         // protocol fee in basis points
+    LatePenaltyBps, // late-repayment penalty in basis points
+    MaxRiskScore,   // ceiling for accepted invoice risk scores (0–100)
+}
+
+/// A governance proposal to change a single protocol parameter.
+///
+/// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ParameterProposal {
+    pub id: u64,
+    pub key: ParameterKey,
+    pub new_value: u32,
+    pub proposer: Address,
+    pub approvals: Vec<Address>, // signers that have voted in favour
+    pub created_at: u64,
+    pub executed: bool,
 }

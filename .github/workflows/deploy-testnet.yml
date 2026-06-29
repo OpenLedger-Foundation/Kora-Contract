@@ -1,0 +1,105 @@
+name: Deploy to Testnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'deploy' to confirm intentional testnet deployment"
+        required: true
+        default: ""
+
+jobs:
+  deploy:
+    name: Build & Deploy to Stellar Testnet
+    runs-on: ubuntu-latest
+    # Guard against accidental triggers
+    if: ${{ github.event.inputs.confirm == 'deploy' }}
+
+    permissions:
+      contents: read
+
+    env:
+      DEPLOYER_SECRET: ${{ secrets.TESTNET_DEPLOYER_SECRET }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Stellar CLI
+        run: cargo install stellar-cli --locked
+
+      - name: Build optimized WASMs
+        run: make build-optimized
+
+      - name: Capture WASM hashes
+        id: wasm_hashes
+        run: |
+          echo "Collecting WASM SHA-256 hashes..."
+          declare -A HASHES
+          for contract in access_control invoice_nft risk_registry treasury financing_pool marketplace; do
+            wasm="target/wasm32-unknown-unknown/release/kora_${contract}.wasm"
+            if [ -f "$wasm" ]; then
+              hash=$(sha256sum "$wasm" | awk '{print $1}')
+              echo "${contract}=${hash}" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Deploy contracts to testnet
+        id: deploy
+        run: bash scripts/deploy.sh testnet
+
+      - name: Read deployment manifest
+        id: manifest
+        run: |
+          manifest=$(cat deployments/testnet.json)
+          echo "manifest<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$manifest" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload deployment manifest as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment-${{ github.run_number }}
+          path: deployments/testnet.json
+          retention-days: 90
+
+      - name: Write workflow summary
+        run: |
+          echo "## Kora Protocol — Testnet Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run | \`#${{ github.run_number }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Contract addresses" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat deployments/testnet.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### WASM hashes (SHA-256)" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | SHA-256 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for contract in access_control invoice_nft risk_registry treasury financing_pool marketplace; do
+            wasm="target/wasm32-unknown-unknown/release/kora_${contract}.wasm"
+            if [ -f "$wasm" ]; then
+              hash=$(sha256sum "$wasm" | awk '{print $1}')
+              echo "| \`${contract}\` | \`${hash}\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done

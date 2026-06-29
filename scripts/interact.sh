@@ -10,21 +10,47 @@
 
 set -euo pipefail
 
+# ── Version guard ─────────────────────────────────────────────────────────────
+# Minimum required stellar CLI version (major.minor.patch).
+STELLAR_MIN_VERSION="20.0.0"
+
+_version_gte() {
+  # Returns 0 (true) if $1 >= $2, using sort -V semantics.
+  [ "$(printf '%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+if ! command -v stellar &>/dev/null; then
+  echo "ERROR: 'stellar' CLI not found in PATH." >&2
+  echo "       Install it with: cargo install stellar-cli --locked" >&2
+  echo "       Minimum required version: ${STELLAR_MIN_VERSION}" >&2
+  exit 1
+fi
+
+STELLAR_VERSION=$(stellar --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+if [ -z "$STELLAR_VERSION" ]; then
+  echo "WARNING: Could not parse stellar CLI version. Proceeding anyway." >&2
+elif ! _version_gte "$STELLAR_VERSION" "$STELLAR_MIN_VERSION"; then
+  echo "ERROR: stellar CLI version ${STELLAR_VERSION} is below the minimum required ${STELLAR_MIN_VERSION}." >&2
+  echo "       Upgrade with: cargo install stellar-cli --locked" >&2
+  exit 1
+fi
+
+# ── Network setup ─────────────────────────────────────────────────────────────
 NETWORK="${1:-testnet}"
 MANIFEST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deployments/$NETWORK.json"
 
 if [ ! -f "$MANIFEST" ]; then
-  echo "No deployment manifest found at $MANIFEST. Run deploy.sh first."
+  echo "No deployment manifest found at $MANIFEST. Run deploy.sh first." >&2
   exit 1
 fi
 
 # Load contract addresses from manifest
-ACCESS_CONTROL=$(jq -r '.contracts.access_control' "$MANIFEST")
-INVOICE_NFT=$(jq -r '.contracts.invoice_nft' "$MANIFEST")
-MARKETPLACE=$(jq -r '.contracts.marketplace' "$MANIFEST")
-POOL=$(jq -r '.contracts.financing_pool' "$MANIFEST")
-TREASURY=$(jq -r '.contracts.treasury' "$MANIFEST")
-RISK_REGISTRY=$(jq -r '.contracts.risk_registry' "$MANIFEST")
+ACCESS_CONTROL=$(jq -r '.contracts.access_control.address' "$MANIFEST")
+INVOICE_NFT=$(jq -r '.contracts.invoice_nft.address' "$MANIFEST")
+MARKETPLACE=$(jq -r '.contracts.marketplace.address' "$MANIFEST")
+POOL=$(jq -r '.contracts.financing_pool.address' "$MANIFEST")
+TREASURY=$(jq -r '.contracts.treasury.address' "$MANIFEST")
+RISK_REGISTRY=$(jq -r '.contracts.risk_registry.address' "$MANIFEST")
 
 case "$NETWORK" in
   testnet)
@@ -35,15 +61,20 @@ case "$NETWORK" in
     RPC_URL="https://soroban-mainnet.stellar.org"
     NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
     ;;
+  *)
+    echo "ERROR: Unknown network '${NETWORK}'. Supported: testnet, mainnet" >&2
+    exit 1
+    ;;
 esac
 
 SOURCE="${DEPLOYER_SECRET:?Set DEPLOYER_SECRET}"
 
+# ── Core invoke helper ────────────────────────────────────────────────────────
 _invoke() {
   local contract="$1"; local fn="$2"; shift 2
   stellar contract invoke \
     --id "$contract" \
-    --source "$SOURCE" \
+    --source-account "$SOURCE" \
     --rpc-url "$RPC_URL" \
     --network-passphrase "$NETWORK_PASSPHRASE" \
     -- "$fn" "$@"
@@ -142,7 +173,7 @@ kora_get_sme_profile() {
     -- get_sme_profile --sme "$1"
 }
 
-echo "Kora Protocol interaction helpers loaded."
+echo "Kora Protocol interaction helpers loaded (stellar CLI ${STELLAR_VERSION})."
 echo "Contracts on $NETWORK:"
 echo "  access_control : $ACCESS_CONTROL"
 echo "  invoice_nft    : $INVOICE_NFT"

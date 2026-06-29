@@ -20,3 +20,4 @@ kora-invoice-nft = { path = "../invoice_nft" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
+proptest = "1.4"

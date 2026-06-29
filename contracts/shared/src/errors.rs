@@ -21,6 +21,7 @@ pub enum KoraError {
     InvalidAmount = 14,
     InvalidDueDate = 15,
     InvalidRiskScore = 16,
+    InvalidCid = 17,
 
     // Marketplace
     ListingNotFound = 20,
@@ -30,23 +31,33 @@ pub enum KoraError {
     InsufficientFunds = 24,
     ExceedsFundingTarget = 25,
     AlreadyFullyFunded = 26,
+    ListingFullyFunded = 27,
+    FundingNotExpired = 28,
+    RefundAlreadyClaimed = 29,
+    NoContribution = 95,
 
     // Pool
     PoolNotFound = 30,
     PoolAlreadyClosed = 31,
     RepaymentAlreadyMade = 32,
     InsufficientPoolBalance = 33,
+    PositionNotFound = 34,
+    SaleAlreadyListed = 35,
+    SaleNotFound = 36,
 
     // Treasury
     InvalidFeeRate = 40,
     WithdrawalFailed = 41,
     TokenNotWhitelisted = 42,
-    NotArchivable = 43,
+    WithdrawalRateLimitExceeded = 43,
+    WithdrawalCapTimelockNotElapsed = 44,
+    NoCapChangeProposed = 45,
 
     // Risk
     SMENotRegistered = 50,
     DebtorNotRegistered = 51,
     RiskScoreOutOfRange = 52,
+    ComplianceNotAttested = 53,
 
     // Two-step admin transfer
     NoPendingAdminProposal = 44,
@@ -61,18 +72,21 @@ pub enum KoraError {
     NotInitialized = 96,
     // Distinct error for empty bytes (semantically different from EmptyString)
     EmptyBytes = 97,
+    // Field value exceeds the allowed maximum length
+    FieldTooLong = 95,
     // Reentrancy guard triggered
     Reentrancy = 98,
+    // Byte slice has the wrong length (e.g. debtor_hash must be exactly 32 bytes)
+    InvalidLength = 99,
     // Upgrade
     NoUpgradeProposed = 100,
     UpgradeTimelockNotElapsed = 101,
-    // Multisig
-    InvalidThreshold = 102,
-    ProposalNotFound = 103,
-    ProposalAlreadyExecuted = 104,
-    ProposalExpired = 105,
-    AlreadyApproved = 106,
-    ThresholdNotMet = 107,
-    MultisigNotConfigured = 108,
-    SignerNotFound = 109,
+    // Parameter governance
+    ParameterProposalNotFound = 110,
+    ParameterProposalAlreadyExecuted = 111,
+    NotMultisigSigner = 112,
+    AlreadyVoted = 113,
+    GovernanceThresholdNotMet = 114,
+    GovernanceTimelockNotElapsed = 115,
+    InvalidParameterValue = 116,
 }

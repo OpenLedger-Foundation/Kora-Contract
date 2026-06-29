@@ -2,10 +2,11 @@
 # Kora Protocol — Makefile
 # =============================================================================
 
-.PHONY: build test clean fmt lint check deploy-testnet deploy-mainnet
+.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet
 
 WASM_TARGET := wasm32-unknown-unknown
 CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
+COVERAGE_MIN ?= 95
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,27 @@ lint:
 
 check:
 	cargo check --all
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
+
+audit:
+	cargo audit
+	cargo deny check
+
+coverage:
+	@echo "Running coverage analysis (threshold: $(COVERAGE_MIN)%)..."
+	cargo tarpaulin --all --timeout 300 --out Stdout | tee /tmp/coverage.txt
+	@coverage=$$(grep -oP 'Coverage: \K[0-9.]+' /tmp/coverage.txt | head -1); \
+	if [ -z "$$coverage" ]; then \
+		echo "Error: Could not parse coverage percentage"; \
+		exit 1; \
+	fi; \
+	if (( $$(echo "$$coverage < $(COVERAGE_MIN)" | bc -l) )); then \
+		echo "Coverage $$coverage% is below threshold of $(COVERAGE_MIN)%"; \
+		exit 1; \
+	else \
+		echo "Coverage $$coverage% meets threshold of $(COVERAGE_MIN)%"; \
+	fi
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

@@ -15,6 +15,7 @@ pub struct Invoice {
     pub currency: Symbol,               // Token symbol (e.g., "USDC", "EURC")
     pub due_date: u64,                  // Unix timestamp when invoice is due
     pub ipfs_cid: String,               // IPFS content hash for full invoice metadata
+    pub metadata_hash: Bytes,           // SHA-256 content commitment of the off-chain document (empty until committed)
     pub risk_score: u32,                // Risk score 0–100 (assigned by verifiers)
     pub risk_tier: RiskTier,            // Risk tier (AAA, AA, A, B, C) derived from score
     pub status: InvoiceStatus,          // Current status in the state machine
@@ -137,6 +138,49 @@ pub fn mint_invoice(
 - Uses checked arithmetic for ID allocation
 - Emits `invoice_created` event with ID, SME, and amount
 - Invoice is stored in persistent storage with TTL managed by the protocol operator
+
+---
+
+### Metadata Integrity
+
+#### commit_metadata_hash
+
+```rust
+pub fn commit_metadata_hash(
+    env: Env,
+    sme: Address,
+    invoice_id: u64,
+    metadata_hash: Bytes,
+) -> Result<(), KoraError>
+```
+
+`ipfs_cid` only commits to a content identifier, not to the bytes a gateway actually serves —
+some pinning setups allow the content behind a CID to change. `commit_metadata_hash` binds the
+invoice on-chain to the **SHA-256 of the canonical off-chain metadata document**, giving a
+tamper-evident anchor that survives any gateway-side mutation.
+
+**Semantics:**
+- **Write-once.** The hash can only be set while it is empty and the invoice is still in
+  `Created` status. After commitment it is immutable.
+- Only the invoice's `sme` may commit it (`Unauthorized` otherwise).
+- Empty hashes are rejected (`InvalidInput`); a second commit returns `AlreadyInitialized`;
+  committing after the invoice leaves `Created` returns `InvalidInvoiceStatus`.
+
+**Off-chain verification guidance:**
+
+1. Compute the canonical document bytes deterministically (e.g. sorted-key JSON, UTF-8, no
+   trailing whitespace) — the same canonicalization the SME used when committing.
+2. Fetch the document from IPFS using `ipfs_cid`.
+3. Hash the fetched bytes with SHA-256.
+4. Read the on-chain invoice (`get_invoice`) and compare your digest against `metadata_hash`.
+   A mismatch means the served content was tampered with and must be rejected.
+
+```bash
+# Example: verify a fetched document against the on-chain commitment
+sha256sum invoice-metadata.json        # -> compare hex against invoice.metadata_hash
+```
+
+A `metadata_hash` of length 0 means no commitment was made for that invoice.
 
 ---
 

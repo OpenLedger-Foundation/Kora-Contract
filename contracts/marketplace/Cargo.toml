@@ -12,7 +12,7 @@ kora-shared = { path = "../shared" }
 kora-invoice-nft = { path = "../invoice_nft" }
 kora-access-control = { path = "../access_control" }
 kora-financing-pool = { path = "../financing_pool" }
-kora-access-control = { path = "../access_control" }
+kora-treasury = { path = "../treasury" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -20,4 +20,4 @@ kora-shared = { path = "../shared" }
 kora-invoice-nft = { path = "../invoice_nft" }
 kora-access-control = { path = "../access_control" }
 kora-financing-pool = { path = "../financing_pool" }
-kora-access-control = { path = "../access_control" }
+kora-treasury = { path = "../treasury" }

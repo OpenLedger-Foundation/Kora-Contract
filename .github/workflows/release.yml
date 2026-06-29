@@ -1,0 +1,80 @@
+# =============================================================================
+# Kora Protocol — Release Workflow (Stub)
+# =============================================================================
+#
+# This workflow is a STUB for future automation.
+#
+# Intended behavior (not yet implemented):
+# - Trigger on: git tag vX.Y.Z pushed
+# - Build all WASM binaries
+# - Compute SHA-256 hashes
+# - Create GitHub release
+# - Attach hashes as release asset
+#
+# To enable this workflow in the future:
+# 1. Replace this stub with a full GitHub Actions implementation
+# 2. Add Rust toolchain setup (rustup, cargo)
+# 3. Add WASM target installation
+# 4. Add stellar CLI installation
+# 5. Add build and hash recording steps
+# 6. Add GitHub release creation
+#
+# See: docs/RELEASE.md for manual release process (currently in use)
+#
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Release vX.Y.Z
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        run: |
+          VERSION="${{ github.ref_name }}"
+          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Verify tag format
+        run: |
+          if [[ ! "${{ env.RELEASE_VERSION }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Tag must be in format vX.Y.Z"
+            exit 1
+          fi
+          echo "Release version: ${{ env.RELEASE_VERSION }}"
+
+      # TODO: Add the following steps:
+      #
+      # - Install Rust toolchain
+      #   - uses: dtolnay/rust-toolchain@stable
+      #   - name: Add wasm32 target
+      #     run: rustup target add wasm32-unknown-unknown
+      #
+      # - Install stellar CLI
+      #   - name: Install stellar CLI
+      #     run: cargo install stellar-cli --locked
+      #
+      # - Build and hash
+      #   - name: Build contracts
+      #     run: make clean && make build-optimized
+      #   - name: Record WASM hashes
+      #     run: |
+      #       mkdir -p releases
+      #       sha256sum target/wasm32-unknown-unknown/release/kora_*.wasm > releases/${{ env.RELEASE_VERSION }}.hashes
+      #       cat releases/${{ env.RELEASE_VERSION }}.hashes
+      #
+      # - Create GitHub release
+      #   - uses: softprops/action-gh-release@v1
+      #     with:
+      #       files: releases/${{ env.RELEASE_VERSION }}.hashes
+      #       body_path: CHANGELOG_EXCERPT.md  # generated from CHANGELOG.md
+
+      - name: placeholder
+        run: echo "GitHub Actions workflow stub — see comments for implementation plan"

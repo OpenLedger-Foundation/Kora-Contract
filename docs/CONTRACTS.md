@@ -187,6 +187,8 @@ SME repays the invoice. If fully repaid, distributes yield to all investors and 
 
 **Late penalty model:** On the first repayment call where `ledger.timestamp > invoice.due_date`, a one-time flat penalty of `bps_of(face_value, late_penalty_bps)` is added to `total_owed`. Subsequent repayments (partial or full) are tracked against `total_owed` so the penalty is never double-counted. Uses the same bps conventions as marketplace `fee_bps`.
 
+**Yield distribution precision:** When `is_closed && should_close`, yield is distributed proportionally to each investor based on their `share_bps`. Due to integer division in basis point calculations, rounding loss is bounded to **≤ position count × 1 stroop**. For up to 50 positions, drift is ≤ 50 stroops (negligible relative to typical invoice amounts). See [PERFORMANCE.md](PERFORMANCE.md) for detailed bounds.
+
 | Param | Type | Description |
 |-------|------|-------------|
 | `payer` | `Address` | Must sign. |
@@ -411,3 +413,53 @@ Errors: `InvalidAmount` (missing), `InvoiceExpired` (stale)
 Convert an amount between currencies. Returns the same amount if `from == to`. Uses `get_price` internally, so it inherits staleness checks.
 
 Errors: `InvalidAmount`, `InvoiceExpired`, `ArithmeticOverflow`
+
+---
+
+## Error Code Reference
+
+All `KoraError` variants are `#[repr(u32)]`. The numeric values are stable on-chain and must not be changed without a documented migration.
+
+| Code | Variant | Description |
+|------|---------|-------------|
+| 1 | `Unauthorized` | Caller lacks permission for this action |
+| 2 | `NotAdmin` | Caller is not the protocol admin |
+| 3 | `NotVerifier` | Caller is not a whitelisted verifier |
+| 4 | `ProtocolPaused` | Operation blocked while protocol is paused |
+| 5 | `AlreadyPaused` | Protocol is already in paused state |
+| 6 | `NotPaused` | Protocol is not currently paused |
+| 7 | `RoleNotAssigned` | No role is assigned to the given address |
+| 10 | `InvoiceNotFound` | Invoice ID does not exist |
+| 11 | `InvoiceAlreadyExists` | Invoice ID is already in use |
+| 12 | `InvalidInvoiceStatus` | Invoice is in the wrong state for this transition |
+| 13 | `InvoiceExpired` | Invoice due date has passed |
+| 14 | `InvalidAmount` | Amount is zero, negative, or out of range |
+| 15 | `InvalidDueDate` | Due date is not strictly in the future |
+| 16 | `InvalidRiskScore` | Risk score is outside the 0–100 range |
+| 20 | `ListingNotFound` | Listing for the given invoice ID does not exist |
+| 21 | `ListingAlreadyCancelled` | Listing has already been cancelled |
+| 22 | `ListingExpired` | Listing funding deadline has passed |
+| 23 | `FundingDeadlinePassed` | Funding deadline has elapsed |
+| 24 | `InsufficientFunds` | Caller does not have enough balance |
+| 25 | `ExceedsFundingTarget` | Contribution would exceed the asking price |
+| 26 | `AlreadyFullyFunded` | Invoice has already reached its funding target |
+| 30 | `PoolNotFound` | Financing pool for the given invoice ID does not exist |
+| 31 | `PoolAlreadyClosed` | Pool has already been closed (repaid or defaulted) |
+| 32 | `RepaymentAlreadyMade` | A repayment is already in progress (reentrancy lock) |
+| 33 | `InsufficientPoolBalance` | Pool balance is too low for the requested withdrawal |
+| 40 | `InvalidFeeRate` | Fee rate exceeds 10 000 bps or violates range constraint |
+| 41 | `WithdrawalFailed` | Token transfer during withdrawal failed |
+| 42 | `TokenNotWhitelisted` | Token is not on the treasury whitelist |
+| 50 | `SMENotRegistered` | SME address has not been registered in the risk registry |
+| 51 | `DebtorNotRegistered` | Debtor hash has no recorded score |
+| 52 | `RiskScoreOutOfRange` | Score is outside 0–100 |
+| 90 | `ArithmeticOverflow` | A checked arithmetic operation overflowed |
+| 91 | `ArithmeticUnderflow` | A checked subtraction produced a negative result |
+| 92 | `InvalidAddress` | Address is self-referential or must be distinct from another |
+| 93 | `EmptyString` | A required string field is empty |
+| 94 | `AlreadyInitialized` | Contract has already been initialized |
+| 96 | `NotInitialized` | Contract has not been initialized yet |
+| 97 | `EmptyBytes` | A required bytes field is empty |
+| 98 | `Reentrancy` | Reentrancy guard triggered — concurrent call detected |
+| 100 | `NoUpgradeProposed` | No upgrade has been proposed |
+| 101 | `UpgradeTimelockNotElapsed` | Upgrade timelock period has not yet elapsed |

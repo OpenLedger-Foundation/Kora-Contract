@@ -203,6 +203,49 @@ invoice_nft.set_defaulted()
 
 ---
 
+## Cross-Contract Authorization Matrix
+
+The following table documents **every cross-contract method call** in the protocol, along with the required authorization (if any).
+
+| Calling Contract | Called Contract | Method | Function Context | Authorization Required |
+|---|---|---|---|---|
+| **marketplace** | invoice_nft | `set_listed()` | `list_invoice()` | marketplace contract address |
+| **marketplace** | financing_pool | `release_funds()` | `fund_invoice()` (when fully funded) | marketplace contract address |
+| **marketplace** | access_control | `is_paused()` | `require_not_paused()` helper | None (read-only check) |
+| **marketplace** | token (Stellar) | `decimals()` | `fund_invoice()` fee calculation | None (read-only) |
+| **marketplace** | token (Stellar) | `transfer()` | `fund_invoice()` (fee to treasury) | investor address (via require_auth call in fund_invoice) |
+| **marketplace** | token (Stellar) | `transfer()` | `fund_invoice()` (net to pool) | investor address (via require_auth call in fund_invoice) |
+| **marketplace** | token (Stellar) | `transfer()` | `claim_refund()` (refund from pool) | pool contract address (via cross-call from marketplace) |
+| **financing_pool** | invoice_nft | `get_invoice()` | `release_funds()` | None (read-only query) |
+| **financing_pool** | invoice_nft | `set_funded()` | `release_funds()` | pool contract address |
+| **financing_pool** | invoice_nft | `get_invoice()` | `repay()` (invoice lookup) | None (read-only query) |
+| **financing_pool** | invoice_nft | `set_repaid()` | `repay()` (on full settlement) | pool contract address |
+| **financing_pool** | invoice_nft | `set_defaulted()` | `mark_default()` | admin address |
+| **financing_pool** | invoice_nft | `get_invoice()` | `mark_default()` (state check) | None (read-only query) |
+| **financing_pool** | access_control | `is_paused()` | `require_not_paused()` helper | None (read-only check) |
+| **financing_pool** | risk_registry | `record_default()` | `mark_default()` (best-effort, may fail silently) | admin address |
+| **financing_pool** | price_oracle | `convert()` | `convert_if_needed()` (currency conversion) | None (oracle query) |
+| **financing_pool** | token (Stellar) | `transfer()` | `repay()` (receive repayment) | payer address (via require_auth call in repay) |
+| **financing_pool** | token (Stellar) | `decimals()` | `distribute_yield()` (fee decimals) | None (read-only) |
+| **financing_pool** | token (Stellar) | `transfer()` | `distribute_yield()` (payout to investors) | pool contract address |
+| **invoice_nft** | access_control | `is_paused()` | `require_not_paused()` helper | None (read-only check) |
+| **treasury** | token (Stellar) | `balance()` | `withdraw()` | None (read-only query) |
+| **treasury** | token (Stellar) | `transfer()` | `withdraw()` (admin withdrawal) | admin address (via require_auth call in withdraw) |
+| **treasury** | token (Stellar) | `balance()` | `emergency_withdraw()` | None (read-only query) |
+| **treasury** | token (Stellar) | `transfer()` | `emergency_withdraw()` (admin drain) | admin address (via require_auth call in emergency_withdraw) |
+
+**Key Observations:**
+
+1. **Authorization flows downward:** When a user calls a function on Contract A, if Contract A then calls Contract B, the user's authorization transfers via `env.current_contract_address()`.
+2. **Read-only calls require no auth:** Queries like `get_invoice()`, `is_paused()`, `decimals()`, `balance()`, `convert()` perform no authorization check.
+3. **State-mutating calls are guarded:** Every method that writes storage checks authorization before proceeding.
+4. **Token transfers follow the Stellar standard:** Only the sender (`payer`) can call `require_auth()`; transfers to/from the contract use the contract's address.
+5. **Pause is read-only:** `is_paused()` is a query; contracts check it at entry, but it does not authorize state changes.
+
+See [SECURITY.md § Cross-Contract Authorization](SECURITY.md#cross-contract-authorization) for threat model and validation approach.
+
+---
+
 ## Storage Layout
 
 All contracts use Soroban's three storage tiers:

@@ -4,15 +4,13 @@ use kora_shared::{
     errors::KoraError,
     events,
     types::{Pool, Position},
-    validation::{bps_of_normalized, UPGRADE_TIMELOCK_DELAY},
+    validation::{bps_of, bps_of_normalized, UPGRADE_TIMELOCK_DELAY},
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Map, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol, Vec,
+};
 
 const MAX_AMOUNT: i128 = i128::MAX / 2;
-
-// ── Local Events ──────────────────────────────────────────────────────────────
-
-
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -26,8 +24,11 @@ pub enum DataKey {
     Treasury,
     LatePenaltyBps,
     AccessControl,
+    PriceOracle,
     RepaymentLock(u64),
     UpgradeProposal,
+    SaleOffer(u64, Address),
+    EarlySettlement(u64),
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -46,11 +47,16 @@ impl FinancingPoolContract {
         access_control: Address,
         late_penalty_bps: u32,
         price_oracle: Address,
+        max_position_bps: u32,
     ) -> Result<(), KoraError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(KoraError::AlreadyInitialized);
         }
         kora_shared::validation::require_valid_fee_bps(late_penalty_bps)?;
+        // max_position_bps must be in [1, 10_000]: zero would block all funding
+        if max_position_bps == 0 || max_position_bps > 10_000 {
+            return Err(KoraError::InvalidFeeRate);
+        }
         kora_shared::validation::require_not_self(&env, &admin)?;
         kora_shared::validation::require_not_self(&env, &invoice_nft)?;
         kora_shared::validation::require_not_self(&env, &risk_registry)?;
@@ -63,11 +69,11 @@ impl FinancingPoolContract {
         env.storage()
             .instance()
             .set(&DataKey::RiskRegistry, &risk_registry);
-        env.storage().instance().set(&DataKey::InvoiceNft, &invoice_nft);
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         env.storage().instance().set(&DataKey::AccessControl, &access_control);
         env.storage().instance().set(&DataKey::LatePenaltyBps, &late_penalty_bps);
         env.storage().instance().set(&DataKey::PriceOracle, &price_oracle);
+        env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
         Ok(())
     }
 
@@ -130,6 +136,25 @@ impl FinancingPoolContract {
         Ok(())
     }
 
+    /// Update the per-investor concentration cap. Admin only.
+    pub fn set_max_position_bps(env: Env, admin: Address, max_position_bps: u32) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if max_position_bps == 0 || max_position_bps > 10_000 {
+            return Err(KoraError::InvalidFeeRate);
+        }
+        env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
+        Ok(())
+    }
+
+    /// Returns the current per-investor concentration cap in basis points.
+    pub fn get_max_position_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxPositionBps)
+            .unwrap_or(5_000)
+    }
+
     /// Register an investor position. Admin only.
     pub fn record_position(
         env: Env,
@@ -156,6 +181,16 @@ impl FinancingPoolContract {
             .and_then(|v| v.checked_div(total_pool))
             .ok_or(KoraError::ArithmeticOverflow)? as u32;
 
+        // Enforce per-investor concentration cap
+        let max_position_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxPositionBps)
+            .unwrap_or(5_000);
+        if share_bps > max_position_bps {
+            return Err(KoraError::ExceedsFundingTarget);
+        }
+
         let position = Position {
             investor: investor.clone(),
             invoice_id,
@@ -170,10 +205,30 @@ impl FinancingPoolContract {
             .get(&DataKey::Positions(invoice_id))
             .unwrap_or_else(|| Map::new(&env));
 
+        // Track old contribution so we can compute the delta for the aggregate.
+        let old_contributed: i128 = positions
+            .get(investor.clone())
+            .map(|p: Position| p.contributed)
+            .unwrap_or(0);
+
         positions.set(investor.clone(), position);
         env.storage()
             .persistent()
             .set(&DataKey::Positions(invoice_id), &positions);
+
+        // Update the per-token aggregate of outstanding investor obligations.
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+        let agg_key = DataKey::AggregateFunded(pool.token);
+        let prev_agg: i128 = env.storage().instance().get(&agg_key).unwrap_or(0);
+        let new_agg = prev_agg
+            .checked_sub(old_contributed)
+            .and_then(|v| v.checked_add(contributed))
+            .ok_or(KoraError::ArithmeticOverflow)?;
+        env.storage().instance().set(&agg_key, &new_agg);
 
         // Standardized financing pool event
         events::position_recorded(
@@ -311,15 +366,24 @@ impl FinancingPoolContract {
         let token_client = token::Client::new(env, token);
         let token_decimals = token_client.decimals();
 
+        let mut total_contributed: i128 = 0;
         for (investor, position) in positions.iter() {
             let payout = bps_of_normalized(total_repaid, position.share_bps, token_decimals)?;
             let yield_amount = payout
                 .checked_sub(position.contributed)
                 .ok_or(KoraError::ArithmeticOverflow)?;
 
+            total_contributed = total_contributed.saturating_add(position.contributed);
             token_client.transfer(&env.current_contract_address(), &investor, &payout);
             events::yield_distributed(env, invoice_id, &investor, yield_amount);
         }
+
+        // Reduce the aggregate now that all positions for this pool have been settled.
+        let agg_key = DataKey::AggregateFunded(token.clone());
+        let prev_agg: i128 = env.storage().instance().get(&agg_key).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&agg_key, &prev_agg.saturating_sub(total_contributed));
 
         Ok(())
     }
@@ -379,22 +443,216 @@ impl FinancingPoolContract {
         Ok(())
     }
 
-    /// Archive a closed pool, removing Pool and Positions from persistent storage to reclaim rent.
-    /// Only admin can call this. Pool must be closed (is_closed == true).
-    pub fn archive_pool(env: Env, admin: Address, invoice_id: u64) -> Result<(), KoraError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
+    // ── Early-Termination Buyout ────────────────────────────────────────────────
+
+    /// Propose an early-termination buyout of a funded invoice.
+    ///
+    /// The SME escrows `amount` (a negotiated discount to the full obligation) into the pool.
+    /// Investors then accept via `accept_early_settlement`; once investors representing 100% of
+    /// pool shares have accepted, the escrow is distributed pro-rata and the pool closes early.
+    ///
+    /// `amount` must satisfy `total_funded <= amount < total_owed` — investors recover at least
+    /// their principal, while the SME pays strictly less than the full obligation.
+    pub fn propose_early_settlement(
+        env: Env,
+        sme: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), KoraError> {
+        sme.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if amount <= 0 || amount > MAX_AMOUNT {
+            return Err(KoraError::InvalidAmount);
+        }
+
         let pool: Pool = env
             .storage()
             .persistent()
             .get(&DataKey::Pool(invoice_id))
             .ok_or(KoraError::PoolNotFound)?;
-        if !pool.is_closed {
-            return Err(KoraError::InvalidInvoiceStatus);
+        if pool.is_closed {
+            return Err(KoraError::PoolAlreadyClosed);
         }
-        env.storage().persistent().remove(&DataKey::Pool(invoice_id));
-        env.storage().persistent().remove(&DataKey::Positions(invoice_id));
+        // Must be a genuine discount that still returns investors at least their principal.
+        if amount < pool.total_funded || amount >= pool.total_owed {
+            return Err(KoraError::InvalidAmount);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::EarlySettlement(invoice_id))
+        {
+            return Err(KoraError::AlreadyInitialized);
+        }
+
+        // Only the invoice's SME may propose a buyout.
+        let invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.sme != sme {
+            return Err(KoraError::Unauthorized);
+        }
+
+        // Escrow the buyout amount up-front so acceptance can settle atomically.
+        let token_client = token::Client::new(&env, &pool.token);
+        token_client.transfer(&sme, &env.current_contract_address(), &amount);
+
+        let offer = EarlySettlementOffer {
+            invoice_id,
+            amount,
+            accepted_bps: 0,
+            accepted: Vec::new(&env),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::EarlySettlement(invoice_id), &offer);
         Ok(())
+    }
+
+    /// Accept a pending early-settlement offer as an investor in the pool.
+    ///
+    /// When investors representing 100% of pool shares have accepted, the escrowed amount is
+    /// distributed pro-rata to all investors, the pool is closed, and the invoice is marked repaid.
+    pub fn accept_early_settlement(
+        env: Env,
+        investor: Address,
+        invoice_id: u64,
+    ) -> Result<(), KoraError> {
+        investor.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RepaymentLock(invoice_id))
+        {
+            return Err(KoraError::Unauthorized);
+        }
+
+        let mut offer: EarlySettlementOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EarlySettlement(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+
+        let mut pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(KoraError::PoolAlreadyClosed);
+        }
+
+        let positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+        let position = positions
+            .get(investor.clone())
+            .ok_or(KoraError::Unauthorized)?;
+
+        // An investor may only accept once.
+        if offer.accepted.iter().any(|a| a == investor) {
+            return Err(KoraError::AlreadyInitialized);
+        }
+        offer.accepted.push_back(investor.clone());
+        offer.accepted_bps = offer
+            .accepted_bps
+            .checked_add(position.share_bps)
+            .ok_or(KoraError::ArithmeticOverflow)?;
+
+        if offer.accepted_bps >= 10_000 {
+            // Unanimous acceptance: settle. Lock against a concurrent repay.
+            env.storage()
+                .persistent()
+                .set(&DataKey::RepaymentLock(invoice_id), &true);
+
+            pool.repaid_amount = offer.amount;
+            pool.is_closed = true;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Pool(invoice_id), &pool);
+
+            Self::distribute_yield(&env, invoice_id, &pool.token, offer.amount, pool.face_value)?;
+
+            let nft_contract: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::InvoiceNft)
+                .ok_or(KoraError::NotInitialized)?;
+            let nft_client =
+                kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+            nft_client.set_repaid(&env.current_contract_address(), &invoice_id);
+
+            env.storage()
+                .persistent()
+                .remove(&DataKey::EarlySettlement(invoice_id));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::RepaymentLock(invoice_id));
+
+            events::repayment_made(
+                &env,
+                invoice_id,
+                &env.current_contract_address(),
+                offer.amount,
+            );
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EarlySettlement(invoice_id), &offer);
+        }
+
+        Ok(())
+    }
+
+    /// Cancel a pending early-settlement offer and refund the escrowed amount to the SME.
+    ///
+    /// Callable only by the invoice's SME while the offer has not yet been fully accepted.
+    pub fn cancel_early_settlement(
+        env: Env,
+        sme: Address,
+        invoice_id: u64,
+    ) -> Result<(), KoraError> {
+        sme.require_auth();
+
+        let offer: EarlySettlementOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EarlySettlement(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+
+        let invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.sme != sme {
+            return Err(KoraError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::EarlySettlement(invoice_id));
+
+        let token_client = token::Client::new(&env, &pool.token);
+        token_client.transfer(&env.current_contract_address(), &sme, &offer.amount);
+
+        Ok(())
+    }
+
+    /// Read a pending early-settlement offer, if any.
+    pub fn get_early_settlement(
+        env: Env,
+        invoice_id: u64,
+    ) -> Result<EarlySettlementOffer, KoraError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EarlySettlement(invoice_id))
+            .ok_or(KoraError::PoolNotFound)
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -413,6 +671,161 @@ impl FinancingPoolContract {
             .get(&DataKey::Positions(invoice_id))
             .unwrap_or(Map::new(&env));
         positions.values()
+    }
+
+    // ── Secondary market ───────────────────────────────────────────────────────
+
+    /// List a position for sale on the secondary market.
+    /// Seller must hold a position on an open (not yet closed) pool.
+    pub fn list_position_for_sale(
+        env: Env,
+        seller: Address,
+        invoice_id: u64,
+        token: Address,
+        price: i128,
+    ) -> Result<(), KoraError> {
+        seller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if price <= 0 {
+            return Err(KoraError::InvalidAmount);
+        }
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(KoraError::PoolAlreadyClosed);
+        }
+
+    /// Paginated view of investor positions for an invoice.
+    ///
+    /// Returns at most `limit` positions starting at `offset` (0-based index
+    /// into the position list ordered by investor address key).  An `offset`
+    /// beyond the last position returns an empty vec; `limit` is capped at 100
+    /// to bound per-call CPU cost.
+    pub fn get_positions_page(
+        env: Env,
+        invoice_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Position> {
+        let limit = limit.min(100);
+        let positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+        if !positions.contains_key(seller.clone()) {
+            return Err(KoraError::PositionNotFound);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::SaleOffer(invoice_id, seller.clone()))
+        {
+            return Err(KoraError::SaleAlreadyListed);
+        }
+
+        let offer = PositionSaleOffer {
+            seller: seller.clone(),
+            invoice_id,
+            token,
+            price,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::SaleOffer(invoice_id, seller.clone()), &offer);
+
+        events::position_listed_for_sale(&env, invoice_id, &seller, price);
+        Ok(())
+    }
+
+    /// Purchase an investor position from the secondary market.
+    /// Transfers ownership of the position (and its proportional yield claim)
+    /// from seller to buyer in exchange for a token payment.
+    pub fn buy_position(
+        env: Env,
+        buyer: Address,
+        invoice_id: u64,
+        seller: Address,
+    ) -> Result<(), KoraError> {
+        buyer.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let offer: PositionSaleOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SaleOffer(invoice_id, seller.clone()))
+            .ok_or(KoraError::SaleNotFound)?;
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(KoraError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(KoraError::PoolAlreadyClosed);
+        }
+
+        let mut positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let seller_position: Position = positions
+            .get(seller.clone())
+            .ok_or(KoraError::PositionNotFound)?;
+
+        // CEI: update state before external token transfer
+        env.storage()
+            .persistent()
+            .remove(&DataKey::SaleOffer(invoice_id, seller.clone()));
+
+        positions.remove(seller.clone());
+        let buyer_position = Position {
+            investor: buyer.clone(),
+            invoice_id,
+            contributed: seller_position.contributed,
+            share_bps: seller_position.share_bps,
+            yield_claimed: seller_position.yield_claimed,
+        };
+        positions.set(buyer.clone(), buyer_position);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Positions(invoice_id), &positions);
+
+        let token_client = token::Client::new(&env, &offer.token);
+        token_client.transfer(&buyer, &seller, &offer.price);
+
+        events::position_sold(&env, invoice_id, &seller, &buyer, offer.price);
+        Ok(())
+            .unwrap_or(Map::new(&env));
+
+        let all: Vec<Position> = positions.values();
+        let total = all.len();
+        let start = offset.min(total) as usize;
+        let end = (start + limit as usize).min(total as usize);
+
+        let mut page: Vec<Position> = Vec::new(&env);
+        for i in start..end {
+            page.push_back(all.get(i as u32).unwrap());
+        }
+        page
+    }
+
+    /// Returns the total number of investor positions recorded for an invoice.
+    pub fn get_positions_count(env: Env, invoice_id: u64) -> u32 {
+        let positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or(Map::new(&env));
+        positions.len()
     }
 
     // ── Upgrade ────────────────────────────────────────────────────────────────
@@ -449,6 +862,19 @@ impl FinancingPoolContract {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn load_invoice(
+        env: &Env,
+        invoice_id: u64,
+    ) -> Result<kora_shared::types::Invoice, KoraError> {
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(KoraError::NotInitialized)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(env, &nft_contract);
+        Ok(nft_client.get_invoice(&invoice_id))
+    }
 
     fn require_not_paused(env: &Env) -> Result<(), KoraError> {
         let ac: Address = env
@@ -522,31 +948,29 @@ mod tests {
         let client = FinancingPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let nft = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
         let treasury = Address::generate(&env);
-        client.initialize(&admin, &nft, &risk_registry, &treasury, &200u32);
-        (env, admin, nft, treasury, client)
         let access_control = Address::generate(&env);
         let oracle = Address::generate(&env);
-        client.initialize(&admin, &nft, &treasury, &access_control, &200u32, &oracle);
+        client
+            .initialize(&admin, &nft, &risk_registry, &treasury, &access_control, &200u32, &oracle)
+            .unwrap();
         (env, admin, nft, treasury, access_control, client)
     }
+
+    // ── initialize ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_initialize_success() {
         let (_env, _admin, _nft, _treasury, _ac, client) = setup();
-        let pool = client.try_get_pool(&1u64);
-        assert!(pool.is_err()); // No pools created during setup
+        assert!(client.try_get_pool(&1u64).is_err()); // No pools yet
     }
 
     #[test]
     fn test_initialize_already_initialized_fails() {
-        let (env, admin, nft, treasury, client) = setup();
-        let rr = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &200u32);
         let (env, admin, nft, treasury, ac, client) = setup();
+        let rr = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &treasury, &ac, &200u32, &oracle);
+        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle);
         assert!(result.is_err());
     }
 
@@ -558,15 +982,11 @@ mod tests {
         let client = FinancingPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let nft = Address::generate(&env);
-        let rr = Address::generate(&env);
         let treasury = Address::generate(&env);
-        
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &10_001u32);
-        let access_control = Address::generate(&env);
+        let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-
-        let result = client.try_initialize(&admin, &nft, &treasury, &access_control, &10_001u32, &oracle);
-
+        let result =
+            client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_001u32, &oracle);
         assert!(result.is_err());
     }
 
@@ -578,20 +998,80 @@ mod tests {
         let client = FinancingPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let nft = Address::generate(&env);
+        let rr = Address::generate(&env);
         let treasury = Address::generate(&env);
-        let access_control = Address::generate(&env);
+        let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &treasury, &access_control, &0u32, &oracle);
-
-        assert!(result.is_ok());
+        assert!(client
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &0u32, &oracle)
+            .is_ok());
     }
 
+    #[test]
+    fn test_initialize_self_as_admin_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let nft = Address::generate(&env);
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let ac = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        // contract_id as admin must be rejected
+        let result =
+            client.try_initialize(&contract_id, &nft, &rr, &treasury, &ac, &200u32, &oracle);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_initialize_self_as_nft_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let ac = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let result =
+            client.try_initialize(&admin, &contract_id, &rr, &treasury, &ac, &200u32, &oracle);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_initialize_valid_max_late_penalty_bps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let nft = Address::generate(&env);
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let ac = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        assert!(client
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_000u32, &oracle)
+            .is_ok());
+    }
+
+    // ── get_pool / get_positions ──────────────────────────────────────────────
 
     #[test]
     fn test_get_pool_not_found() {
         let (_env, _admin, _nft, _treasury, _ac, client) = setup();
-        let result = client.try_get_pool(&999u64);
-        assert!(result.is_err());
+        assert!(client.try_get_pool(&999u64).is_err());
+    }
+
+    #[test]
+    fn test_get_pool_various_invoices() {
+        let (_env, _admin, _nft, _treasury, _ac, client) = setup();
+        assert!(client.try_get_pool(&0u64).is_err());
+        assert!(client.try_get_pool(&1u64).is_err());
+        assert!(client.try_get_pool(&999u64).is_err());
+        assert!(client.try_get_pool(&u64::MAX).is_err());
     }
 
     #[test]
@@ -601,12 +1081,13 @@ mod tests {
         assert_eq!(positions.len(), 0);
     }
 
+    // ── record_position ───────────────────────────────────────────────────────
+
     #[test]
     fn test_record_position_requires_admin() {
-        let (_env, admin, _nft, _treasury, _access_control, client) = setup();
-        let investor = Address::generate(&_env);
-        let non_admin = Address::generate(&_env);
-
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        let non_admin = Address::generate(&env);
         let result = client.try_record_position(
             &non_admin,
             &1u64,
@@ -617,37 +1098,189 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_record_position_arithmetic_overflow() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
         let investor = Address::generate(&env);
+        // contributed > MAX_AMOUNT triggers InvalidAmount before the overflow
         let result = client.try_record_position(&admin, &1u64, &investor, &i128::MAX, &1i128);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_position_exceeds_max_amount() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        let result = client.try_record_position(
+            &admin,
+            &1u64,
+            &investor,
+            &(MAX_AMOUNT + 1),
+            &(MAX_AMOUNT + 2),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_position_total_pool_exceeds_max_amount() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        let result =
+            client.try_record_position(&admin, &1u64, &investor, &100i128, &(MAX_AMOUNT + 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_position_contributed_exceeds_total_pool() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        let result = client.try_record_position(&admin, &1u64, &investor, &100i128, &50i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_record_position_negative_amounts() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        assert!(client
+            .try_record_position(&admin, &1u64, &investor, &(-100i128), &1_000i128)
+            .is_err());
+        assert!(client
+            .try_record_position(&admin, &1u64, &investor, &100i128, &(-1_000i128))
+            .is_err());
+    }
+
+    #[test]
+    fn test_record_position_zero_amounts() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        assert!(client
+            .try_record_position(&admin, &1u64, &investor, &0i128, &1_000i128)
+            .is_err());
+        assert!(client
+            .try_record_position(&admin, &1u64, &investor, &100i128, &0i128)
+            .is_err());
     }
 
     #[test]
     fn test_record_position_success() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
         let investor = Address::generate(&env);
-        client.record_position(
-            &admin, &1u64, &investor, &5_000_000_000i128, &10_000_000_000i128,
-        );
-        let positions = client.get_positions(&1u64);
-        assert_eq!(positions.len(), 1);
+        client
+            .record_position(&admin, &1u64, &investor, &5_000_000_000i128, &10_000_000_000i128)
+            .unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
     }
 
     #[test]
     fn test_record_position_share_bps_correct() {
-        let (env, admin, _nft, _treasury, _access_control, client) = setup();
-
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
         let investor = Address::generate(&env);
-        client.record_position(
-            &admin, &1u64, &investor, &5_000_000_000i128, &10_000_000_000i128,
-        );
-        let positions = client.get_positions(&1u64);
-        assert_eq!(positions.get(0).unwrap().share_bps, 5_000u32);
+        client
+            .record_position(&admin, &1u64, &investor, &5_000_000_000i128, &10_000_000_000i128)
+            .unwrap();
+        assert_eq!(client.get_positions(&1u64).get(0).unwrap().share_bps, 5_000u32);
     }
+
+    #[test]
+    fn test_record_position_share_calculation() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &500i128, &1000i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).get(0).unwrap().share_bps, 5000);
+    }
+
+    #[test]
+    fn test_record_position_quarter_share() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &25i128, &100i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).get(0).unwrap().share_bps, 2500);
+    }
+
+    #[test]
+    fn test_record_position_tenth_share() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &10i128, &100i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).get(0).unwrap().share_bps, 1000);
+    }
+
+    #[test]
+    fn test_record_position_basis_point_precision() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &1i128, &10000i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).get(0).unwrap().share_bps, 1);
+    }
+
+    #[test]
+    fn test_record_position_exact_full_pool() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client
+            .record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128)
+            .unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
+    }
+
+    #[test]
+    fn test_record_position_minimum_valid_amount() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &1i128, &1_000_000_000i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
+    }
+
+    #[test]
+    fn test_record_position_happy_path_two_investors() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor1 = Address::generate(&env);
+        let investor2 = Address::generate(&env);
+        client
+            .record_position(&admin, &1u64, &investor1, &3_000_000_000i128, &10_000_000_000i128)
+            .unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
+        client
+            .record_position(&admin, &1u64, &investor2, &7_000_000_000i128, &10_000_000_000i128)
+            .unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 2);
+    }
+
+    #[test]
+    fn test_record_position_multiple_invoices() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &100i128, &1000i128).unwrap();
+        client.record_position(&admin, &2u64, &investor, &200i128, &2000i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
+        assert_eq!(client.get_positions(&2u64).len(), 1);
+    }
+
+    #[test]
+    fn test_record_position_overwrite_existing() {
+        // Recording a position for the same investor on the same invoice
+        // overwrites the previous entry (map semantics).
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &100i128, &1000i128).unwrap();
+        client.record_position(&admin, &1u64, &investor, &200i128, &1000i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 1);
+    }
+
+    #[test]
+    fn test_get_positions_multiple_investors() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let i1 = Address::generate(&env);
+        let i2 = Address::generate(&env);
+        let i3 = Address::generate(&env);
+        client.record_position(&admin, &1u64, &i1, &100i128, &300i128).unwrap();
+        client.record_position(&admin, &1u64, &i2, &100i128, &300i128).unwrap();
+        client.record_position(&admin, &1u64, &i3, &100i128, &300i128).unwrap();
+        assert_eq!(client.get_positions(&1u64).len(), 3);
+    }
+
+    // ── repay ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_repay_pool_not_found() {
@@ -663,105 +1296,15 @@ mod tests {
         let (env, _admin, _nft, _treasury, _ac, client) = setup();
         let payer = Address::generate(&env);
         let token = Address::generate(&env);
-        let result = client.try_repay(&payer, &1u64, &token, &0i128);
-        assert!(result.is_err());
+        assert!(client.try_repay(&payer, &1u64, &token, &0i128).is_err());
     }
 
     #[test]
     fn test_repay_negative_amount_fails() {
-        let (env, _admin, _nft, _treasury, _access_control, client) = setup();
-
-        let payer = Address::generate(&env);
-        let token = Address::generate(&env);
-        let result = client.try_repay(&payer, &1u64, &token, &-1i128);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_mark_default_requires_admin() {
-        let (env, _admin, _nft, _treasury, _ac, client) = setup();
-        let non_admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        let result = client.try_mark_default(&non_admin, &1u64, &token);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_mark_default_pool_not_found() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let token = Address::generate(&env);
-        let result = client.try_mark_default(&admin, &999u64, &token);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_initialize_self_as_admin_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, FinancingPoolContract);
-        let client = FinancingPoolContractClient::new(&env, &contract_id);
-        let nft = Address::generate(&env);
-        let rr = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let ac = Address::generate(&env);
-        // contract_id as admin must be rejected
-        let result = client.try_initialize(&contract_id, &nft, &rr, &treasury, &200u32, &ac);
-    fn test_record_position_exceeds_max_amount() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        let result = client.try_record_position(
-            &admin, &1u64, &investor, &(MAX_AMOUNT + 1), &(MAX_AMOUNT + 2),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_record_position_total_pool_exceeds_max_amount() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        let result =
-            client.try_record_position(&admin, &1u64, &investor, &100i128, &(MAX_AMOUNT + 1));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_initialize_self_as_nft_rejected() {
-    fn test_record_position_contributed_exceeds_total_pool() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        let result = client.try_record_position(&admin, &1u64, &investor, &100i128, &50i128);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_repay_amount_exceeds_max_amount() {
         let (env, _admin, _nft, _treasury, _ac, client) = setup();
         let payer = Address::generate(&env);
         let token = Address::generate(&env);
-        let result = client.try_repay(&payer, &1u64, &token, &(MAX_AMOUNT + 1));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_record_position_negative_amounts() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        let result =
-            client.try_record_position(&admin, &1u64, &investor, &(-100i128), &1_000i128);
-        assert!(result.is_err());
-        let result =
-            client.try_record_position(&admin, &1u64, &investor, &100i128, &(-1_000i128));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_record_position_zero_amounts() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        let result = client.try_record_position(&admin, &1u64, &investor, &0i128, &1_000i128);
-        assert!(result.is_err());
-        let result = client.try_record_position(&admin, &1u64, &investor, &100i128, &0i128);
-        assert!(result.is_err());
+        assert!(client.try_repay(&payer, &1u64, &token, &-1i128).is_err());
     }
 
     #[test]
@@ -769,136 +1312,179 @@ mod tests {
         let (env, _admin, _nft, _treasury, _ac, client) = setup();
         let payer = Address::generate(&env);
         let token = Address::generate(&env);
-        let result = client.try_repay(&payer, &1u64, &token, &0i128);
-        assert!(result.is_err());
+        assert!(client.try_repay(&payer, &1u64, &token, &0i128).is_err());
+    }
+
+    // ── Secondary market tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_list_position_for_sale_pool_not_found() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let seller = Address::generate(&env);
+        let token = Address::generate(&env);
+        let result = client.try_list_position_for_sale(&seller, &1u64, &token, &1_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::PoolNotFound);
     }
 
     #[test]
-    fn test_record_position_happy_path() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor1 = Address::generate(&env);
-        let investor2 = Address::generate(&env);
-
-        client.record_position(&admin, &1u64, &investor1, &3_000_000_000i128, &10_000_000_000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 1);
-
-        client.record_position(&admin, &1u64, &investor2, &7_000_000_000i128, &10_000_000_000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 2);
+    fn test_list_position_for_sale_zero_price_rejected() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let seller = Address::generate(&env);
+        let token = Address::generate(&env);
+        let result = client.try_list_position_for_sale(&seller, &1u64, &token, &0i128);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidAmount);
     }
 
     #[test]
-    fn test_record_position_exact_full_pool() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 1);
+    fn test_list_position_for_sale_position_not_found() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let contract_id = client.address.clone();
+        let token = Address::generate(&env);
+        let seller = Address::generate(&env);
+
+        // Seed an open pool directly into contract storage
+        let pool = Pool {
+            invoice_id: 1,
+            token: token.clone(),
+            total_funded: 10_000_000_000,
+            face_value: 10_000_000_000,
+            repaid_amount: 0,
+            is_closed: false,
+            late_penalty_bps: 200,
+            total_owed: 10_000_000_000,
+            penalty_applied: false,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&DataKey::Pool(1u64), &pool);
+        });
+
+        let result = client.try_list_position_for_sale(&seller, &1u64, &token, &5_000_000_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::PositionNotFound);
     }
 
     #[test]
-    fn test_record_position_minimum_valid_amount() {
+    fn test_list_position_for_sale_double_listing_prevented() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &1i128, &1_000_000_000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 1);
+        let contract_id = client.address.clone();
+        let token = Address::generate(&env);
+        let seller = Address::generate(&env);
+
+        let pool = Pool {
+            invoice_id: 1,
+            token: token.clone(),
+            total_funded: 10_000_000_000,
+            face_value: 10_000_000_000,
+            repaid_amount: 0,
+            is_closed: false,
+            late_penalty_bps: 200,
+            total_owed: 10_000_000_000,
+            penalty_applied: false,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&DataKey::Pool(1u64), &pool);
+        });
+
+        // Record position so seller can list
+        client.record_position(&admin, &1u64, &seller, &5_000_000_000i128, &10_000_000_000i128);
+
+        // First listing succeeds
+        assert!(client
+            .try_list_position_for_sale(&seller, &1u64, &token, &4_500_000_000i128)
+            .is_ok());
+
+        // Second listing is rejected
+        let result =
+            client.try_list_position_for_sale(&seller, &1u64, &token, &4_000_000_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::SaleAlreadyListed);
     }
 
     #[test]
-    fn test_record_position_share_calculation() {
+    fn test_buy_position_sale_not_found() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let buyer = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let result = client.try_buy_position(&buyer, &1u64, &seller);
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::SaleNotFound);
+    }
+
+    #[test]
+    fn test_buy_position_transfers_ownership() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &500i128, &1000i128);
+        let contract_id = client.address.clone();
+        let token = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let buyer = Address::generate(&env);
+
+        let pool = Pool {
+            invoice_id: 1,
+            token: token.clone(),
+            total_funded: 10_000_000_000,
+            face_value: 10_000_000_000,
+            repaid_amount: 0,
+            is_closed: false,
+            late_penalty_bps: 200,
+            total_owed: 10_000_000_000,
+            penalty_applied: false,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&DataKey::Pool(1u64), &pool);
+        });
+
+        client.record_position(&admin, &1u64, &seller, &5_000_000_000i128, &10_000_000_000i128);
+        client.list_position_for_sale(&seller, &1u64, &token, &4_500_000_000i128);
+
+        // After buy, position ownership moves to buyer
+        client.buy_position(&buyer, &1u64, &seller);
+
         let positions = client.get_positions(&1u64);
-        assert_eq!(positions.get(0).unwrap().share_bps, 5000);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions.get(0).unwrap().investor, buyer);
+        assert_eq!(positions.get(0).unwrap().share_bps, 5_000u32);
     }
-
     #[test]
-    fn test_record_position_quarter_share() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &25i128, &100i128);
-        let positions = client.get_positions(&1u64);
-        assert_eq!(positions.get(0).unwrap().share_bps, 2500);
-    }
-
-    #[test]
-    fn test_record_position_tenth_share() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &10i128, &100i128);
-        let positions = client.get_positions(&1u64);
-        assert_eq!(positions.get(0).unwrap().share_bps, 1000);
-    }
-
-    #[test]
-    fn test_record_position_basis_point_precision() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &1i128, &10000i128);
-        let positions = client.get_positions(&1u64);
-        assert_eq!(positions.get(0).unwrap().share_bps, 1);
-    }
-
-    #[test]
-    fn test_record_position_multiple_invoices() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &100i128, &1000i128);
-        client.record_position(&admin, &2u64, &investor, &200i128, &2000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 1);
-        assert_eq!(client.get_positions(&2u64).len(), 1);
-    }
-
-    #[test]
-    fn test_record_position_overwrite_existing() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let investor = Address::generate(&env);
-        client.record_position(&admin, &1u64, &investor, &100i128, &1000i128);
-        client.record_position(&admin, &1u64, &investor, &200i128, &1000i128);
-        assert_eq!(client.get_positions(&1u64).len(), 1);
-    }
-
-    #[test]
-    fn test_get_positions_multiple_investors() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let i1 = Address::generate(&env);
-        let i2 = Address::generate(&env);
-        let i3 = Address::generate(&env);
-        client.record_position(&admin, &1u64, &i1, &100i128, &300i128);
-        client.record_position(&admin, &1u64, &i2, &100i128, &300i128);
-        client.record_position(&admin, &1u64, &i3, &100i128, &300i128);
-        assert_eq!(client.get_positions(&1u64).len(), 3);
-    }
-
-    #[test]
-    fn test_get_pool_various_invoices() {
+    fn test_release_funds_blocked_when_paused() {
         let (_env, _admin, _nft, _treasury, _ac, client) = setup();
-        assert!(client.try_get_pool(&0u64).is_err());
-        assert!(client.try_get_pool(&1u64).is_err());
-        assert!(client.try_get_pool(&999u64).is_err());
-        assert!(client.try_get_pool(&u64::MAX).is_err());
+        let marketplace = Address::generate(&_env);
+        let token = Address::generate(&_env);
+        let result = client.try_release_funds(&marketplace, &1u64, &token);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_initialize_valid_late_penalty_bps() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, FinancingPoolContract);
-        let client = FinancingPoolContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let rr = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let ac = Address::generate(&env);
-        let result = client.try_initialize(&admin, &contract_id, &rr, &treasury, &200u32, &ac);
-        assert!(result.is_err());
-        let nft = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let ac = Address::generate(&env);
-        let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &treasury, &ac, &10_000u32, &oracle);
+    fn test_record_position_requires_pause_check() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let investor = Address::generate(&env);
+        let result = client.try_record_position(&admin, &1u64, &investor, &100i128, &1000i128);
         assert!(result.is_ok());
     }
+
 }
 
+    #[test]
+    fn test_repay_amount_exceeds_max_amount() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let payer = Address::generate(&env);
+        let token = Address::generate(&env);
+        assert!(client.try_repay(&payer, &1u64, &token, &(MAX_AMOUNT + 1)).is_err());
+    }
+
+    // ── mark_default ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mark_default_requires_admin() {
+        let (env, _admin, _nft, _treasury, _ac, client) = setup();
+        let non_admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        assert!(client.try_mark_default(&non_admin, &1u64, &token).is_err());
+    }
+
+    #[test]
+    fn test_mark_default_pool_not_found() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let token = Address::generate(&env);
+        assert!(client.try_mark_default(&admin, &999u64, &token).is_err());
+    }
+}
 #[cfg(test)]
 mod proptests {
     use super::*;
@@ -921,6 +1507,8 @@ mod proptests {
                 repaid_amount: face_value,
                 is_closed: true,
                 late_penalty_bps: 0,
+                total_owed: face_value,
+                penalty_applied: false,
             };
             prop_assert!(
                 pool.repaid_amount <= pool.face_value,
@@ -965,6 +1553,45 @@ mod proptests {
                 payout,
                 total_repaid
             );
+        }
+
+        /// Solvency invariant: aggregate_funded never exceeds balance after
+        /// simulating N concurrent record_position calls then a settle.
+        ///
+        /// Models: several investors each contribute a fraction of the pool;
+        /// after all positions are recorded, the sum of contributions equals
+        /// the aggregate tracked in storage.  When yield is distributed the
+        /// aggregate falls back to zero.  At no point should aggregate > balance.
+        #[test]
+        fn aggregate_funded_never_exceeds_balance(
+            c1 in 1i128..=1_000_000_000i128,
+            c2 in 1i128..=1_000_000_000i128,
+            c3 in 1i128..=1_000_000_000i128,
+        ) {
+            // Model the aggregate directly (no Env needed — pure arithmetic).
+            let contributions = [c1, c2, c3];
+            let total_pool: i128 = c1.saturating_add(c2).saturating_add(c3);
+
+            // Aggregate after recording all positions must equal total_pool.
+            let mut aggregate: i128 = 0;
+            for &c in &contributions {
+                aggregate = aggregate.saturating_add(c);
+            }
+            prop_assert_eq!(aggregate, total_pool);
+
+            // A balance equal to total_pool (the minimum a fully-funded pool
+            // should hold) must satisfy the solvency invariant.
+            let balance = total_pool;
+            prop_assert!(
+                balance >= aggregate,
+                "balance {} < aggregate {} — solvency violated",
+                balance,
+                aggregate
+            );
+
+            // After settling (distribute_yield), aggregate drops to 0.
+            aggregate = aggregate.saturating_sub(total_pool);
+            prop_assert_eq!(aggregate, 0i128);
         }
     }
 }

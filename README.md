@@ -172,6 +172,36 @@ make deploy-mainnet
 
 Mainnet deployment requires manual confirmation at the prompt.
 
+### Deployment Environment Variables
+
+All constructor parameters accept environment variable overrides with sensible defaults, allowing the same script to be used for testnet, mainnet, or custom forks without editing it.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TREASURY_FEE_BPS` | `50` | Treasury protocol fee (50 bps = 0.5%) |
+| `MARKETPLACE_FEE_BPS` | `50` | Marketplace protocol fee (50 bps = 0.5%) |
+| `MARKETPLACE_REFERRER_BPS` | `0` | Fraction of marketplace fee paid to referrer (0 = off) |
+| `LATE_PENALTY_BPS` | `200` | Late-repayment penalty (200 bps = 2%) |
+| `MAX_POSITION_BPS` | `5000` | Max per-investor pool share (5000 bps = 50%) |
+| `ORACLE_BASE_CURRENCY` | `USDC` | Price oracle base quote currency symbol |
+
+**Example — reduced fees for testnet fork:**
+```bash
+export DEPLOYER_SECRET="your-stellar-secret-key"
+export TREASURY_FEE_BPS=10
+export MARKETPLACE_FEE_BPS=10
+export LATE_PENALTY_BPS=100
+export MAX_POSITION_BPS=3000
+make deploy-testnet
+```
+
+**Example — production mainnet with referral incentives enabled:**
+```bash
+export DEPLOYER_SECRET="your-stellar-secret-key"
+export MARKETPLACE_REFERRER_BPS=2000   # 20% of fee to referrer
+make deploy-mainnet
+```
+
 ---
 
 ## Example Interactions

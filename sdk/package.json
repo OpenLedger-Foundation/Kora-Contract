@@ -1,0 +1,18 @@
+{
+  "name": "@kora-protocol/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client bindings for the Kora Protocol smart contracts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^12.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  }
+}

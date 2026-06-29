@@ -1,0 +1,215 @@
+name: WASM Size Tracking
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Size-increase threshold in bytes before the job fails.
+# Adjust per contract as needed.
+env:
+  SIZE_THRESHOLD_BYTES: 10240
+
+jobs:
+  wasm-size:
+    name: Build & track WASM sizes
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can compare against the base branch
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install stellar-cli
+        run: cargo install stellar-cli --locked
+
+      - name: Build optimized WASMs
+        run: make build-optimized
+
+      - name: Collect WASM sizes (this build)
+        id: sizes_pr
+        run: |
+          declare -A sizes
+          CONTRACTS="access_control invoice_nft marketplace financing_pool treasury risk_registry"
+          for c in $CONTRACTS; do
+            wasm="target/wasm32-unknown-unknown/release/kora_${c}.wasm"
+            optimized="target/wasm32-unknown-unknown/release/kora_${c}.optimized.wasm"
+            if [ -f "$optimized" ]; then
+              sizes[$c]=$(wc -c < "$optimized")
+            elif [ -f "$wasm" ]; then
+              sizes[$c]=$(wc -c < "$wasm")
+            else
+              sizes[$c]=0
+            fi
+          done
+          # Emit as JSON for later steps
+          python3 -c "
+          import json, os
+          d = {}
+          for c in os.environ.get('CONTRACTS', '').split():
+              pass
+          "
+          # Write sizes to a file
+          {
+            echo "{"
+            first=1
+            for c in $CONTRACTS; do
+              wasm="target/wasm32-unknown-unknown/release/kora_${c}.wasm"
+              optimized="target/wasm32-unknown-unknown/release/kora_${c}.optimized.wasm"
+              if [ -f "$optimized" ]; then
+                sz=$(wc -c < "$optimized")
+              elif [ -f "$wasm" ]; then
+                sz=$(wc -c < "$wasm")
+              else
+                sz=0
+              fi
+              [ $first -eq 0 ] && echo ","
+              printf '  "%s": %s' "$c" "$sz"
+              first=0
+            done
+            echo ""
+            echo "}"
+          } > wasm_sizes_pr.json
+          cat wasm_sizes_pr.json
+
+      - name: Fetch main-branch WASM sizes (baseline)
+        id: sizes_main
+        if: github.event_name == 'pull_request'
+        run: |
+          git stash --include-untracked || true
+          git fetch origin main
+          git checkout origin/main -- . 2>/dev/null || true
+
+          make build-optimized 2>/dev/null || true
+
+          CONTRACTS="access_control invoice_nft marketplace financing_pool treasury risk_registry"
+          {
+            echo "{"
+            first=1
+            for c in $CONTRACTS; do
+              wasm="target/wasm32-unknown-unknown/release/kora_${c}.wasm"
+              optimized="target/wasm32-unknown-unknown/release/kora_${c}.optimized.wasm"
+              if [ -f "$optimized" ]; then
+                sz=$(wc -c < "$optimized")
+              elif [ -f "$wasm" ]; then
+                sz=$(wc -c < "$wasm")
+              else
+                sz=0
+              fi
+              [ $first -eq 0 ] && echo ","
+              printf '  "%s": %s' "$c" "$sz"
+              first=0
+            done
+            echo ""
+            echo "}"
+          } > wasm_sizes_main.json
+          cat wasm_sizes_main.json
+
+          # Restore PR state
+          git checkout ${{ github.sha }} -- . 2>/dev/null || git stash pop || true
+
+      - name: Compare sizes and build report
+        id: report
+        run: |
+          CONTRACTS="access_control invoice_nft marketplace financing_pool treasury risk_registry"
+          THRESHOLD=${{ env.SIZE_THRESHOLD_BYTES }}
+          FAILED=0
+
+          PR_FILE="wasm_sizes_pr.json"
+          MAIN_FILE="wasm_sizes_main.json"
+
+          echo "## WASM Size Report" > size_report.md
+          echo "" >> size_report.md
+          echo "| Contract | Main (bytes) | PR (bytes) | Delta | Status |" >> size_report.md
+          echo "|---|---|---|---|---|" >> size_report.md
+
+          for c in $CONTRACTS; do
+            pr_sz=$(python3 -c "import json; d=json.load(open('$PR_FILE')); print(d.get('$c', 0))")
+
+            if [ -f "$MAIN_FILE" ]; then
+              main_sz=$(python3 -c "import json; d=json.load(open('$MAIN_FILE')); print(d.get('$c', 0))")
+            else
+              main_sz=0
+            fi
+
+            delta=$((pr_sz - main_sz))
+            if [ "$main_sz" -eq 0 ]; then
+              status="🆕 new"
+            elif [ "$delta" -le 0 ]; then
+              status="✅ ok"
+            elif [ "$delta" -gt "$THRESHOLD" ]; then
+              status="❌ +${delta}B exceeds threshold ${THRESHOLD}B"
+              FAILED=1
+            else
+              status="⚠️ +${delta}B (within threshold)"
+            fi
+
+            echo "| $c | $main_sz | $pr_sz | $delta | $status |" >> size_report.md
+          done
+
+          echo "" >> size_report.md
+          echo "_Size-increase threshold: ${THRESHOLD} bytes_" >> size_report.md
+
+          cat size_report.md
+
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+      - name: Publish size report as workflow summary
+        run: cat size_report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post size report as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('size_report.md', 'utf8');
+            const marker = '<!-- wasm-size-report -->';
+            const fullBody = `${marker}\n${body}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fullBody,
+              });
+            }
+
+      - name: Fail if size regression detected
+        if: steps.report.outputs.failed == '1'
+        run: |
+          echo "One or more contracts exceeded the size-increase threshold of ${{ env.SIZE_THRESHOLD_BYTES }} bytes."
+          echo "See the WASM Size Report in the workflow summary for details."
+          exit 1
