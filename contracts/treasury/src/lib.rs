@@ -21,6 +21,8 @@ const EPOCH_DURATION: u64 = 86_400;
 pub enum DataKey {
     /// Admin address — persistent so it survives ledger archival.
     Admin,
+    /// Pending new-admin address (two-step transfer).
+    PendingAdmin,
     /// Protocol fee in basis points — persistent for durability.
     FeeBps,
     /// Accumulated fees per token (informational).
@@ -186,6 +188,58 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Withdraw fees for multiple (token, recipient, amount) tuples atomically.
+    /// All checks run before any transfer — if any entry fails the entire batch
+    /// is aborted (atomic-abort semantics). Admin only.
+    /// Protected against reentrancy via RAII ReentrancyGuard.
+    pub fn withdraw_batch(
+        env: Env,
+        admin: Address,
+        withdrawals: soroban_sdk::Vec<(Address, Address, i128)>,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if withdrawals.is_empty() {
+            return Ok(());
+        }
+
+        let _guard = ReentrancyGuard::new(&env)?;
+
+        // ── Checks (all-or-nothing) ───────────────────────────────────────────
+        for entry in withdrawals.iter() {
+            let (token, _recipient, amount) = entry;
+            if amount <= 0 {
+                return Err(KoraError::InvalidAmount);
+            }
+            Self::require_whitelisted_token(&env, &token)?;
+            let balance = token::Client::new(&env, &token)
+                .balance(&env.current_contract_address());
+            if balance < amount {
+                return Err(KoraError::InsufficientPoolBalance);
+            }
+        }
+
+        // ── Transfers + Events ────────────────────────────────────────────────
+        for entry in withdrawals.iter() {
+            let (token, recipient, amount) = entry;
+            let token_client = token::Client::new(&env, &token);
+
+            let collected_key = DataKey::Collected(token.clone());
+            if let Some(collected) = env.storage().persistent().get::<_, i128>(&collected_key) {
+                env.storage()
+                    .persistent()
+                    .set(&collected_key, &collected.saturating_sub(amount));
+                Self::bump_persistent(&env, &collected_key);
+            }
+
+            token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+            events::fee_withdrawn(&env, &token, amount);
+        }
+
+        Ok(())
+    }
+
     /// Emergency drain — withdraw entire token balance. Admin only.
     /// Subject to the rolling 24 h withdrawal cap.
     /// Protected against reentrancy via RAII ReentrancyGuard.
@@ -296,6 +350,52 @@ impl TreasuryContract {
             .persistent()
             .get(&DataKey::Admin)
             .ok_or(KoraError::NotInitialized)
+    }
+
+    // ── Admin transfer (two-step) ──────────────────────────────────────────────
+
+    /// Step 1: current admin proposes a new admin. Does not transfer yet.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if admin == new_admin {
+            return Err(KoraError::InvalidAddress);
+        }
+        kora_shared::validation::require_not_self(&env, &new_admin)?;
+        env.storage().persistent().set(&DataKey::PendingAdmin, &new_admin);
+        Self::bump_persistent(&env, &DataKey::PendingAdmin);
+        events::admin_proposed(&env, &admin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2: proposed admin accepts, completing the transfer.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), KoraError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(KoraError::NoPendingAdminProposal)?;
+        if pending != new_admin {
+            return Err(KoraError::NotPendingAdmin);
+        }
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        Self::bump_persistent(&env, &DataKey::Admin);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        events::admin_transferred(&env, &new_admin);
+        Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().persistent().has(&DataKey::PendingAdmin) {
+            return Err(KoraError::NoPendingAdminProposal);
+        }
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        events::admin_proposal_cancelled(&env, &admin);
+        Ok(())
     }
 
     // ── Upgrade ────────────────────────────────────────────────────────────────
@@ -848,5 +948,81 @@ mod tests {
     fn test_execute_cap_without_proposal_fails() {
         let (_env, admin, client) = setup();
         assert!(client.try_execute_withdrawal_cap(&admin).is_err());
+    }
+
+    // ── withdraw_batch ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_withdraw_batch_empty_vec_is_noop() {
+        let (env, admin, client) = setup();
+        let empty: soroban_sdk::Vec<(Address, Address, i128)> = soroban_sdk::vec![&env];
+        assert!(client.try_withdraw_batch(&admin, &empty).is_ok());
+    }
+
+    #[test]
+    fn test_withdraw_batch_aborts_on_bad_entry() {
+        let (env, admin, client) = setup();
+        // token is NOT whitelisted — batch must fail entirely
+        let token = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let batch = soroban_sdk::vec![&env, (token, recipient, 1_000i128)];
+        let result = client.try_withdraw_batch(&admin, &batch);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_withdraw_batch_requires_admin() {
+        let (env, _admin, client) = setup();
+        let non_admin = Address::generate(&env);
+        let empty: soroban_sdk::Vec<(Address, Address, i128)> = soroban_sdk::vec![&env];
+        assert!(client.try_withdraw_batch(&non_admin, &empty).is_err());
+    }
+
+    // ── propose_admin / accept_admin ──────────────────────────────────────────
+
+    #[test]
+    fn test_propose_then_accept_transfers_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+        // new admin can now call admin-only functions
+        assert!(client.try_set_fee_bps(&new_admin, &100u32).is_ok());
+        // old admin no longer can
+        assert!(client.try_set_fee_bps(&admin, &100u32).is_err());
+    }
+
+    #[test]
+    fn test_propose_admin_requires_admin() {
+        let (env, _admin, client) = setup();
+        let stranger = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        assert!(client.try_propose_admin(&stranger, &new_admin).is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        assert!(client.try_accept_admin(&impostor).is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal_removes_pending() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.cancel_admin_proposal(&admin);
+        // proposed new_admin can no longer accept
+        assert!(client.try_accept_admin(&new_admin).is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_without_proposal_fails() {
+        let (env, _admin, client) = setup();
+        let stranger = Address::generate(&env);
+        assert!(client.try_accept_admin(&stranger).is_err());
     }
 }

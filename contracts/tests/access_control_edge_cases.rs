@@ -175,8 +175,7 @@ mod access_control_edge_cases {
     #[test]
     fn test_cannot_transfer_admin_to_self() {
         let t = setup();
-
-        let result = t.client.try_transfer_admin(&t.admin, &t.admin);
+        let result = t.client.try_propose_admin(&t.admin, &t.admin);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidAddress);
     }
 
@@ -195,8 +194,8 @@ mod access_control_edge_cases {
         let t = setup();
         let new_admin = Address::generate(&t.env);
 
-        let result = t.client.try_transfer_admin(&t.admin, &new_admin);
-        assert!(result.is_ok());
+        t.client.propose_admin(&t.admin, &new_admin);
+        t.client.accept_admin(&new_admin);
 
         assert_eq!(t.client.get_admin(), new_admin);
         assert_eq!(t.client.get_role(&new_admin), Role::Admin);
@@ -209,7 +208,7 @@ mod access_control_edge_cases {
         let non_admin = Address::generate(&t.env);
         let new_admin = Address::generate(&t.env);
 
-        let result = t.client.try_transfer_admin(&non_admin, &new_admin);
+        let result = t.client.try_propose_admin(&non_admin, &new_admin);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
     }
 
@@ -219,7 +218,8 @@ mod access_control_edge_cases {
         let new_admin = Address::generate(&t.env);
         let old_admin = t.admin.clone();
 
-        t.client.transfer_admin(&old_admin, &new_admin);
+        t.client.propose_admin(&old_admin, &new_admin);
+        t.client.accept_admin(&new_admin);
 
         // Old admin cannot grant roles
         let target = Address::generate(&t.env);
@@ -239,8 +239,8 @@ mod access_control_edge_cases {
         // Make someone an operator
         t.client.grant_role(&t.admin, &operator, &Role::Operator);
 
-        // Try to transfer admin to that operator
-        let result = t.client.try_transfer_admin(&t.admin, &operator);
+        // Try to propose admin to that operator (must fail)
+        let result = t.client.try_propose_admin(&t.admin, &operator);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
     }
 

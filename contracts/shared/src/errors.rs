@@ -59,6 +59,10 @@ pub enum KoraError {
     RiskScoreOutOfRange = 52,
     ComplianceNotAttested = 53,
 
+    // Two-step admin transfer
+    NoPendingAdminProposal = 44,
+    NotPendingAdmin = 45,
+
     // General
     ArithmeticOverflow = 90,
     ArithmeticUnderflow = 91,

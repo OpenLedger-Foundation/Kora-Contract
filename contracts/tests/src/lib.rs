@@ -316,7 +316,8 @@ mod integration {
         let k = deploy_protocol();
         let new_admin = Address::generate(&k.env);
 
-        k.access_control.transfer_admin(&k.admin, &new_admin);
+        k.access_control.propose_admin(&k.admin, &new_admin);
+        k.access_control.accept_admin(&new_admin);
         assert_eq!(k.access_control.get_admin(), new_admin);
     }
 

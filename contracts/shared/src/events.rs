@@ -1,4 +1,5 @@
 use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol};
+use crate::types::InvoiceStatus;
 
 // ── Canonical Event Schema ────────────────────────────────────────────────────
 //
@@ -92,6 +93,14 @@ pub fn invoice_withdrawn(env: &Env, invoice_id: u64, sme: &Address) {
         env,
         symbol_short!("INV_WTH"),
         (invoice_id, sme.clone(), env.ledger().timestamp()),
+    );
+}
+
+pub fn invoice_archived(env: &Env, invoice_id: u64, sme: &Address, amount: i128, _status: InvoiceStatus) {
+    emit(
+        env,
+        symbol_short!("INV_ARC"),
+        (invoice_id, sme.clone(), amount, env.ledger().timestamp()),
     );
 }
 
