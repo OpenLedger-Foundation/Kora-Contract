@@ -77,6 +77,8 @@ pub enum DataKey {
     Paused,
     /// Per-address role mapping.
     Role(Address),
+    /// Registry of all addresses holding a given role (for enumeration).
+    RoleMembers(Role),
     /// Pending upgrade proposal: (wasm_hash, proposed_at_timestamp).
     UpgradeProposal,
     /// Multisig configuration (threshold + signer set).
@@ -246,6 +248,7 @@ impl AccessControlContract {
             .persistent()
             .set(&DataKey::Role(target.clone()), &role);
         Self::bump_persistent(&env, &DataKey::Role(target.clone()));
+        Self::add_to_role_members(&env, &role, &target);
         events::role_granted(&env, &admin, &target);
         Self::append_audit_entry(&env, &admin, AdminActionType::GrantRole);
         Ok(())
@@ -285,6 +288,7 @@ impl AccessControlContract {
         env.storage()
             .persistent()
             .remove(&DataKey::Role(target.clone()));
+        Self::remove_from_role_members(&env, &current_role, &target);
         events::role_revoked(&env, &admin, &target);
         Self::append_audit_entry(&env, &admin, AdminActionType::RevokeRole);
         Ok(())
@@ -557,12 +561,21 @@ impl AccessControlContract {
                     .persistent()
                     .set(&DataKey::Role(target.clone()), &role);
                 Self::bump_persistent(&env, &DataKey::Role(target.clone()));
+                Self::add_to_role_members(&env, &role, &target);
                 events::role_granted(&env, &executor, &target);
             }
             AdminAction::RevokeRole(target) => {
+                let current_role = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Role>(&DataKey::Role(target.clone()))
+                    .unwrap_or(Role::None);
                 env.storage()
                     .persistent()
                     .remove(&DataKey::Role(target.clone()));
+                if current_role != Role::None {
+                    Self::remove_from_role_members(&env, &current_role, &target);
+                }
                 events::role_revoked(&env, &executor, &target);
             }
             AdminAction::TransferAdmin(new_admin) => {
@@ -850,6 +863,30 @@ impl AccessControlContract {
             .ok_or(AccessControlError::NotInitialized)
     }
 
+    /// Return a page of addresses holding a given role.
+    /// `page` is 0-indexed; `page_size` is clamped to 1–50.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_role_members(env: Env, role: Role, page: u32, page_size: u32) -> Vec<Address> {
+        let page_size = (page_size.max(1).min(50)) as usize;
+        let skip = (page as usize).saturating_mul(page_size);
+        let mut results = Vec::new(&env);
+
+        if let Some(members) = env.storage().persistent().get::<_, Vec<Address>>(&DataKey::RoleMembers(role)) {
+            let mut i = 0;
+            for j in skip..members.len() {
+                if i >= page_size {
+                    break;
+                }
+                if let Ok(addr) = members.get(j as u32) {
+                    results.push_back(addr);
+                }
+                i += 1;
+            }
+        }
+        results
+    }
+
     // ── Upgrade ────────────────────────────────────────────────────────────────
 
     /// Propose a WASM upgrade. Admin only. Begins a 24-hour timelock.
@@ -977,6 +1014,52 @@ impl AccessControlContract {
             return Err(AccessControlError::Unauthorized);
         }
         Ok(())
+    }
+
+    /// Add an address to the role members registry.
+    fn add_to_role_members(env: &Env, role: &Role, address: &Address) {
+        let key = DataKey::RoleMembers(role.clone());
+        let mut members: Vec<Address> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+        // Check if already present to avoid duplicates
+        let mut found = false;
+        for i in 0..members.len() {
+            if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            members.push_back(address.clone());
+            env.storage().persistent().set(&key, &members);
+            Self::bump_persistent(env, &key);
+        }
+    }
+
+    /// Remove an address from the role members registry.
+    fn remove_from_role_members(env: &Env, role: &Role, address: &Address) {
+        let key = DataKey::RoleMembers(role.clone());
+        if let Some(mut members) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
+            let mut found = false;
+            for i in 0..members.len() {
+                if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+                    // Swap with last and pop to remove efficiently
+                    let last = members.pop_back();
+                    if i < members.len() {
+                        members.set(i, last.unwrap());
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                if members.is_empty() {
+                    env.storage().persistent().remove(&key);
+                } else {
+                    env.storage().persistent().set(&key, &members);
+                    Self::bump_persistent(env, &key);
+                }
+            }
+        }
     }
 
     /// Append one entry to the ring-buffer audit log and emit the canonical event.
@@ -1895,5 +1978,125 @@ mod tests {
         client.approve_action(&signer2, prop_id);
         assert!(client.try_execute_action(&signer1, prop_id).is_ok());
         assert_eq!(client.get_admin(), new_admin);
+    }
+
+    // ── Role registry tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_role_members_empty_initially() {
+        let (_, _, client) = setup();
+        let members = client.get_role_members(&Role::Operator, 0, 50);
+        assert_eq!(members.len(), 0);
+    }
+
+    #[test]
+    fn test_get_role_members_after_grant() {
+        let (env, admin, client) = setup();
+        let op1 = Address::generate(&env);
+        let op2 = Address::generate(&env);
+        let verifier = Address::generate(&env);
+
+        client.grant_role(&admin, &op1, &Role::Operator);
+        client.grant_role(&admin, &op2, &Role::Operator);
+        client.grant_role(&admin, &verifier, &Role::Verifier);
+
+        let ops = client.get_role_members(&Role::Operator, 0, 50);
+        assert_eq!(ops.len(), 2);
+
+        let vers = client.get_role_members(&Role::Verifier, 0, 50);
+        assert_eq!(vers.len(), 1);
+    }
+
+    #[test]
+    fn test_get_role_members_pagination() {
+        let (env, admin, client) = setup();
+        for i in 0..5 {
+            let addr = Address::generate(&env);
+            client.grant_role(&admin, &addr, &Role::Operator);
+        }
+
+        let page0 = client.get_role_members(&Role::Operator, 0, 2);
+        assert_eq!(page0.len(), 2);
+
+        let page1 = client.get_role_members(&Role::Operator, 1, 2);
+        assert_eq!(page1.len(), 2);
+
+        let page2 = client.get_role_members(&Role::Operator, 2, 2);
+        assert_eq!(page2.len(), 1);
+
+        let page3 = client.get_role_members(&Role::Operator, 3, 2);
+        assert_eq!(page3.len(), 0);
+    }
+
+    #[test]
+    fn test_get_role_members_after_revoke() {
+        let (env, admin, client) = setup();
+        let op1 = Address::generate(&env);
+        let op2 = Address::generate(&env);
+
+        client.grant_role(&admin, &op1, &Role::Operator);
+        client.grant_role(&admin, &op2, &Role::Operator);
+        assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 2);
+
+        client.revoke_role(&admin, &op1);
+        let members = client.get_role_members(&Role::Operator, 0, 50);
+        assert_eq!(members.len(), 1);
+    }
+
+    #[test]
+    fn test_get_role_members_grant_revoke_regrant() {
+        let (env, admin, client) = setup();
+        let addr = Address::generate(&env);
+
+        client.grant_role(&admin, &addr, &Role::Operator);
+        assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 1);
+
+        client.revoke_role(&admin, &addr);
+        assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 0);
+
+        client.grant_role(&admin, &addr, &Role::Verifier);
+        let vers = client.get_role_members(&Role::Verifier, 0, 50);
+        assert_eq!(vers.len(), 1);
+
+        let ops = client.get_role_members(&Role::Operator, 0, 50);
+        assert_eq!(ops.len(), 0);
+    }
+
+    #[test]
+    fn test_get_role_members_multisig_grant() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let target = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::GrantRole(target.clone(), 1));
+        client.approve_action(&signer2, prop_id);
+        client.execute_action(&signer1, prop_id);
+
+        let members = client.get_role_members(&Role::Operator, 0, 50);
+        assert_eq!(members.len(), 1);
+    }
+
+    #[test]
+    fn test_get_role_members_multisig_revoke() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let target = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::GrantRole(target.clone(), 1));
+        client.approve_action(&signer2, prop_id);
+        client.execute_action(&signer1, prop_id);
+        assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 1);
+
+        let prop_id2 = client.propose_action(&signer1, AdminAction::RevokeRole(target.clone()));
+        client.approve_action(&signer2, prop_id2);
+        client.execute_action(&signer1, prop_id2);
+
+        assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 0);
     }
 }
