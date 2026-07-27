@@ -317,3 +317,17 @@ pub struct ParameterProposal {
     pub created_at: u64,
     pub executed: bool,
 }
+
+/// A multisig signer recovery proposal for lost-key scenarios.
+/// Allows reconfiguring the signer set after a long timelock if quorum becomes unreachable.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecoveryProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub new_signers: Vec<Address>,
+    pub new_threshold: u32,
+    pub created_at: u64,
+    pub objections: Vec<Address>, // signers that have objected to recovery
+    pub executed: bool,
+}

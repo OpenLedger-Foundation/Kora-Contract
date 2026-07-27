@@ -5,7 +5,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal},
+    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
@@ -63,6 +63,10 @@ impl From<CommonError> for AccessControlError {
 /// Mirrors the B1 upgrade timelock (~24h) so parameter changes get the same cooling-off period.
 const GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
 
+/// Long timelock for multisig recovery proposals (30 days at ~5s/ledger).
+/// Gives legitimate signer set ample opportunity to object if recovery is illegitimate.
+const RECOVERY_TIMELOCK_DELAY: u64 = 518_400; // ~30 days at ~5s/ledger
+
 // ── TTL constants (~30 days) ──────────────────────────────────────────────────
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
 const PERSISTENT_TTL_BUMP: u32 = 518_400;
@@ -93,6 +97,10 @@ pub enum DataKey {
     NextParamProposalId,
     /// The current governed value of a protocol parameter.
     Parameter(ParameterKey),
+    /// Multisig recovery proposal, keyed by proposal id.
+    RecoveryProposal(u64),
+    /// Monotonic counter for the next recovery proposal id.
+    NextRecoveryProposalId,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -804,6 +812,153 @@ impl AccessControlContract {
             .persistent()
             .get(&DataKey::ParameterProposal(proposal_id))
             .ok_or(AccessControlError::ParameterProposalNotFound)
+    }
+
+    // ── Signer Recovery ────────────────────────────────────────────────────────
+
+    /// Propose a multisig signer recovery after a long timelock.
+    /// Any signer can initiate recovery if quorum becomes unreachable.
+    /// Execution requires the recovery timelock (~30 days) to elapse without objections.
+    pub fn propose_signer_recovery(
+        env: Env,
+        proposer: Address,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) -> Result<u64, AccessControlError> {
+        proposer.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &proposer)?;
+
+        if new_threshold == 0 || new_threshold > new_signers.len() {
+            return Err(AccessControlError::InvalidThreshold);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextRecoveryProposalId)
+            .unwrap_or(1);
+
+        let proposal = RecoveryProposal {
+            id: proposal_id,
+            proposer: proposer.clone(),
+            new_signers,
+            new_threshold,
+            created_at: env.ledger().timestamp(),
+            objections: Vec::new(&env),
+            executed: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecoveryProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::RecoveryProposal(proposal_id));
+        env.storage().persistent().set(
+            &DataKey::NextRecoveryProposalId,
+            &(proposal_id
+                .checked_add(1)
+                .ok_or(AccessControlError::ArithmeticOverflow)?),
+        );
+
+        events::action_proposed(&env, proposal_id, &proposer);
+        let details = (new_threshold, new_signers.len() as u32).into_val(&env);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
+        Ok(proposal_id)
+    }
+
+    /// Object to a pending signer recovery. Prevents execution if any signer objects.
+    pub fn object_signer_recovery(
+        env: Env,
+        objector: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        objector.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &objector)?;
+
+        let mut proposal: RecoveryProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecoveryProposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ProposalAlreadyExecuted);
+        }
+
+        for i in 0..proposal.objections.len() {
+            if proposal.objections.get(i).ok_or(AccessControlError::Unauthorized)? == objector {
+                return Err(AccessControlError::AlreadyApproved);
+            }
+        }
+
+        proposal.objections.push_back(objector.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecoveryProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::RecoveryProposal(proposal_id));
+
+        events::action_approved(&env, proposal_id, &objector, proposal.objections.len());
+        Ok(())
+    }
+
+    /// Execute a signer recovery after the long timelock and with no objections from current signers.
+    pub fn execute_signer_recovery(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        executor.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &executor)?;
+
+        let mut proposal: RecoveryProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecoveryProposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ProposalAlreadyExecuted);
+        }
+
+        if env.ledger().timestamp() < proposal.created_at + RECOVERY_TIMELOCK_DELAY {
+            return Err(AccessControlError::GovernanceTimelockNotElapsed);
+        }
+
+        if !proposal.objections.is_empty() {
+            return Err(AccessControlError::AlreadyApproved);
+        }
+
+        proposal.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecoveryProposal(proposal_id), &proposal);
+
+        let new_config = MultisigConfig {
+            threshold: proposal.new_threshold,
+            signers: proposal.new_signers.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::MultisigConfig, &new_config);
+        Self::bump_persistent(&env, &DataKey::MultisigConfig);
+
+        events::action_executed(&env, proposal_id, &executor);
+        let details = (proposal.new_threshold, proposal.new_signers.len() as u32).into_val(&env);
+        Self::append_audit_entry(&env, &executor, AdminActionType::ConfigureMultisig, details);
+        Ok(())
+    }
+
+    /// Get a recovery proposal by ID.
+    pub fn get_recovery_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<RecoveryProposal, AccessControlError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RecoveryProposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -2163,5 +2318,139 @@ mod tests {
         assert_eq!(pause_entry.action, AdminActionType::Pause);
         // Pause has empty payload but still has the details field
         assert!(pause_entry.details.len() == 0);
+    }
+
+    // ── Signer recovery tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_propose_signer_recovery_success() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let prop_id = client.propose_signer_recovery(&signer1, new_signers, 2);
+        assert!(prop_id > 0);
+        let proposal = client.get_recovery_proposal(prop_id).unwrap();
+        assert_eq!(proposal.proposer, signer1);
+        assert!(!proposal.executed);
+        assert_eq!(proposal.objections.len(), 0);
+    }
+
+    #[test]
+    fn test_object_signer_recovery_success() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let prop_id = client.propose_signer_recovery(&signer1, new_signers, 2);
+        assert!(client.try_object_signer_recovery(&signer2, prop_id).is_ok());
+
+        let proposal = client.get_recovery_proposal(prop_id).unwrap();
+        assert_eq!(proposal.objections.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_signer_recovery_before_timelock_fails() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let prop_id = client.propose_signer_recovery(&signer1, new_signers, 2);
+        let result = client.try_execute_signer_recovery(&signer1, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::GovernanceTimelockNotElapsed);
+    }
+
+    #[test]
+    fn test_execute_signer_recovery_fails_if_objections_exist() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let prop_id = client.propose_signer_recovery(&signer1, new_signers, 2);
+        client.object_signer_recovery(&signer2, prop_id);
+
+        let proposal = client.get_recovery_proposal(prop_id).unwrap();
+        assert_eq!(proposal.objections.len(), 1);
+
+        let result = client.try_execute_signer_recovery(&signer1, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::AlreadyApproved);
+    }
+
+    #[test]
+    fn test_propose_signer_recovery_invalid_threshold() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1];
+
+        let result = client.try_propose_signer_recovery(&signer1, new_signers.clone(), 2);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::InvalidThreshold);
+
+        let result = client.try_propose_signer_recovery(&signer1, new_signers, 0);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::InvalidThreshold);
+    }
+
+    #[test]
+    fn test_object_recovery_twice_fails() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let prop_id = client.propose_signer_recovery(&signer1, new_signers, 2);
+        assert!(client.try_object_signer_recovery(&signer2, prop_id).is_ok());
+
+        let result = client.try_object_signer_recovery(&signer2, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::AlreadyApproved);
+    }
+
+    #[test]
+    fn test_non_signer_cannot_propose_recovery() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let stranger = Address::generate(&env);
+        let new_signer1 = Address::generate(&env);
+        let new_signer2 = Address::generate(&env);
+        let new_signers = vec![&env, new_signer1, new_signer2];
+
+        let result = client.try_propose_signer_recovery(&stranger, new_signers, 2);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::SignerNotFound);
     }
 }
