@@ -8,7 +8,7 @@ use kora_shared::{
     types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -176,7 +176,7 @@ impl AccessControlContract {
         let _guard = ReentrancyGuard::new(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         events::protocol_paused(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::Pause);
+        Self::append_audit_entry(&env, &admin, AdminActionType::Pause, Bytes::new(&env));
         Ok(())
     }
 
@@ -205,7 +205,7 @@ impl AccessControlContract {
         let _guard = ReentrancyGuard::new(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         events::protocol_unpaused(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::Unpause);
+        Self::append_audit_entry(&env, &admin, AdminActionType::Unpause, Bytes::new(&env));
         Ok(())
     }
 
@@ -250,7 +250,8 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Role(target.clone()));
         Self::add_to_role_members(&env, &role, &target);
         events::role_granted(&env, &admin, &target);
-        Self::append_audit_entry(&env, &admin, AdminActionType::GrantRole);
+        let details = (&target, &role).into_val(&env);
+        Self::append_audit_entry(&env, &admin, AdminActionType::GrantRole, details);
         Ok(())
     }
 
@@ -290,7 +291,8 @@ impl AccessControlContract {
             .remove(&DataKey::Role(target.clone()));
         Self::remove_from_role_members(&env, &current_role, &target);
         events::role_revoked(&env, &admin, &target);
-        Self::append_audit_entry(&env, &admin, AdminActionType::RevokeRole);
+        let details = (&target, &current_role).into_val(&env);
+        Self::append_audit_entry(&env, &admin, AdminActionType::RevokeRole, details);
         Ok(())
     }
 
@@ -334,7 +336,8 @@ impl AccessControlContract {
             .persistent()
             .remove(&DataKey::Role(current_admin.clone()));
         events::admin_transferred(&env, &current_admin, &new_admin);
-        Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin);
+        let details = new_admin.into_val(&env);
+        Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin, details);
         Ok(())
     }
 
@@ -381,7 +384,8 @@ impl AccessControlContract {
         }
 
         events::multisig_configured(&env, threshold, signer_count);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig);
+        let details = (threshold, signer_count as u32).into_val(&env);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig, details);
         Ok(())
     }
 
@@ -591,7 +595,8 @@ impl AccessControlContract {
         }
 
         events::action_executed(&env, proposal_id, &executor);
-        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction);
+        let details = proposal_id.into_val(&env);
+        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
         Ok(())
     }
 
@@ -670,7 +675,8 @@ impl AccessControlContract {
         );
 
         events::action_proposed(&env, proposal_id, &proposer);
-        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter);
+        let details = (proposal.key, proposal.new_value).into_val(&env);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
         Ok(proposal_id)
     }
 
@@ -764,7 +770,8 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Parameter(proposal.key.clone()));
 
         events::action_executed(&env, proposal_id, &caller);
-        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter);
+        let details = (proposal.key, proposal.new_value).into_val(&env);
+        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter, details);
         Ok(())
     }
 
@@ -912,7 +919,8 @@ impl AccessControlContract {
             &(new_wasm_hash.clone(), env.ledger().timestamp()),
         );
         events::upgrade_proposed(&env, &admin, &new_wasm_hash);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade);
+        let details = new_wasm_hash.clone().into_val(&env);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade, details);
         Ok(())
     }
 
@@ -941,7 +949,8 @@ impl AccessControlContract {
         }
         env.storage().instance().remove(&DataKey::UpgradeProposal);
         events::upgrade_executed(&env, &admin, &wasm_hash);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade);
+        let details = wasm_hash.clone().into_val(&env);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade, details);
         env.deployer().update_current_contract_wasm(wasm_hash);
         Ok(())
     }
@@ -1063,7 +1072,7 @@ impl AccessControlContract {
     }
 
     /// Append one entry to the ring-buffer audit log and emit the canonical event.
-    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType) {
+    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType, details: soroban_sdk::Bytes) {
         let total: u64 = env
             .storage()
             .instance()
@@ -1081,6 +1090,7 @@ impl AccessControlContract {
             actor: actor.clone(),
             action,
             source: AuditSource::AccessControl,
+            details,
         };
 
         env.storage()
@@ -2098,5 +2108,60 @@ mod tests {
         client.execute_action(&signer1, prop_id2);
 
         assert_eq!(client.get_role_members(&Role::Operator, 0, 50).len(), 0);
+    }
+
+    // ── Audit payload tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_audit_log_grant_role_has_payload() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        client.grant_role(&admin, &target, &Role::Operator);
+
+        let entries = client.get_audit_log(0, 50);
+        assert!(entries.len() > 0);
+        let grant_entry = entries.get(0).unwrap();
+        assert_eq!(grant_entry.action, AdminActionType::GrantRole);
+        assert!(grant_entry.details.len() > 0, "Payload should be present");
+    }
+
+    #[test]
+    fn test_audit_log_transfer_admin_has_payload() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+
+        let entries = client.get_audit_log(0, 50);
+        assert!(entries.len() > 0);
+        let transfer_entry = entries.get(0).unwrap();
+        assert_eq!(transfer_entry.action, AdminActionType::TransferAdmin);
+        assert!(transfer_entry.details.len() > 0, "Payload should be present");
+    }
+
+    #[test]
+    fn test_audit_log_revoke_role_has_payload() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        client.grant_role(&admin, &target, &Role::Verifier);
+        client.revoke_role(&admin, &target);
+
+        let entries = client.get_audit_log(0, 50);
+        assert!(entries.len() > 0);
+        let revoke_entry = entries.get(0).unwrap();
+        assert_eq!(revoke_entry.action, AdminActionType::RevokeRole);
+        assert!(revoke_entry.details.len() > 0, "Payload should be present");
+    }
+
+    #[test]
+    fn test_audit_log_pause_has_payload() {
+        let (_, admin, client) = setup();
+        client.pause(&admin);
+
+        let entries = client.get_audit_log(0, 50);
+        assert!(entries.len() > 0);
+        let pause_entry = entries.get(0).unwrap();
+        assert_eq!(pause_entry.action, AdminActionType::Pause);
+        // Pause has empty payload but still has the details field
+        assert!(pause_entry.details.len() == 0);
     }
 }

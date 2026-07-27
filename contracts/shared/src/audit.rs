@@ -74,4 +74,6 @@ pub struct AdminAuditEntry {
     pub action: AdminActionType,
     /// Contract that originated the action.
     pub source: AuditSource,
+    /// Serialized details of what changed (target, old/new value, etc.).
+    pub details: soroban_sdk::Bytes,
 }
