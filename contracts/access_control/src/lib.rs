@@ -241,10 +241,7 @@ impl AccessControlContract {
         if role == Role::None {
             return Err(AccessControlError::Unauthorized);
         }
-        // Prevent silently overwriting the admin's own role entry
-        if target == admin {
-            return Err(AccessControlError::Unauthorized);
-        }
+        Self::validate_grant_role_target(&env, &target, &admin)?;
         env.storage()
             .persistent()
             .set(&DataKey::Role(target.clone()), &role);
@@ -320,20 +317,7 @@ impl AccessControlContract {
         current_admin.require_auth();
         Self::require_admin(&env, &current_admin)?;
 
-        if current_admin == new_admin {
-            return Err(AccessControlError::InvalidAddress);
-        }
-        kora_shared::validation::require_not_self(&env, &new_admin)?;
-
-        // Guard: new_admin must not already hold a non-Admin role to prevent silent overwrite.
-        let existing = env
-            .storage()
-            .persistent()
-            .get::<_, Role>(&DataKey::Role(new_admin.clone()))
-            .unwrap_or(Role::None);
-        if existing != Role::None && existing != Role::Admin {
-            return Err(AccessControlError::Unauthorized);
-        }
+        Self::validate_transfer_admin_target(&env, &new_admin, &current_admin)?;
 
         env.storage().persistent().set(&DataKey::Admin, &new_admin);
         Self::bump_persistent(&env, &DataKey::Admin);
@@ -547,6 +531,12 @@ impl AccessControlContract {
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
+        let current_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(AccessControlError::NotInitialized)?;
+
         match proposal.action {
             AdminAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
@@ -562,6 +552,7 @@ impl AccessControlContract {
                     2 => Role::Verifier,
                     _ => return Err(AccessControlError::Unauthorized),
                 };
+                Self::validate_grant_role_target(&env, &target, &current_admin)?;
                 env.storage()
                     .persistent()
                     .set(&DataKey::Role(target.clone()), &role);
@@ -575,6 +566,7 @@ impl AccessControlContract {
                 events::role_revoked(&env, &executor, &target);
             }
             AdminAction::TransferAdmin(new_admin) => {
+                Self::validate_transfer_admin_target(&env, &new_admin, &current_admin)?;
                 env.storage().persistent().set(&DataKey::Admin, &new_admin);
                 Self::bump_persistent(&env, &DataKey::Admin);
                 env.storage()
@@ -960,6 +952,32 @@ impl AccessControlContract {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Validate grant_role target: reject if target == admin.
+    fn validate_grant_role_target(env: &Env, target: &Address, admin: &Address) -> Result<(), AccessControlError> {
+        if target == admin {
+            return Err(AccessControlError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Validate transfer_admin target: reject self-transfer and existing non-None/non-Admin roles.
+    fn validate_transfer_admin_target(env: &Env, new_admin: &Address, current_admin: &Address) -> Result<(), AccessControlError> {
+        if current_admin == new_admin {
+            return Err(AccessControlError::InvalidAddress);
+        }
+        kora_shared::validation::require_not_self(env, new_admin)?;
+
+        let existing = env
+            .storage()
+            .persistent()
+            .get::<_, Role>(&DataKey::Role(new_admin.clone()))
+            .unwrap_or(Role::None);
+        if existing != Role::None && existing != Role::Admin {
+            return Err(AccessControlError::Unauthorized);
+        }
+        Ok(())
+    }
 
     /// Append one entry to the ring-buffer audit log and emit the canonical event.
     fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType) {
@@ -1799,5 +1817,83 @@ mod tests {
         assert!(!client.is_paused(), "Pause state should remain unpaused");
         assert!(client.has_role(&target1, &Role::Verifier), "Re-granted role should be assigned");
         assert!(client.has_role(&target2, &Role::Operator), "Other role should be unaffected");
+    }
+
+    // ── Multisig validation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_multisig_grant_role_to_admin_rejected() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::GrantRole(admin.clone(), 1));
+        client.approve_action(&signer2, prop_id);
+        let result = client.try_execute_action(&signer1, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
+    }
+
+    #[test]
+    fn test_multisig_transfer_admin_to_self_rejected() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::TransferAdmin(admin.clone()));
+        client.approve_action(&signer2, prop_id);
+        let result = client.try_execute_action(&signer1, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::InvalidAddress);
+    }
+
+    #[test]
+    fn test_multisig_transfer_admin_to_operator_rejected() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let operator = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers.clone(), 2);
+
+        client.grant_role(&admin, &operator, &Role::Operator);
+        assert_eq!(client.get_role(&operator), Role::Operator);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::TransferAdmin(operator.clone()));
+        client.approve_action(&signer2, prop_id);
+        let result = client.try_execute_action(&signer1, prop_id);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
+    }
+
+    #[test]
+    fn test_multisig_grant_role_valid_succeeds() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let target = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::GrantRole(target.clone(), 1));
+        client.approve_action(&signer2, prop_id);
+        assert!(client.try_execute_action(&signer1, prop_id).is_ok());
+        assert_eq!(client.get_role(&target), Role::Operator);
+    }
+
+    #[test]
+    fn test_multisig_transfer_admin_valid_succeeds() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let prop_id = client.propose_action(&signer1, AdminAction::TransferAdmin(new_admin.clone()));
+        client.approve_action(&signer2, prop_id);
+        assert!(client.try_execute_action(&signer1, prop_id).is_ok());
+        assert_eq!(client.get_admin(), new_admin);
     }
 }
