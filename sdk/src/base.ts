@@ -26,6 +26,15 @@ export const MAINNET: NetworkConfig = {
   networkPassphrase: Networks.PUBLIC,
 };
 
+export const NETWORKS: Record<string, NetworkConfig> = {
+  testnet: TESTNET,
+  mainnet: MAINNET,
+};
+
+export function getNetworkConfig(name: keyof typeof NETWORKS): NetworkConfig {
+  return NETWORKS[name];
+}
+
 const TRANSACTION_POLL_INTERVAL_MS = 1000;
 const TRANSACTION_POLL_TIMEOUT_MS = 30000;
 
