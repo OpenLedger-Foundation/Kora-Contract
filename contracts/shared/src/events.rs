@@ -1,6 +1,6 @@
 use crate::audit::AdminAuditEntry;
 use crate::types::RiskTier;
-use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Bytes, Env, String, Symbol, Vec};
 
 // ── Canonical Event Schema ────────────────────────────────────────────────────
 //
@@ -161,7 +161,6 @@ pub fn installment_paid(env: &Env, invoice_id: u64, payer: &Address, index: u32,
     emit(
         env,
         symbol_short!("INSTLPAID"),
-        symbol_short!("INSTMT_PD"),
         (payer.clone(), invoice_id, index, amount, env.ledger().timestamp()),
     );
 }
@@ -182,6 +181,32 @@ pub fn late_penalty_applied(env: &Env, invoice_id: u64, penalty_amount: i128, to
         env,
         symbol_short!("LATE_PEN"),
         (invoice_id, penalty_amount, total_owed, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a late penalty is split between investors and treasury.
+/// Schema: (invoice_id, total_penalty, treasury_cut, investor_cut, timestamp)
+pub fn late_penalty_split(
+    env: &Env,
+    invoice_id: u64,
+    total_penalty: i128,
+    treasury_cut: i128,
+    investor_cut: i128,
+) {
+    emit(
+        env,
+        symbol_short!("PEN_SPLIT"),
+        (invoice_id, total_penalty, treasury_cut, investor_cut, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when the late-penalty treasury split ratio is updated (admin).
+/// Schema: (admin, split_bps, timestamp)
+pub fn late_penalty_split_updated(env: &Env, split_bps: u32) {
+    emit(
+        env,
+        symbol_short!("PEN_SPL_U"),
+        (split_bps, env.ledger().timestamp()),
     );
 }
 
@@ -220,7 +245,6 @@ pub fn fee_collected(
     emit(
         env,
         symbol_short!("FEE_COLL"),
-        symbol_short!("FEE_COL"),
         (
             investor.clone(),
             invoice_id,
@@ -298,7 +322,6 @@ pub fn protocol_unpaused(env: &Env, by: &Address) {
     emit(
         env,
         symbol_short!("AC_UNPSD"),
-        symbol_short!("UNPAUSED"),
         (by.clone(), env.ledger().timestamp()),
     );
 }
@@ -377,7 +400,6 @@ pub fn position_recorded(
     emit(
         env,
         symbol_short!("POS_RECD"),
-        symbol_short!("POS_RECRD"),
         (
             admin.clone(),
             invoice_id,
@@ -396,7 +418,6 @@ pub fn verifier_added(env: &Env, admin: &Address, verifier: &Address) {
     emit(
         env,
         symbol_short!("VRF_ADDED"),
-        symbol_short!("VRF_ADD"),
         (admin.clone(), verifier.clone(), env.ledger().timestamp()),
     );
 }
@@ -406,7 +427,6 @@ pub fn verifier_removed(env: &Env, admin: &Address, verifier: &Address) {
     emit(
         env,
         symbol_short!("VRF_RMVD"),
-        symbol_short!("VRF_REM"),
         (admin.clone(), verifier.clone(), env.ledger().timestamp()),
     );
 }
@@ -425,7 +445,6 @@ pub fn sme_score_updated(env: &Env, verifier: &Address, sme: &Address, new_score
     emit(
         env,
         symbol_short!("SME_SCORE"),
-        symbol_short!("SME_UPD"),
         (verifier.clone(), sme.clone(), new_score, env.ledger().timestamp()),
     );
 }
@@ -444,7 +463,6 @@ pub fn sme_invoice_count_incremented(env: &Env, sme: &Address, new_total: u32) {
     emit(
         env,
         symbol_short!("SME_INVCT"),
-        symbol_short!("SME_INV"),
         (sme.clone(), new_total, env.ledger().timestamp()),
     );
 }
@@ -497,7 +515,6 @@ pub fn upgrade_proposed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::Byt
     emit(
         env,
         symbol_short!("AC_UPG_PR"),
-        symbol_short!("UPG_PROP"),
         (admin.clone(), wasm_hash.clone(), env.ledger().timestamp()),
     );
 }
@@ -507,7 +524,6 @@ pub fn upgrade_executed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::Byt
     emit(
         env,
         symbol_short!("AC_UPG_EX"),
-        symbol_short!("UPG_EXEC"),
         (admin.clone(), wasm_hash.clone(), env.ledger().timestamp()),
     );
 }
@@ -520,7 +536,6 @@ pub fn multisig_configured(env: &Env, threshold: u32, signer_count: u32) {
     emit(
         env,
         symbol_short!("MSIG_CFG"),
-        symbol_short!("MS_CFG"),
         (threshold, signer_count, env.ledger().timestamp()),
     );
 }
@@ -530,7 +545,6 @@ pub fn action_proposed(env: &Env, proposal_id: u64, proposer: &Address) {
     emit(
         env,
         symbol_short!("ACT_PROP"),
-        symbol_short!("MS_PROP"),
         (proposal_id, proposer.clone(), env.ledger().timestamp()),
     );
 }
@@ -540,7 +554,6 @@ pub fn action_approved(env: &Env, proposal_id: u64, approver: &Address, approval
     emit(
         env,
         symbol_short!("ACT_APPR"),
-        symbol_short!("MS_APPR"),
         (
             proposal_id,
             approver.clone(),
@@ -555,7 +568,6 @@ pub fn action_executed(env: &Env, proposal_id: u64, executor: &Address) {
     emit(
         env,
         symbol_short!("ACT_EXEC"),
-        symbol_short!("MS_EXEC"),
         (proposal_id, executor.clone(), env.ledger().timestamp()),
     );
 }
@@ -567,7 +579,6 @@ pub fn refund_claimed(env: &Env, invoice_id: u64, investor: &Address, amount: i1
     emit(
         env,
         symbol_short!("REFUND_CL"),
-        symbol_short!("REFUND"),
         (
             investor.clone(),
             invoice_id,
@@ -592,6 +603,69 @@ pub fn position_sold(env: &Env, invoice_id: u64, seller: &Address, buyer: &Addre
         env,
         symbol_short!("POS_SOLD"),
         (invoice_id, seller.clone(), buyer.clone(), price, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when an investor position is transferred directly (e.g. via the
+/// secondary market contract calling `financing_pool.transfer_position`).
+///
+/// Schema: (invoice_id, from, to, timestamp)
+pub fn position_transferred(env: &Env, invoice_id: u64, from: &Address, to: &Address) {
+    emit(
+        env,
+        symbol_short!("POS_XFER"),
+        (invoice_id, from.clone(), to.clone(), env.ledger().timestamp()),
+    );
+}
+
+// ── Secondary Market Contract Events ────────────────────────────────────────────
+
+/// Emitted when the secondary market contract is initialized.
+///
+/// Schema: (admin, financing_pool, fee_bps, timestamp)
+pub fn secondary_market_initialized(
+    env: &Env,
+    admin: &Address,
+    financing_pool: &Address,
+    fee_bps: u32,
+) {
+    emit(
+        env,
+        symbol_short!("SM_INIT"),
+        (admin.clone(), financing_pool.clone(), fee_bps, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when the secondary market is paused.
+///
+/// Schema: (admin, timestamp)
+pub fn secondary_market_paused(env: &Env) {
+    emit(
+        env,
+        symbol_short!("SM_PAUS"),
+        (env.ledger().timestamp(),),
+    );
+}
+
+/// Emitted when the secondary market is unpaused.
+///
+/// Schema: (admin, timestamp)
+pub fn secondary_market_unpaused(env: &Env) {
+    emit(
+        env,
+        symbol_short!("SM_UNP"),
+        (env.ledger().timestamp(),),
+    );
+}
+
+/// Emitted when the protocol fee is updated.
+///
+/// Schema: (admin, fee_bps, timestamp)
+pub fn secondary_market_fee_updated(env: &Env, fee_bps: u32) {
+    emit(
+        env,
+        symbol_short!("SM_FEE"),
+        (fee_bps, env.ledger().timestamp()),
     );
 }
 
@@ -767,6 +841,30 @@ pub fn metadata_hash_corrected(
             invoice_id,
             old_hash.clone(),
             new_hash.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (actor=sme, invoice_id, new_cid, timestamp)
+pub fn metadata_cid_updated(
+    env: &Env,
+    invoice_id: u64,
+    sme: &Address,
+    new_cid: &String,
+) {
+    emit(
+        env,
+        symbol_short!("MTD_CID"),
+        (
+            sme.clone(),
+            invoice_id,
+            new_cid.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Dutch Auction / Decay Schedule Events (#439) ──────────────────────────────
 
 /// Schema: (actor=seller, invoice_id, floor_price, decay_end_ts, timestamp)

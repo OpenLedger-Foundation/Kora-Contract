@@ -24,6 +24,7 @@ pub enum AccessControlError {
     AlreadyPaused = 3,
     AlreadyVoted = 4,
     ArithmeticOverflow = 5,
+    DirectCallProhibited = 51,
     GovernanceThresholdNotMet = 6,
     GovernanceTimelockNotElapsed = 7,
     InvalidAddress = 8,
@@ -275,7 +276,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Role(target.clone()));
         Self::add_to_role_members(&env, &role, &target);
         events::role_granted(&env, &admin, &target);
-        let details = (&target, &role).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::GrantRole, details);
         Ok(())
     }
@@ -319,7 +320,7 @@ impl AccessControlContract {
             .remove(&DataKey::Role(target.clone()));
         Self::remove_from_role_members(&env, &current_role, &target);
         events::role_revoked(&env, &admin, &target);
-        let details = (&target, &current_role).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::RevokeRole, details);
         Ok(())
     }
@@ -367,7 +368,7 @@ impl AccessControlContract {
             .persistent()
             .remove(&DataKey::Role(current_admin.clone()));
         events::admin_transferred(&env, &current_admin, &new_admin);
-        let details = new_admin.into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin, details);
         Ok(())
     }
@@ -401,7 +402,6 @@ impl AccessControlContract {
 
         let signer_count = signers.len();
         if threshold == 0 || threshold > signer_count {
-            return Err(KoraError::InvalidAmount);
             return Err(AccessControlError::InvalidThreshold);
         }
 
@@ -418,7 +418,7 @@ impl AccessControlContract {
         }
 
         events::multisig_configured(&env, threshold, signer_count);
-        let details = (threshold, signer_count as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig, details);
         Ok(())
     }
@@ -511,18 +511,6 @@ impl AccessControlContract {
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)?;
-
-        if proposal.executed {
-            return Err(KoraError::ParameterProposalAlreadyExecuted);
-        }
-        if env.ledger().timestamp() > proposal.expires_at {
-            return Err(KoraError::FundingDeadlinePassed);
-        }
-
-        for i in 0..proposal.approvals.len() {
-            if proposal.approvals.get(i).ok_or(KoraError::Unauthorized)? == approver {
-                return Err(KoraError::AlreadyInitialized);
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         if proposal.executed {
@@ -582,16 +570,6 @@ impl AccessControlContract {
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)?;
-
-        if proposal.executed {
-            return Err(KoraError::ParameterProposalAlreadyExecuted);
-        }
-        if env.ledger().timestamp() > proposal.expires_at {
-            return Err(KoraError::FundingDeadlinePassed);
-        }
-        if proposal.approvals.len() < config.threshold {
-            return Err(KoraError::GovernanceThresholdNotMet);
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         if proposal.executed {
@@ -668,7 +646,7 @@ impl AccessControlContract {
         }
 
         events::action_executed(&env, proposal_id, &executor);
-        let details = proposal_id.into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
         Ok(())
     }
@@ -722,7 +700,6 @@ impl AccessControlContract {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)
             .ok_or(AccessControlError::ProposalNotFound)
     }
 
@@ -789,7 +766,7 @@ impl AccessControlContract {
         );
 
         events::action_proposed(&env, proposal_id, &proposer);
-        let details = (proposal.key, proposal.new_value).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
         Ok(proposal_id)
     }
@@ -837,7 +814,7 @@ impl AccessControlContract {
         }
         for i in 0..proposal.approvals.len() {
             if proposal.approvals.get(i).unwrap() == signer {
-                return Err(KoraError::AlreadyInitialized);
+                return Err(AccessControlError::AlreadyInitialized);
                 return Err(AccessControlError::AlreadyVoted);
             }
         }
@@ -885,7 +862,7 @@ impl AccessControlContract {
             return Err(AccessControlError::GovernanceThresholdNotMet);
         }
         if env.ledger().timestamp() < proposal.created_at + GOVERNANCE_TIMELOCK_DELAY {
-            return Err(KoraError::UpgradeTimelockNotElapsed);
+            return Err(AccessControlError::UpgradeTimelockNotElapsed);
             return Err(AccessControlError::GovernanceTimelockNotElapsed);
         }
 
@@ -901,7 +878,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Parameter(proposal.key.clone()));
 
         events::action_executed(&env, proposal_id, &caller);
-        let details = (proposal.key, proposal.new_value).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter, details);
         Ok(())
     }
@@ -1020,7 +997,7 @@ impl AccessControlContract {
         );
 
         events::action_proposed(&env, proposal_id, &proposer);
-        let details = (new_threshold, new_signers.len() as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
         Ok(proposal_id)
     }
@@ -1104,7 +1081,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::MultisigConfig);
 
         events::action_executed(&env, proposal_id, &executor);
-        let details = (proposal.new_threshold, proposal.new_signers.len() as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &executor, AdminActionType::ConfigureMultisig, details);
         Ok(())
     }
@@ -1199,7 +1176,7 @@ impl AccessControlContract {
                 if i >= page_size {
                     break;
                 }
-                if let Ok(addr) = members.get(j as u32) {
+                if let Some(addr) = members.get(j as u32) {
                     results.push_back(addr);
                 }
                 i += 1;
@@ -1233,7 +1210,7 @@ impl AccessControlContract {
             &(new_wasm_hash.clone(), env.ledger().timestamp()),
         );
         events::upgrade_proposed(&env, &admin, &new_wasm_hash);
-        let details = new_wasm_hash.clone().into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade, details);
         Ok(())
     }
@@ -1263,7 +1240,7 @@ impl AccessControlContract {
         }
         env.storage().instance().remove(&DataKey::UpgradeProposal);
         events::upgrade_executed(&env, &admin, &wasm_hash);
-        let details = wasm_hash.clone().into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade, details);
         env.deployer().update_current_contract_wasm(wasm_hash);
         Ok(())
@@ -1346,7 +1323,7 @@ impl AccessControlContract {
         // Check if already present to avoid duplicates
         let mut found = false;
         for i in 0..members.len() {
-            if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+            if members.get(i).unwrap() == *address {
                 found = true;
                 break;
             }
@@ -1364,7 +1341,7 @@ impl AccessControlContract {
         if let Some(mut members) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
             let mut found = false;
             for i in 0..members.len() {
-                if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+                if members.get(i).unwrap() == *address {
                     // Swap with last and pop to remove efficiently
                     let last = members.pop_back();
                     if i < members.len() {
@@ -1386,7 +1363,7 @@ impl AccessControlContract {
     }
 
     /// Append one entry to the ring-buffer audit log and emit the canonical event.
-    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType, details: soroban_sdk::Bytes) {
+    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType, _details: soroban_sdk::Bytes) {
         let total: u64 = env
             .storage()
             .instance()
@@ -1454,7 +1431,6 @@ impl AccessControlContract {
         env.storage()
             .persistent()
             .get(&DataKey::MultisigConfig)
-            .ok_or(KoraError::NotInitialized)
             .ok_or(AccessControlError::MultisigNotConfigured)
     }
 
@@ -1464,23 +1440,7 @@ impl AccessControlContract {
                 return Ok(());
             }
         }
-        Err(KoraError::NotMultisigSigner)
-    }
-
-    /// Validate a proposed parameter value against its allowed range.
-    fn require_valid_parameter(key: &ParameterKey, value: u32) -> Result<(), KoraError> {
-        match key {
-            ParameterKey::FeeBps | ParameterKey::LatePenaltyBps => {
-                if value > 10_000 {
-                    return Err(KoraError::InvalidFeeRate);
-                }
-            }
-            ParameterKey::MaxRiskScore => {
-                if value > 100 {
-                    return Err(KoraError::InvalidRiskScore);
-                }
-            }
-        Err(AccessControlError::SignerNotFound)
+        Err(AccessControlError::NotMultisigSigner)
     }
 
     /// Validate a proposed parameter value against its allowed range.
@@ -1494,9 +1454,7 @@ impl AccessControlContract {
         } else {
             Err(AccessControlError::InvalidParameterValue)
         }
-        Ok(())
     }
-}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

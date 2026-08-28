@@ -111,7 +111,7 @@ impl PriceOracleContract {
             .get(&DataKey::PriceFeeders(base.clone(), quote.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
-        if !feeders.iter().any(|f| f == &feeder) {
+        if !feeders.iter().any(|f| f == feeder) {
             feeders.push_back(feeder);
             env.storage()
                 .persistent()
@@ -242,17 +242,17 @@ impl PriceOracleContract {
         for i in 0..len {
             for j in i..len {
                 if sorted.get(j).unwrap() < sorted.get(i).unwrap() {
-                    let temp = *sorted.get(j).unwrap();
-                    sorted.set(j, *sorted.get(i).unwrap());
+                    let temp = sorted.get(j).unwrap();
+                    sorted.set(j, sorted.get(i).unwrap());
                     sorted.set(i, temp);
                 }
             }
         }
 
         if len % 2 == 1 {
-            *sorted.get(len / 2).unwrap()
+            sorted.get(len / 2).unwrap()
         } else {
-            (*sorted.get(len / 2 - 1).unwrap() + *sorted.get(len / 2).unwrap()) / 2
+            (sorted.get(len / 2 - 1).unwrap() + sorted.get(len / 2).unwrap()) / 2
         }
     }
 
