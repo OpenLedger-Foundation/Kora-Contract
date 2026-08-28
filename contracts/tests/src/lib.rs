@@ -495,6 +495,11 @@ mod integration {
         assert!(r.is_err(), "set_funded must be blocked when paused");
         assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
 
+        // ── invoice_nft::set_repaid blocked ───────────────────────────────────
+        let r = k.invoice_nft.try_set_repaid(&k.pool.address, &invoice_id);
+        assert!(r.is_err(), "set_repaid must be blocked when paused");
+        assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
+
         // ── marketplace::list_invoice blocked ─────────────────────────────────
         let funding_deadline = k.env.ledger().timestamp() + 86_400 * 30;
         // Need a whitelisted token — use a dummy address; it will fail at pause check first
