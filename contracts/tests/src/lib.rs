@@ -86,7 +86,7 @@ mod integration {
         // max_position_bps = 10_000 (100%) — disables the per-investor concentration
         // cap so it doesn't interfere with tests that aren't exercising that guard.
         pool.initialize(
-            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
         mp.initialize(
             &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &50u32, &0u32,

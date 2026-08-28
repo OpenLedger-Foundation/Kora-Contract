@@ -1949,7 +1949,8 @@ mod tests {
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
         let rr = Address::generate(&env);    // risk registry (unused in unit tests)
         let oracle = Address::generate(&env); // price oracle  (unused in unit tests)
-        pool_client.initialize(&admin, &nft_id, &rr, &treasury, &ac_id, &200u32, &oracle);
+        let dispute_resolution = Address::generate(&env);
+        pool_client.initialize(&admin, &nft_id, &rr, &treasury, &ac_id, &200u32, &oracle, &5_000u32, &dispute_resolution);
 
         let registry_id = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
         let registry = registry_id.clone();
@@ -4698,7 +4699,8 @@ mod tests {
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
         let rr = Address::generate(&env);    // risk registry (unused in unit tests)
         let oracle = Address::generate(&env); // price oracle  (unused in unit tests)
-        pool_client.initialize(&admin, &nft_id, &rr, &treasury, &ac_id, &200u32, &oracle, &5_000u32);
+        let dispute_resolution = Address::generate(&env);
+        pool_client.initialize(&admin, &nft_id, &rr, &treasury, &ac_id, &200u32, &oracle, &5_000u32, &dispute_resolution);
 
         let registry_id = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
         let registry = registry_id.clone();

@@ -95,6 +95,19 @@ pub enum KoraError {
     InvestorNotAccredited = 124,
     // marketplace: amendment rejected because funding has already begun (#437)
     ListingAlreadyFunded = 125,
+    // PositionShare (#563)
+    ShareNotFound = 141,
+    InvalidShareAmount = 142,
+    AlreadySplit = 143,
+    NotPositionOwner = 144,
+    // Dispute Resolution (#565)
+    DisputeNotFound = 150,
+    DisputeAlreadyOpen = 151,
+    DisputeAlreadyResolved = 152,
+    DisputeWindowExpired = 153,
+    NotDisputeChallenger = 154,
+    NotGovernance = 155,
+    DisputeNotOpen = 156,
 }
 
 /// Common validation/arithmetic errors shared by every contract's
