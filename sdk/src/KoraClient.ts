@@ -51,4 +51,17 @@ export class KoraClient {
     this.accessControl = new AccessControlClient(addresses.accessControl, network);
     this.priceOracle   = new PriceOracleClient(addresses.priceOracle, network);
   }
+
+  async batchGetInvoices(invoiceIds: bigint[]) {
+    return Promise.all(invoiceIds.map((invoiceId) => this.invoiceNft.getInvoice(invoiceId)));
+  }
+
+  async batchGetListings(invoiceIds: bigint[]) {
+    return Promise.all(invoiceIds.map((invoiceId) => this.marketplace.getListing(invoiceId)));
+  }
+
+  paginate<T>(items: T[], page = 1, pageSize = 20) {
+    const start = Math.max(0, (page - 1) * pageSize);
+    return items.slice(start, start + pageSize);
+  }
 }

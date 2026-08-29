@@ -100,40 +100,48 @@ pub enum KoraError {
 
     // Invoice ownership, credit limit, currency allowlist
     NotInvoiceOwner = 120,
-    CreditLimitExceeded = 130,
-    CurrencyNotAllowed = 132,
+    // invoice_nft: minting this invoice would exceed the SME's pre-approved credit limit
+    CreditLimitExceeded = 121,
+    // invoice_nft: currency symbol is not on the allowlist
+    CurrencyNotAllowed = 122,
+    // marketplace: investor's prospective share would exceed the per-listing concentration cap (#435)
+    InvestorConcentrationExceeded = 123,
+    // marketplace: investor address has not been marked accredited (#436)
+    InvestorNotAccredited = 124,
+    // marketplace: amendment rejected because funding has already begun (#437)
+    ListingAlreadyFunded = 125,
 
-    // Multisig admin-action proposals
-    InvalidThreshold = 122,
-    ProposalNotFound = 123,
-    ProposalAlreadyExecuted = 124,
-    ProposalExpired = 125,
+    // access_control / marketplace multisig admin-action governance
+    AlreadyVoted = 113,
     AlreadyApproved = 126,
-    ThresholdNotMet = 127,
-    MultisigNotConfigured = 128,
-    SignerNotFound = 131,
-}
+    ProposalNotFound = 140,
+    ProposalAlreadyExecuted = 141,
+    ProposalExpired = 142,
+    ThresholdNotMet = 143,
+    SignerNotFound = 144,
+    MultisigNotConfigured = 145,
+    MultisigApprovalRequired = 146,
+    QuorumRequired = 147,
+    UnauthorizedCaller = 148,
+    InvalidParameterValue = 149,
 
-impl From<CommonError> for KoraError {
-    fn from(e: CommonError) -> Self {
-        match e {
-            CommonError::InvalidAmount => KoraError::InvalidAmount,
-            CommonError::InvalidDueDate => KoraError::InvalidDueDate,
-            CommonError::InvalidRiskScore => KoraError::InvalidRiskScore,
-            CommonError::InvalidCid => KoraError::InvalidCid,
-            CommonError::InvalidFeeRate => KoraError::InvalidFeeRate,
-            CommonError::InvalidAddress => KoraError::InvalidAddress,
-            CommonError::EmptyString => KoraError::EmptyString,
-            CommonError::EmptyBytes => KoraError::EmptyBytes,
-            CommonError::FieldTooLong => KoraError::FieldTooLong,
-            CommonError::ArithmeticOverflow => KoraError::ArithmeticOverflow,
-            CommonError::ArithmeticUnderflow => KoraError::ArithmeticUnderflow,
-            CommonError::Reentrancy => KoraError::Reentrancy,
-            CommonError::InvalidLength => KoraError::InvalidLength,
-            CommonError::InvalidState => KoraError::InvalidAmount,
-            CommonError::BatchSizeExceeded => KoraError::BatchSizeExceeded,
-        }
-    }
+    // marketplace dependency-migration and token-whitelist timelocks (#443-#446)
+    DependencyUpdateTimelockNotElapsed = 150,
+    NoDependencyUpdateProposed = 151,
+    TokenWhitelistTimelockNotElapsed = 152,
+    NoTokenWhitelistProposed = 153,
+
+    // treasury loss-reserve, recipient allowlist, emergency gating (#455-#458)
+    ContributionBelowMinimum = 154,
+    InsufficientReserveBalance = 155,
+    ReserveCallerNotAuthorized = 156,
+    EmergencyNotDeclared = 157,
+    RecipientNotAllowed = 158,
+    NoRecipientProposed = 159,
+    RecipientTimelockNotElapsed = 160,
+
+    // invoice_nft: per-SME mint rate limit exceeded
+    MintRateLimitExceeded = 161,
 }
 
 /// Common validation/arithmetic errors shared by every contract's
@@ -162,7 +170,4 @@ pub enum CommonError {
     ArithmeticUnderflow = 11,
     /// Reentrancy guard triggered.
     Reentrancy = 12,
-    InvalidLength = 13,
-    InvalidState = 14,
-    BatchSizeExceeded = 15,
 }

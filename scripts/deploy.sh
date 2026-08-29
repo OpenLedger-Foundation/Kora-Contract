@@ -34,6 +34,7 @@
 # =============================================================================
 
 set -euo pipefail
+umask 077
 
 NETWORK="${1:-testnet}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

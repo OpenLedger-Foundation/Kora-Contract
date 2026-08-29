@@ -571,6 +571,18 @@ mod tests {
     }
 
     #[test]
+    fn test_require_amount_within_bounds_zero_max() {
+        assert!(require_amount_within_bounds(0, 0).is_ok());
+        assert!(require_amount_within_bounds(1, 0).is_err());
+        assert!(require_amount_within_bounds(-1, 0).is_err());
+    }
+
+    #[test]
+    fn test_require_amount_within_bounds_accepts_exact_max() {
+        assert!(require_amount_within_bounds(500, 500).is_ok());
+    }
+
+    #[test]
     fn test_require_valid_bps_range_min_equals_max() {
         assert!(require_valid_bps_range(50, 50, 50).is_ok());
         assert!(require_valid_bps_range(49, 50, 50).is_err());

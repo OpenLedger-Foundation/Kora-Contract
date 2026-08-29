@@ -26,8 +26,22 @@ export const MAINNET: NetworkConfig = {
   networkPassphrase: Networks.PUBLIC,
 };
 
+export const NETWORKS: Record<string, NetworkConfig> = {
+  testnet: TESTNET,
+  mainnet: MAINNET,
+};
+
+export function getNetworkConfig(name: keyof typeof NETWORKS): NetworkConfig {
+  return NETWORKS[name];
+}
+
 const TRANSACTION_POLL_INTERVAL_MS = 1000;
 const TRANSACTION_POLL_TIMEOUT_MS = 30000;
+
+export interface InvokeOptions {
+  preflight?: boolean;
+  retries?: number;
+}
 
 export class BaseClient {
   protected server: rpc.Server;
@@ -43,7 +57,26 @@ export class BaseClient {
   protected async invoke(
     method: string,
     args: xdr.ScVal[],
-    keypair?: Keypair
+    keypair?: Keypair,
+    options: InvokeOptions = {}
+  ): Promise<xdr.ScVal> {
+    const retries = options.retries ?? 0;
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        return await this.invokeOnce(method, args, keypair, options);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async invokeOnce(
+    method: string,
+    args: xdr.ScVal[],
+    keypair?: Keypair,
+    options: InvokeOptions = {}
   ): Promise<xdr.ScVal> {
     const account = await this.server.getAccount(
       keypair?.publicKey() ?? this.contract.contractId()
@@ -56,13 +89,15 @@ export class BaseClient {
       .setTimeout(30)
       .build();
 
-    if (!keypair) {
+    if (!keypair || options.preflight) {
       // Read-only simulation
       const sim = await this.server.simulateTransaction(tx);
       if (rpc.Api.isSimulationError(sim)) throw new Error(sim.error);
       const result = (sim as rpc.Api.SimulateTransactionSuccessResponse).result;
       if (!result) throw new Error("No simulation result");
-      return result.retval;
+      if (!keypair) {
+        return result.retval;
+      }
     }
 
     const prepared = await this.server.prepareTransaction(tx);
