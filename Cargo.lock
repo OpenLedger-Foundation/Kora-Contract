@@ -791,24 +791,6 @@ name = "kora-price-oracle"
 version = "0.1.0"
 dependencies = [
  "kora-shared",
- "kora-treasury",
- "soroban-sdk",
-]
-
-[[package]]
-name = "kora-price-oracle"
-version = "0.1.0"
-dependencies = [
- "kora-shared",
- "kora-treasury",
- "soroban-sdk",
-]
-
-[[package]]
-name = "kora-price-oracle"
-version = "0.1.0"
-dependencies = [
- "kora-shared",
  "soroban-sdk",
 ]
 
@@ -836,6 +818,7 @@ dependencies = [
  "kora-financing-pool",
  "kora-invoice-nft",
  "kora-marketplace",
+ "kora-price-oracle",
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",
@@ -846,6 +829,7 @@ dependencies = [
 name = "kora-treasury"
 version = "0.1.0"
 dependencies = [
+ "kora-access-control",
  "kora-shared",
  "soroban-sdk",
 ]
