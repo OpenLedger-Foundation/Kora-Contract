@@ -1917,6 +1917,22 @@ mod tests {
     }
 
     #[test]
+    fn test_initialize_sets_migration_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, InvoiceNftContract);
+        let client = InvoiceNftContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let access_control = Address::generate(&env);
+        client.initialize(&admin, &access_control);
+
+        let version: Option<u32> = env.as_contract(&client.address, || {
+            env.storage().instance().get(&DataKey::MigrationVersion)
+        });
+        assert_eq!(version, Some(2));
+    }
+
+    #[test]
     fn test_initialize_already_initialized_fails() {
         let (env, admin, client) = setup();
         let access_control = Address::generate(&env);
@@ -2288,6 +2304,42 @@ mod tests {
         let result = client.try_set_repaid(&pool, &id);
         assert_eq!(result.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
     }
+
+    #[test]
+    fn test_set_listed_blocked_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let admin = Address::generate(&env);
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac_id);
+        ac_client.initialize(&admin);
+
+        let contract_id = env.register_contract(None, InvoiceNftContract);
+        let client = InvoiceNftContractClient::new(&env, &contract_id);
+        client.initialize(&admin, &ac_id);
+
+        let id = mint_default(&env, &client, 10u32);
+        let marketplace = Address::generate(&env);
+        let pool = Address::generate(&env);
+        client.set_authorized_callers(&admin, &marketplace, &pool);
+
+        ac_client.pause(&admin);
+
+        let result = client.try_set_listed(&marketplace, &id);
+        assert_eq!(result.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
+    }
+
 
     #[test]
     fn test_set_repaid_refreshes_ttl() {
