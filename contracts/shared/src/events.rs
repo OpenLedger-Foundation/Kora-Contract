@@ -2,6 +2,24 @@ use crate::audit::AdminAuditEntry;
 use crate::types::RiskTier;
 use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol, Vec};
 
+// ── Event Schema Version (#583) ───────────────────────────────────────────────
+//
+// EVENT_SCHEMA_VERSION is the current schema generation for all Kora events.
+// Off-chain indexers MUST check the "SCHEMA_V" topic on every event to detect
+// contract upgrades that change field count, order, or types.
+//
+// Versioning policy:
+//   • Additive change (new optional field appended to an existing event):
+//     increment the MINOR digit only (no topic bump required for pure appends
+//     at the end of an existing tuple, but SCHEMA_V must be bumped so indexers
+//     know to re-check the schema catalogue).
+//   • Breaking change (field removed, type changed, or ordering altered):
+//     increment the MAJOR digit and update docs/EVENTS.md with migration notes.
+//
+// Current version: 1 (initial versioned release).
+// See docs/EVENTS.md §"Schema Versioning" for the full changelog.
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
+
 // ── Canonical Event Schema ────────────────────────────────────────────────────
 //
 // Every event published by the Kora protocol follows this payload convention:
@@ -16,9 +34,20 @@ use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol, Vec};
 //
 // Events that carry multiple data fields extend this tuple while preserving
 // the actor-first, timestamp-last ordering.
+//
+// Each event is published with two topics: ("SCHEMA_V", <event_topic>).
+// The first topic carries EVENT_SCHEMA_VERSION so off-chain indexers can gate
+// on the version without decoding the payload.
 
 fn emit(env: &Env, topic: Symbol, data: impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-    env.events().publish((topic,), data);
+    env.events()
+        .publish((symbol_short!("SCHEMA_V"), topic, EVENT_SCHEMA_VERSION), data);
+}
+
+/// Returns the current event schema version constant.
+/// Indexers and tests can call this to assert the version they were built against.
+pub fn schema_version() -> u32 {
+    EVENT_SCHEMA_VERSION
 }
 
 // ── Invoice Events ────────────────────────────────────────────────────────────
@@ -160,7 +189,6 @@ pub fn repayment_made(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
 pub fn installment_paid(env: &Env, invoice_id: u64, payer: &Address, index: u32, amount: i128) {
     emit(
         env,
-        symbol_short!("INSTLPAID"),
         symbol_short!("INSTMT_PD"),
         (payer.clone(), invoice_id, index, amount, env.ledger().timestamp()),
     );
@@ -219,7 +247,6 @@ pub fn fee_collected(
 ) {
     emit(
         env,
-        symbol_short!("FEE_COLL"),
         symbol_short!("FEE_COL"),
         (
             investor.clone(),
@@ -297,7 +324,6 @@ pub fn protocol_paused(env: &Env, by: &Address) {
 pub fn protocol_unpaused(env: &Env, by: &Address) {
     emit(
         env,
-        symbol_short!("AC_UNPSD"),
         symbol_short!("UNPAUSED"),
         (by.clone(), env.ledger().timestamp()),
     );
@@ -327,6 +353,22 @@ pub fn admin_transferred(env: &Env, actor: &Address, new_admin: &Address) {
         env,
         symbol_short!("ADM_TRF"),
         (actor.clone(), new_admin.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted during deliberate key-rotation recovery (e.g. suspected compromise).
+/// Distinct from `admin_transferred` so off-chain monitors can alert specifically
+/// on rotation events. Schema: (actor=executor, old_admin, new_admin, timestamp)
+pub fn admin_rotated(env: &Env, executor: &Address, old_admin: &Address, new_admin: &Address) {
+    emit(
+        env,
+        symbol_short!("ADM_ROT"),
+        (
+            executor.clone(),
+            old_admin.clone(),
+            new_admin.clone(),
+            env.ledger().timestamp(),
+        ),
     );
 }
 
@@ -376,7 +418,6 @@ pub fn position_recorded(
 ) {
     emit(
         env,
-        symbol_short!("POS_RECD"),
         symbol_short!("POS_RECRD"),
         (
             admin.clone(),
@@ -389,13 +430,27 @@ pub fn position_recorded(
     );
 }
 
+/// Cross-invoice net settlement event emitted once per `net_settle` call (#588).
+/// Schema: (actor=payer, invoice_ids, total_amount, timestamp)
+pub fn net_settled(env: &Env, payer: &Address, invoice_ids: &Vec<u64>, total_amount: i128) {
+    emit(
+        env,
+        symbol_short!("NET_SETTL"),
+        (
+            payer.clone(),
+            invoice_ids.clone(),
+            total_amount,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Risk Registry Events ──────────────────────────────────────────────────────
 
 /// Schema: (actor=admin, verifier, timestamp)
 pub fn verifier_added(env: &Env, admin: &Address, verifier: &Address) {
     emit(
         env,
-        symbol_short!("VRF_ADDED"),
         symbol_short!("VRF_ADD"),
         (admin.clone(), verifier.clone(), env.ledger().timestamp()),
     );
@@ -405,7 +460,6 @@ pub fn verifier_added(env: &Env, admin: &Address, verifier: &Address) {
 pub fn verifier_removed(env: &Env, admin: &Address, verifier: &Address) {
     emit(
         env,
-        symbol_short!("VRF_RMVD"),
         symbol_short!("VRF_REM"),
         (admin.clone(), verifier.clone(), env.ledger().timestamp()),
     );
@@ -424,7 +478,6 @@ pub fn sme_registered(env: &Env, verifier: &Address, sme: &Address, risk_score: 
 pub fn sme_score_updated(env: &Env, verifier: &Address, sme: &Address, new_score: u32) {
     emit(
         env,
-        symbol_short!("SME_SCORE"),
         symbol_short!("SME_UPD"),
         (verifier.clone(), sme.clone(), new_score, env.ledger().timestamp()),
     );
@@ -443,7 +496,6 @@ pub fn sme_default_recorded(env: &Env, admin: &Address, sme: &Address, total_def
 pub fn sme_invoice_count_incremented(env: &Env, sme: &Address, new_total: u32) {
     emit(
         env,
-        symbol_short!("SME_INVCT"),
         symbol_short!("SME_INV"),
         (sme.clone(), new_total, env.ledger().timestamp()),
     );
@@ -496,7 +548,6 @@ pub fn sub_account_removed(env: &Env, primary: &Address, sub_account: &Address) 
 pub fn upgrade_proposed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::BytesN<32>) {
     emit(
         env,
-        symbol_short!("AC_UPG_PR"),
         symbol_short!("UPG_PROP"),
         (admin.clone(), wasm_hash.clone(), env.ledger().timestamp()),
     );
@@ -506,7 +557,6 @@ pub fn upgrade_proposed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::Byt
 pub fn upgrade_executed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::BytesN<32>) {
     emit(
         env,
-        symbol_short!("AC_UPG_EX"),
         symbol_short!("UPG_EXEC"),
         (admin.clone(), wasm_hash.clone(), env.ledger().timestamp()),
     );
@@ -519,7 +569,6 @@ pub fn upgrade_executed(env: &Env, admin: &Address, wasm_hash: &soroban_sdk::Byt
 pub fn multisig_configured(env: &Env, threshold: u32, signer_count: u32) {
     emit(
         env,
-        symbol_short!("MSIG_CFG"),
         symbol_short!("MS_CFG"),
         (threshold, signer_count, env.ledger().timestamp()),
     );
@@ -529,7 +578,6 @@ pub fn multisig_configured(env: &Env, threshold: u32, signer_count: u32) {
 pub fn action_proposed(env: &Env, proposal_id: u64, proposer: &Address) {
     emit(
         env,
-        symbol_short!("ACT_PROP"),
         symbol_short!("MS_PROP"),
         (proposal_id, proposer.clone(), env.ledger().timestamp()),
     );
@@ -539,7 +587,6 @@ pub fn action_proposed(env: &Env, proposal_id: u64, proposer: &Address) {
 pub fn action_approved(env: &Env, proposal_id: u64, approver: &Address, approval_count: u32) {
     emit(
         env,
-        symbol_short!("ACT_APPR"),
         symbol_short!("MS_APPR"),
         (
             proposal_id,
@@ -554,7 +601,6 @@ pub fn action_approved(env: &Env, proposal_id: u64, approver: &Address, approval
 pub fn action_executed(env: &Env, proposal_id: u64, executor: &Address) {
     emit(
         env,
-        symbol_short!("ACT_EXEC"),
         symbol_short!("MS_EXEC"),
         (proposal_id, executor.clone(), env.ledger().timestamp()),
     );
@@ -566,7 +612,6 @@ pub fn action_executed(env: &Env, proposal_id: u64, executor: &Address) {
 pub fn refund_claimed(env: &Env, invoice_id: u64, investor: &Address, amount: i128) {
     emit(
         env,
-        symbol_short!("REFUND_CL"),
         symbol_short!("REFUND"),
         (
             investor.clone(),
@@ -767,6 +812,11 @@ pub fn metadata_hash_corrected(
             invoice_id,
             old_hash.clone(),
             new_hash.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Dutch Auction / Decay Schedule Events (#439) ──────────────────────────────
 
 /// Schema: (actor=seller, invoice_id, floor_price, decay_end_ts, timestamp)

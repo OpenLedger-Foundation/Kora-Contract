@@ -48,6 +48,10 @@ pub enum AccessControlError {
     UpgradeTimelockNotElapsed = 27,
     ProposalCancelled = 28,
     ParameterProposalCancelled = 29,
+    /// Direct (non-multisig) call is prohibited when a multisig is configured.
+    DirectCallProhibited = 30,
+    /// Admin rotation is blocked while a governance proposal is in flight.
+    RotationBlockedByPendingProposal = 31,
 }
 
 impl From<CommonError> for AccessControlError {
@@ -192,7 +196,7 @@ impl AccessControlContract {
         let _guard = ReentrancyGuard::new(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         events::protocol_paused(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::Pause, Bytes::new(&env));
+        Self::append_audit_entry(&env, &admin, AdminActionType::Pause, ().into_val(&env));
         Ok(())
     }
 
@@ -227,7 +231,7 @@ impl AccessControlContract {
         let _guard = ReentrancyGuard::new(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         events::protocol_unpaused(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::Unpause, Bytes::new(&env));
+        Self::append_audit_entry(&env, &admin, AdminActionType::Unpause, ().into_val(&env));
         Ok(())
     }
 
@@ -275,7 +279,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Role(target.clone()));
         Self::add_to_role_members(&env, &role, &target);
         events::role_granted(&env, &admin, &target);
-        let details = (&target, &role).into_val(&env);
+        let details = (target.clone(), role.clone()).into_val(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::GrantRole, details);
         Ok(())
     }
@@ -319,7 +323,7 @@ impl AccessControlContract {
             .remove(&DataKey::Role(target.clone()));
         Self::remove_from_role_members(&env, &current_role, &target);
         events::role_revoked(&env, &admin, &target);
-        let details = (&target, &current_role).into_val(&env);
+        let details = (target.clone(), current_role.clone()).into_val(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::RevokeRole, details);
         Ok(())
     }
@@ -372,6 +376,74 @@ impl AccessControlContract {
         Ok(())
     }
 
+    // ── Admin rotation (key-compromise recovery) ──────────────────────────────
+
+    /// Rotate the admin key to a new address in a single step.
+    ///
+    /// This is the **direct-call** path for environments where no multisig has been
+    /// configured yet.  When a multisig *is* configured, rotation must go through
+    /// `propose_action(AdminAction::RotateAdmin(...))` → `approve_action` → `execute_action`
+    /// so that the threshold of signers must agree before the key change takes effect.
+    ///
+    /// `rotate_admin` is semantically equivalent to `transfer_admin` but:
+    ///
+    /// 1. Emits a distinct `admin_rotated` event (topic `ADM_ROT`) so off-chain monitors
+    ///    can alert specifically on key-compromise recovery flows rather than routine handoffs.
+    /// 2. Checks that no active (un-executed, un-cancelled, unexpired) multisig proposal
+    ///    is in-flight before applying the change, preventing a race between an existing
+    ///    governance proposal and an emergency rotation.
+    ///
+    /// **Parameters:**
+    /// - `current_admin` — The current admin address (must sign).
+    /// - `new_admin`     — The replacement admin address.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotAdmin`                   — Caller is not the current admin.
+    /// - `AccessControlError::InvalidAddress`             — `new_admin` equals `current_admin`
+    ///                                                      or is the contract itself.
+    /// - `AccessControlError::Unauthorized`               — `new_admin` already holds an
+    ///                                                      Operator or Verifier role.
+    /// - `AccessControlError::DirectCallProhibited`       — Multisig is configured; use
+    ///                                                      propose/approve/execute instead.
+    /// - `AccessControlError::RotationBlockedByPendingProposal` — An active proposal exists;
+    ///                                                      cancel or execute it first.
+    ///
+    /// **Security:** Requires `current_admin.require_auth()`.  Emits `admin_rotated` event.
+    pub fn rotate_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), AccessControlError> {
+        current_admin.require_auth();
+        Self::require_admin(&env, &current_admin)?;
+        // If multisig is configured, the rotation must go through the multisig flow.
+        if Self::load_multisig_config(&env).is_ok() {
+            return Err(AccessControlError::DirectCallProhibited);
+        }
+
+        // Block if any active proposal is in flight (defensive check even on the
+        // direct path, consistent with the multisig execute_action path).
+        Self::require_no_active_proposals(&env)?;
+
+        Self::validate_transfer_admin_target(&env, &new_admin, &current_admin)?;
+
+        let old_admin = current_admin.clone();
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        Self::bump_persistent(&env, &DataKey::Admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Role(new_admin.clone()), &Role::Admin);
+        Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
+        // Remove old admin's role entry to reclaim storage
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Role(current_admin.clone()));
+        events::admin_rotated(&env, &current_admin, &old_admin, &new_admin);
+        let details = new_admin.into_val(&env);
+        Self::append_audit_entry(&env, &current_admin, AdminActionType::RotateAdmin, details);
+        Ok(())
+    }
+
     // ── Multisig ──────────────────────────────────────────────────────────────
 
     /// Configure the N-of-M multisig. Admin only. Once configured, admin
@@ -401,7 +473,6 @@ impl AccessControlContract {
 
         let signer_count = signers.len();
         if threshold == 0 || threshold > signer_count {
-            return Err(KoraError::InvalidAmount);
             return Err(AccessControlError::InvalidThreshold);
         }
 
@@ -511,18 +582,6 @@ impl AccessControlContract {
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)?;
-
-        if proposal.executed {
-            return Err(KoraError::ParameterProposalAlreadyExecuted);
-        }
-        if env.ledger().timestamp() > proposal.expires_at {
-            return Err(KoraError::FundingDeadlinePassed);
-        }
-
-        for i in 0..proposal.approvals.len() {
-            if proposal.approvals.get(i).ok_or(KoraError::Unauthorized)? == approver {
-                return Err(KoraError::AlreadyInitialized);
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         if proposal.executed {
@@ -582,16 +641,6 @@ impl AccessControlContract {
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)?;
-
-        if proposal.executed {
-            return Err(KoraError::ParameterProposalAlreadyExecuted);
-        }
-        if env.ledger().timestamp() > proposal.expires_at {
-            return Err(KoraError::FundingDeadlinePassed);
-        }
-        if proposal.approvals.len() < config.threshold {
-            return Err(KoraError::GovernanceThresholdNotMet);
             .ok_or(AccessControlError::ProposalNotFound)?;
 
         if proposal.executed {
@@ -665,6 +714,28 @@ impl AccessControlContract {
                 Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
                 events::admin_transferred(&env, &executor, &new_admin);
             }
+            AdminAction::RotateAdmin(new_admin) => {
+                // RotateAdmin: same storage effect as TransferAdmin but emits the
+                // dedicated `admin_rotated` event so off-chain monitors can alert on
+                // key-compromise recovery flows specifically.
+                Self::validate_transfer_admin_target(&env, &new_admin, &current_admin)?;
+                // Guard: block rotation while any OTHER active (un-executed, un-cancelled,
+                // unexpired) proposal exists, to prevent race between a pending
+                // governance action and an emergency rotation.
+                // (Skip `proposal_id` itself — it is already marked executed above.)
+                Self::require_no_other_active_proposals(&env, proposal_id)?;
+                env.storage().persistent().set(&DataKey::Admin, &new_admin);
+                Self::bump_persistent(&env, &DataKey::Admin);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Role(new_admin.clone()), &Role::Admin);
+                Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
+                // Remove old admin's role entry
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::Role(current_admin.clone()));
+                events::admin_rotated(&env, &executor, &current_admin, &new_admin);
+            }
         }
 
         events::action_executed(&env, proposal_id, &executor);
@@ -722,7 +793,6 @@ impl AccessControlContract {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-            .ok_or(KoraError::ParameterProposalNotFound)
             .ok_or(AccessControlError::ProposalNotFound)
     }
 
@@ -837,7 +907,6 @@ impl AccessControlContract {
         }
         for i in 0..proposal.approvals.len() {
             if proposal.approvals.get(i).unwrap() == signer {
-                return Err(KoraError::AlreadyInitialized);
                 return Err(AccessControlError::AlreadyVoted);
             }
         }
@@ -885,7 +954,6 @@ impl AccessControlContract {
             return Err(AccessControlError::GovernanceThresholdNotMet);
         }
         if env.ledger().timestamp() < proposal.created_at + GOVERNANCE_TIMELOCK_DELAY {
-            return Err(KoraError::UpgradeTimelockNotElapsed);
             return Err(AccessControlError::GovernanceTimelockNotElapsed);
         }
 
@@ -1001,7 +1069,7 @@ impl AccessControlContract {
         let proposal = RecoveryProposal {
             id: proposal_id,
             proposer: proposer.clone(),
-            new_signers,
+            new_signers: new_signers.clone(),
             new_threshold,
             created_at: env.ledger().timestamp(),
             objections: Vec::new(&env),
@@ -1195,11 +1263,11 @@ impl AccessControlContract {
 
         if let Some(members) = env.storage().persistent().get::<_, Vec<Address>>(&DataKey::RoleMembers(role)) {
             let mut i = 0;
-            for j in skip..members.len() {
+            for j in skip..(members.len() as usize) {
                 if i >= page_size {
                     break;
                 }
-                if let Ok(addr) = members.get(j as u32) {
+                if let Some(addr) = members.get(j as u32) {
                     results.push_back(addr);
                 }
                 i += 1;
@@ -1346,7 +1414,7 @@ impl AccessControlContract {
         // Check if already present to avoid duplicates
         let mut found = false;
         for i in 0..members.len() {
-            if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+            if &members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
                 found = true;
                 break;
             }
@@ -1364,7 +1432,7 @@ impl AccessControlContract {
         if let Some(mut members) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
             let mut found = false;
             for i in 0..members.len() {
-                if members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
+                if &members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {
                     // Swap with last and pop to remove efficiently
                     let last = members.pop_back();
                     if i < members.len() {
@@ -1386,7 +1454,12 @@ impl AccessControlContract {
     }
 
     /// Append one entry to the ring-buffer audit log and emit the canonical event.
-    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType, details: soroban_sdk::Bytes) {
+    fn append_audit_entry(
+        env: &Env,
+        actor: &Address,
+        action: AdminActionType,
+        _details: soroban_sdk::Val,
+    ) {
         let total: u64 = env
             .storage()
             .instance()
@@ -1451,11 +1524,48 @@ impl AccessControlContract {
     }
 
     fn load_multisig_config(env: &Env) -> Result<MultisigConfig, AccessControlError> {
-        env.storage()
+        return env
+            .storage()
             .persistent()
             .get(&DataKey::MultisigConfig)
-            .ok_or(KoraError::NotInitialized)
-            .ok_or(AccessControlError::MultisigNotConfigured)
+            .ok_or(AccessControlError::MultisigNotConfigured);
+    }
+
+    /// Fail with `RotationBlockedByPendingProposal` if any active (un-executed,
+    /// un-cancelled, unexpired) admin-action proposal exists.
+    ///
+    /// This prevents a `rotate_admin` (or `execute_action(RotateAdmin(...))`) from
+    /// racing with a governance proposal that was voted for the *old* admin.
+    fn require_no_active_proposals(env: &Env) -> Result<(), AccessControlError> {
+        Self::require_no_other_active_proposals(env, u64::MAX)
+    }
+
+    /// Like `require_no_active_proposals` but skips `skip_id` (used by
+    /// `execute_action(RotateAdmin)` to avoid counting the proposal being executed).
+    fn require_no_other_active_proposals(env: &Env, skip_id: u64) -> Result<(), AccessControlError> {
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+
+        let now = env.ledger().timestamp();
+        let mut id: u64 = 1;
+        while id < next_id {
+            if id != skip_id {
+                if let Some(p) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Proposal>(&DataKey::Proposal(id))
+                {
+                    if !p.executed && !p.cancelled && now <= p.expires_at {
+                        return Err(AccessControlError::RotationBlockedByPendingProposal);
+                    }
+                }
+            }
+            id += 1;
+        }
+        Ok(())
     }
 
     fn require_signer(config: &MultisigConfig, caller: &Address) -> Result<(), AccessControlError> {
@@ -1464,23 +1574,7 @@ impl AccessControlContract {
                 return Ok(());
             }
         }
-        Err(KoraError::NotMultisigSigner)
-    }
-
-    /// Validate a proposed parameter value against its allowed range.
-    fn require_valid_parameter(key: &ParameterKey, value: u32) -> Result<(), KoraError> {
-        match key {
-            ParameterKey::FeeBps | ParameterKey::LatePenaltyBps => {
-                if value > 10_000 {
-                    return Err(KoraError::InvalidFeeRate);
-                }
-            }
-            ParameterKey::MaxRiskScore => {
-                if value > 100 {
-                    return Err(KoraError::InvalidRiskScore);
-                }
-            }
-        Err(AccessControlError::SignerNotFound)
+        return Err(AccessControlError::SignerNotFound);
     }
 
     /// Validate a proposed parameter value against its allowed range.
@@ -1490,11 +1584,9 @@ impl AccessControlContract {
             ParameterKey::MaxRiskScore => value <= 100,
         };
         if ok {
-            Ok(())
-        } else {
-            Err(AccessControlError::InvalidParameterValue)
+            return Ok(());
         }
-        Ok(())
+        return Err(AccessControlError::InvalidParameterValue);
     }
 }
 
@@ -2630,5 +2722,170 @@ mod tests {
 
         let result = client.try_propose_signer_recovery(&stranger, new_signers, 2);
         assert_eq!(result.unwrap_err().unwrap(), AccessControlError::SignerNotFound);
+    }
+
+    // ── rotate_admin ──────────────────────────────────────────────────────────
+    // Tests for #607 — admin key-compromise recovery via rotate_admin.
+
+    #[test]
+    fn test_rotate_admin_direct_changes_admin() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        assert!(client.try_rotate_admin(&admin, &new_admin).is_ok());
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_role(&new_admin), Role::Admin);
+        // Old admin loses its role
+        assert_eq!(client.get_role(&admin), Role::None);
+    }
+
+    #[test]
+    fn test_rotate_admin_requires_current_admin_auth() {
+        let (env, _, client) = setup();
+        let stranger = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let result = client.try_rotate_admin(&stranger, &new_admin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
+    }
+
+    #[test]
+    fn test_rotate_admin_blocked_when_multisig_configured() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1, signer2];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_admin = Address::generate(&env);
+        let result = client.try_rotate_admin(&admin, &new_admin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::DirectCallProhibited);
+    }
+
+    #[test]
+    fn test_rotate_admin_blocked_while_proposal_in_flight() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        // Propose a pause action
+        let _pid = client.propose_action(&signer1, &AdminAction::Pause);
+
+        // Direct rotate is blocked by multisig (DirectCallProhibited takes
+        // priority over the proposal check)
+        let new_admin = Address::generate(&env);
+        let result = client.try_rotate_admin(&admin, &new_admin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::DirectCallProhibited);
+    }
+
+    #[test]
+    fn test_rotate_admin_via_multisig_proposal_succeeds() {
+        // Full end-to-end: propose RotateAdmin → approve → execute
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        let new_admin = Address::generate(&env);
+        let action = AdminAction::RotateAdmin(new_admin.clone());
+        let pid = client.propose_action(&signer1, &action);
+        client.approve_action(&signer2, &pid);
+        client.execute_action(&signer2, &pid);
+
+        assert_eq!(client.get_admin(), new_admin);
+        assert_eq!(client.get_role(&new_admin), Role::Admin);
+        assert_eq!(client.get_role(&admin), Role::None);
+    }
+
+    #[test]
+    fn test_rotate_admin_via_multisig_blocked_while_other_proposal_in_flight() {
+        // A RotateAdmin proposal cannot be executed while another active proposal
+        // exists, to prevent the governance race condition.
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        // Propose Pause first (it won't be executed)
+        let _pause_pid = client.propose_action(&signer1, &AdminAction::Pause);
+
+        // Propose RotateAdmin
+        let new_admin = Address::generate(&env);
+        let action = AdminAction::RotateAdmin(new_admin.clone());
+        let rotate_pid = client.propose_action(&signer1, &action);
+        client.approve_action(&signer2, &rotate_pid);
+
+        // Execute RotateAdmin should fail: Pause proposal is still active
+        let result = client.try_execute_action(&signer2, &rotate_pid);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            AccessControlError::RotationBlockedByPendingProposal
+        );
+    }
+
+    #[test]
+    fn test_rotate_admin_via_multisig_succeeds_after_cancelling_pending_proposal() {
+        let (env, admin, client) = setup();
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signers = vec![&env, signer1.clone(), signer2.clone()];
+        client.configure_multisig(&admin, signers, 2);
+
+        // A pending Pause proposal
+        let pause_pid = client.propose_action(&signer1, &AdminAction::Pause);
+
+        // Propose and fully approve a RotateAdmin
+        let new_admin = Address::generate(&env);
+        let rotate_pid =
+            client.propose_action(&signer1, &AdminAction::RotateAdmin(new_admin.clone()));
+        client.approve_action(&signer2, &rotate_pid);
+
+        // Cancel the blocking Pause proposal first
+        client.cancel_action(&signer1, &pause_pid);
+
+        // Now the RotateAdmin executes cleanly
+        assert!(client.try_execute_action(&signer2, &rotate_pid).is_ok());
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_rotate_admin_new_admin_inherits_full_privileges() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.rotate_admin(&admin, &new_admin);
+
+        // New admin can pause
+        client.pause(&new_admin);
+        assert!(client.is_paused());
+        client.unpause(&new_admin);
+
+        // New admin can grant roles
+        let target = Address::generate(&env);
+        assert!(client
+            .try_grant_role(&new_admin, &target, &Role::Verifier)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_rotate_admin_old_admin_loses_all_privileges() {
+        let (env, admin, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.rotate_admin(&admin, &new_admin);
+
+        assert!(client.try_pause(&admin).is_err());
+        let target = Address::generate(&env);
+        assert!(client
+            .try_grant_role(&admin, &target, &Role::Verifier)
+            .is_err());
+        assert!(client.try_rotate_admin(&admin, &target).is_err());
+    }
+
+    #[test]
+    fn test_rotate_admin_to_same_address_rejected() {
+        let (_, admin, client) = setup();
+        let result = client.try_rotate_admin(&admin, &admin);
+        assert!(result.is_err());
     }
 }

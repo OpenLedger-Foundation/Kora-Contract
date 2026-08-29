@@ -382,6 +382,7 @@ impl FinancingPoolContract {
             .set(&DataKey::Positions(invoice_id), &positions);
 
         // Update the per-token aggregate of outstanding investor obligations.
+        // ── #584: Pool was validated at call entry; read once and reuse the token.
         let pool: Pool = env
             .storage()
             .persistent()
@@ -790,20 +791,22 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::InvalidAmount);
         }
 
+        // ── #584: hoist NFT contract address read once for the entire repay call.
+        // Used for freeze check, invoice fetch, and set_repaid — avoids 3 separate
+        // instance storage reads.
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let nft_client =
+            kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+
         // Check per-invoice freeze before acquiring the RepaymentLock so the
         // lock is never set (and never needs to be cleaned up) on frozen invoices.
         // This is in addition to the protocol-wide pause in AccessControl.
-        {
-            let nft_contract: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::InvoiceNft)
-                .ok_or(FinancingPoolError::NotInitialized)?;
-            let nft_client =
-                kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
-            if nft_client.is_invoice_frozen(&invoice_id) {
-                return Err(FinancingPoolError::InvoiceFrozen);
-            }
+        if nft_client.is_invoice_frozen(&invoice_id) {
+            return Err(FinancingPoolError::InvoiceFrozen);
         }
 
         if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
@@ -827,13 +830,6 @@ impl FinancingPoolContract {
         }
 
         // Fetch invoice for due_date check and currency conversion
-        let nft_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::InvoiceNft)
-            .ok_or(FinancingPoolError::NotInitialized)?;
-        let nft_client =
-            kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
         let invoice = nft_client.get_invoice(&invoice_id);
 
         // Convert repayment amount if invoice currency differs from pool token
@@ -950,13 +946,7 @@ impl FinancingPoolContract {
                 pool.face_value,
             )?;
 
-            let nft_contract: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::InvoiceNft)
-                .ok_or(FinancingPoolError::NotInitialized)?;
-            let nft_client =
-                kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+            // nft_client already bound above — no second storage read needed (#584).
             nft_client.set_repaid(&env.current_contract_address(), &invoice_id);
         }
 
@@ -965,7 +955,255 @@ impl FinancingPoolContract {
         Ok(())
     }
 
-    fn distribute_yield(
+    // ── Cross-Invoice Netting (#588) ──────────────────────────────────────────
+
+    /// Net-settle multiple open invoices belonging to the same SME.
+    ///
+    /// Allows an SME with several concurrent invoices to make a single payment that
+    /// is allocated across those pools, reflecting trade-finance netting practice.
+    /// Each pool's accounting is updated independently — investor funds are never
+    /// pooled across invoices.
+    ///
+    /// **Allocation rule:** the `amount` is distributed across the listed invoices
+    /// proportionally to each pool's outstanding `total_owed - repaid_amount`, in
+    /// order.  Any remainder (due to integer division) is credited to the first
+    /// pool.  The sum of allocations equals the exact token transfer amount.
+    ///
+    /// **Parameters:**
+    /// - `payer` — The SME address making the payment (must sign).
+    /// - `invoice_ids` — Two or more invoice IDs, all belonging to `payer`'s SME.
+    /// - `token` — The token being used for repayment.  All pools must use the
+    ///   same token (single-asset constraint per A2).
+    /// - `amount` — Total payment amount. Must be > 0 and ≤ MAX_AMOUNT.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::InvalidAmount` — `amount` ≤ 0, > MAX_AMOUNT, or
+    ///   fewer than two invoice IDs provided.
+    /// - `FinancingPoolError::PoolNotFound` — Any invoice ID has no open pool.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Any pool is already closed.
+    /// - `FinancingPoolError::Unauthorized` — Any invoice does not belong to `payer`
+    ///   per the NFT contract, or a repayment lock is held on any pool.
+    /// - `FinancingPoolError::InvalidAddress` — Invoice tokens differ (mixed-currency
+    ///   netting is rejected; each pool must use the same token as `token`).
+    /// - `FinancingPoolError::ProtocolPaused` — Protocol is paused.
+    /// - `FinancingPoolError::InvoiceFrozen` — Any invoice is frozen.
+    ///
+    /// **Security:** Requires `payer.require_auth()`. All state updates follow CEI:
+    /// repayment locks are set for every pool before the token transfer occurs.
+    /// Locks are released after all pool updates complete.
+    pub fn net_settle(
+        env: Env,
+        payer: Address,
+        invoice_ids: Vec<u64>,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), FinancingPoolError> {
+        payer.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if amount <= 0 || amount > MAX_AMOUNT {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+        // Require at least 2 invoices; single-invoice callers should use repay().
+        if invoice_ids.len() < 2 {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+
+        // ── Pre-flight validation pass ─────────────────────────────────────────
+        // Validate all invoices before acquiring any locks or transferring tokens.
+        let n = invoice_ids.len();
+        let mut pools: Vec<Pool> = Vec::new(&env);
+        let mut total_remaining: i128 = 0;
+
+        for i in 0..n {
+            let invoice_id = invoice_ids.get(i).unwrap();
+
+            // Frozen check
+            if nft_client.is_invoice_frozen(&invoice_id) {
+                return Err(FinancingPoolError::InvoiceFrozen);
+            }
+            // Reentrancy lock check (non-destructive peek)
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::RepaymentLock(invoice_id))
+            {
+                return Err(FinancingPoolError::Unauthorized);
+            }
+            // Load and validate pool
+            let pool: Pool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Pool(invoice_id))
+                .ok_or(FinancingPoolError::PoolNotFound)?;
+            if pool.is_closed {
+                return Err(FinancingPoolError::PoolAlreadyClosed);
+            }
+            // All pools must share the same token (single-asset constraint).
+            if pool.token != token {
+                return Err(FinancingPoolError::InvalidAddress);
+            }
+            // Verify this invoice belongs to the calling SME.
+            let invoice = nft_client.get_invoice(&invoice_id);
+            if invoice.sme != payer {
+                return Err(FinancingPoolError::Unauthorized);
+            }
+
+            let remaining = pool
+                .total_owed
+                .checked_sub(pool.repaid_amount)
+                .unwrap_or(0)
+                .max(0);
+            total_remaining = total_remaining
+                .checked_add(remaining)
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+
+            pools.push_back(pool);
+        }
+
+        // ── Compute per-pool allocations ───────────────────────────────────────
+        // Proportional to each pool's outstanding balance; remainder to first pool.
+        let mut allocations: Vec<i128> = Vec::new(&env);
+        let mut allocated_sum: i128 = 0;
+
+        if total_remaining == 0 {
+            // All pools already at full repayment — nothing to do.
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        for i in 0..n {
+            let pool = pools.get(i).unwrap();
+            let remaining = pool
+                .total_owed
+                .checked_sub(pool.repaid_amount)
+                .unwrap_or(0)
+                .max(0);
+            let alloc = amount
+                .checked_mul(remaining)
+                .and_then(|v| v.checked_div(total_remaining))
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+            allocations.push_back(alloc);
+            allocated_sum = allocated_sum
+                .checked_add(alloc)
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        }
+        // Credit any rounding remainder to the first pool.
+        let remainder = amount
+            .checked_sub(allocated_sum)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if remainder > 0 {
+            let first = allocations.get(0).unwrap();
+            allocations.set(0, first + remainder);
+        }
+
+        // ── Acquire all repayment locks (CEI: state before interactions) ───────
+        for i in 0..n {
+            let invoice_id = invoice_ids.get(i).unwrap();
+            env.storage()
+                .persistent()
+                .set(&DataKey::RepaymentLock(invoice_id), &true);
+        }
+
+        // ── Apply allocations and late penalties per pool ─────────────────────
+        let mut closed_pools: Vec<u64> = Vec::new(&env);
+
+        for i in 0..n {
+            let invoice_id = invoice_ids.get(i).unwrap();
+            let alloc = allocations.get(i).unwrap();
+            if alloc <= 0 {
+                continue;
+            }
+
+            let mut pool = pools.get(i).unwrap();
+            let invoice = nft_client.get_invoice(&invoice_id);
+
+            // Late penalty (once per pool, same rule as repay()).
+            if !pool.penalty_applied && pool.late_penalty_bps > 0 {
+                if env.ledger().timestamp() > invoice.due_date {
+                    let penalty =
+                        kora_shared::validation::bps_of(pool.face_value, pool.late_penalty_bps)
+                            .map_err(|_| FinancingPoolError::ArithmeticOverflow)?;
+                    pool.total_owed = pool
+                        .total_owed
+                        .checked_add(penalty)
+                        .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+                    pool.penalty_applied = true;
+                    events::late_penalty_applied(&env, invoice_id, penalty, pool.total_owed);
+                }
+            }
+
+            pool.repaid_amount = pool
+                .repaid_amount
+                .checked_add(alloc)
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+
+            let should_close = pool.repaid_amount >= pool.total_owed;
+            if should_close {
+                pool.is_closed = true;
+                closed_pools.push_back(invoice_id);
+            }
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Pool(invoice_id), &pool);
+
+            // Emit per-invoice repayment event.
+            events::repayment_made(&env, invoice_id, &payer, alloc);
+        }
+
+        // ── Emit netting event ────────────────────────────────────────────────
+        events::net_settled(&env, &payer, &invoice_ids, amount);
+
+        // ── Token transfer (single transfer for the full netting amount) ──────
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+
+        // ── Post-transfer: close pools, distribute yield, update stats ────────
+        for i in 0..closed_pools.len() {
+            let invoice_id = closed_pools.get(i).unwrap();
+            let pool: Pool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Pool(invoice_id))
+                .unwrap();
+
+            Self::distribute_yield(&env, invoice_id, &token, pool.repaid_amount, pool.face_value)?;
+            nft_client.set_repaid(&env.current_contract_address(), &invoice_id);
+
+            let mut stats: ProtocolStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::ProtocolStats)
+                .unwrap_or(ProtocolStats {
+                    pools_opened: 0,
+                    total_repaid: 0,
+                    pools_defaulted: 0,
+                    active_pools: 0,
+                });
+            stats.total_repaid = stats.total_repaid.saturating_add(pool.repaid_amount);
+            stats.active_pools = stats.active_pools.saturating_sub(1);
+            env.storage()
+                .instance()
+                .set(&DataKey::ProtocolStats, &stats);
+        }
+
+        // ── Release all locks ─────────────────────────────────────────────────
+        for i in 0..n {
+            let invoice_id = invoice_ids.get(i).unwrap();
+            env.storage()
+                .persistent()
+                .remove(&DataKey::RepaymentLock(invoice_id));
+        }
+
+        Ok(())
+    }
         env: &Env,
         invoice_id: u64,
         token: &Address,

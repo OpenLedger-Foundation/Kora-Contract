@@ -1,0 +1,25 @@
+[package]
+name = "kora-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-only crate: it links soroban-sdk with `testutils`, which does not build
+# for wasm32. CI's wasm check excludes it (see .github/workflows/ci.yml).
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+arbitrary = { version = "1", features = ["derive"] }
+kora-shared = { path = "../shared" }
+kora-invoice-nft = { path = "../invoice_nft" }
+kora-marketplace = { path = "../marketplace" }
+kora-financing-pool = { path = "../financing_pool" }
+kora-treasury = { path = "../treasury" }
+kora-risk-registry = { path = "../risk_registry" }
+kora-access-control = { path = "../access_control" }
+kora-price-oracle = { path = "../price_oracle" }
+
+[dev-dependencies]
+rand = "0.8"

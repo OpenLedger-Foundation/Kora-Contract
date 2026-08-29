@@ -13,6 +13,8 @@ export {
 } from "./clients";
 export { TESTNET, MAINNET } from "./base";
 export type { NetworkConfig } from "./base";
+export { createEventSubscription } from "./subscriptions";
+export type { EventSubscriptionOptions } from "./subscriptions";
 export type {
   Invoice,
   InvoiceStatus,

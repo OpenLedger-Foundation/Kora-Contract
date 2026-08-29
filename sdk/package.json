@@ -6,7 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "jest"
+    "test": "jest",
+    "release:npm": "npm publish --access public",
+    "docs:api": "typedoc"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0"

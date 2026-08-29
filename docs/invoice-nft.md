@@ -1,6 +1,5 @@
 # Invoice NFT Contract
 
-<<<<<<< HEAD
 ## Overview
 
 The `invoice_nft` contract is the source of truth for every invoice in the Kora protocol. It mints invoice NFTs, owns the invoice lifecycle state machine, and is the sole authority that may advance or block status transitions.
@@ -61,7 +60,7 @@ Freeze state is stored as a `persistent` boolean under `DataKey::FrozenInvoice(i
 | 15   | `InvalidDueDate`       | Due date not in the future               |
 | 16   | `InvalidRiskScore`     | Risk score out of 0–100 range            |
 | 17   | `InvoiceFrozen`        | Invoice is administratively frozen       |
-=======
+
 The `invoice_nft` contract is the canonical source of truth for all invoice state in the Kora Protocol. Each invoice is represented as an immutable NFT with a unique ID, capturing all financial and metadata details of the underlying invoice.
 
 ## Invoice NFT Data Model
@@ -773,4 +772,3 @@ admin calls invoice_nft.set_defaulted(admin_address, invoice_id)
 ### No Signature Delegation
 - Only the SME can mint their own invoices (no delegation mechanism)
 - Future versions may support signed delegation for agents
->>>>>>> origin/Kora-Contract46
