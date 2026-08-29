@@ -140,6 +140,107 @@ stellar contract invoke --id $ACCESS_CONTROL --source $ADMIN -- \
 
 ---
 
+## 7b. Admin Key Compromise — Rotation Runbook (Issue #607)
+
+If the admin key is suspected or confirmed compromised, treat it as a **Sev-1** and execute
+this runbook *immediately* — before any other remediation step, because a live attacker with
+the admin key can pause, drain treasury fees, or transfer admin to themselves.
+
+### When to use `rotate_admin` vs. `transfer_admin`
+
+| Function | When to use |
+|----------|-------------|
+| `transfer_admin` | Routine ownership handoff (e.g. treasury, team transition). Single-admin path only. |
+| `rotate_admin` | Emergency key-compromise recovery. Same storage effect; emits a distinct `admin_rotated` event (`ADM_ROT`) so off-chain monitors can alert on the recovery specifically. |
+
+Both functions require the multisig flow (`propose_action(AdminAction::RotateAdmin(...))` →
+`approve_action` → `execute_action`) once a multisig is configured.
+
+### Pre-rotation checklist
+
+Before issuing the rotation, verify:
+
+1. **New key is ready and secured** — hardware wallet, never touched the compromised machine.
+2. **New key is distinct** from all current signers and the old admin.
+3. **No conflicting governance proposals are in flight** — the `rotate_admin` path checks for
+   active proposals and rejects the rotation if any exist, to prevent governance races.
+   Cancel or execute pending proposals first.
+
+### Rotation procedure (multisig environment)
+
+```bash
+# 1. Identify the new admin address
+NEW_ADMIN="G..."
+
+# 2. Propose the rotation (any current multisig signer)
+stellar contract invoke --id $ACCESS_CONTROL --source $SIGNER_1 -- \
+  propose_action \
+  --proposer $SIGNER_1_ADDRESS \
+  --action '{"RotateAdmin": "$NEW_ADMIN"}'
+
+# Record the returned proposal ID:
+PROPOSAL_ID=<returned-id>
+
+# 3. Collect threshold approvals from other signers
+stellar contract invoke --id $ACCESS_CONTROL --source $SIGNER_2 -- \
+  approve_action \
+  --approver $SIGNER_2_ADDRESS \
+  --proposal_id $PROPOSAL_ID
+
+# (Add more approve_action calls until threshold is met)
+
+# 4. Execute the rotation once threshold is reached
+stellar contract invoke --id $ACCESS_CONTROL --source $SIGNER_2 -- \
+  execute_action \
+  --executor $SIGNER_2_ADDRESS \
+  --proposal_id $PROPOSAL_ID
+
+# 5. Confirm the new admin is live
+stellar contract invoke --id $ACCESS_CONTROL -- get_admin
+```
+
+### Rotation procedure (single-admin environment — no multisig)
+
+If the multisig has **not** been configured yet (rare: early deployment or stripped config):
+
+```bash
+stellar contract invoke --id $ACCESS_CONTROL --source $CURRENT_ADMIN -- \
+  rotate_admin \
+  --current_admin $CURRENT_ADMIN_ADDRESS \
+  --new_admin $NEW_ADMIN_ADDRESS
+
+# Confirm
+stellar contract invoke --id $ACCESS_CONTROL -- get_admin
+```
+
+> **Note:** `rotate_admin` will reject the call with `DirectCallProhibited` if a multisig
+> is configured — use the multisig proposal flow in that case.
+
+### Post-rotation steps
+
+1. **Revoke the compromised key** — rotate the Stellar account's signers if using a hardware
+   wallet; invalidate the seed phrase or key file.
+2. **Audit the event log** — query `ADM_ROT` events on-chain; if you see an unexpected
+   `admin_rotated` event before yours, the attacker may have already rotated — escalate.
+3. **Re-configure multisig with the new admin** — call `configure_multisig` with the new admin
+   and a fresh signer set.
+4. **Verify no further damage** — check treasury balance, fee settings, and recent listings for
+   anomalies using the investigation steps in §5.
+5. **Disclose per §7** — rotation of the admin key is a material security event.
+
+### Edge case: rotation attempted while a governance proposal is in flight
+
+The `rotate_admin` function (and `execute_action(AdminAction::RotateAdmin(...))`) checks for
+active proposals before applying the key change. If a pending proposal exists:
+
+- The rotation will fail with `RotationBlockedByPendingProposal`.
+- Cancel the pending proposal (`cancel_action`), then retry.
+- If the pending proposal was itself created by the attacker, cancel it using a different signer
+  who has not been compromised (any signer can cancel a proposal they proposed; a quorum can
+  cancel any proposal).
+
+---
+
 ## 8. Tabletop Drill
 
 A tabletop drill was conducted against a **deliberately-injected testnet bug** to exercise this

@@ -978,8 +978,6 @@ impl RiskRegistryContract {
             .has(&DataKey::SubAccount(addr))
     }
 
-    /// Returns the debtor score or `KoraError::SMENotRegistered` if not found.
-    pub fn get_debtor_score(env: Env, debtor_hash: Bytes) -> Result<u32, KoraError> {
     /// Returns the debtor score or `RiskRegistryError::DebtorNotRegistered` if not found.
     pub fn get_debtor_score(env: Env, debtor_hash: Bytes) -> Result<u32, RiskRegistryError> {
         let attestors_key = DataKey::DebtorAttestors(debtor_hash.clone());
@@ -1026,7 +1024,6 @@ impl RiskRegistryContract {
             .storage()
             .persistent()
             .get(&key)
-            .ok_or(KoraError::SMENotRegistered)?;
             .ok_or(RiskRegistryError::DebtorNotRegistered)?;
         Self::bump_persistent(&env, &key);
         Ok(score)
@@ -2343,6 +2340,8 @@ mod tests {
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         assert!(client.try_top_up_stake(&admin, &verifier, &0i128).is_err());
+    }
+
     // ── set_credit_limit (require_non_negative_amount guard) ─────────────────
 
     #[test]

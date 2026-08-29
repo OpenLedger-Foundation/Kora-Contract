@@ -86,7 +86,7 @@ mod integration {
         // max_position_bps = 10_000 (100%) — disables the per-investor concentration
         // cap so it doesn't interfere with tests that aren't exercising that guard.
         pool.initialize(
-            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
         mp.initialize(
             &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &50u32, &0u32,
@@ -493,6 +493,11 @@ mod integration {
         // set_funded also calls require_not_paused before status check — test it:
         let r = k.invoice_nft.try_set_funded(&k.pool.address, &invoice_id2);
         assert!(r.is_err(), "set_funded must be blocked when paused");
+        assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
+
+        // ── invoice_nft::set_repaid blocked ───────────────────────────────────
+        let r = k.invoice_nft.try_set_repaid(&k.pool.address, &invoice_id);
+        assert!(r.is_err(), "set_repaid must be blocked when paused");
         assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
 
         // ── marketplace::list_invoice blocked ─────────────────────────────────
