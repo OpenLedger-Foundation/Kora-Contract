@@ -236,6 +236,16 @@ pub struct EarlySettlementOffer {
     pub accepted: Vec<Address>, // investors that have already accepted (dedup guard)
 }
 
+/// Pending repayment approval for a high-value invoice repayment.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RepaymentApproval {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+}
+
 /// Protocol-level configuration.
 ///
 /// Note: pause state is NOT stored here — it is owned exclusively by the
@@ -247,6 +257,24 @@ pub struct ProtocolConfig {
     pub late_penalty_bps: u32, // penalty on late repayment
     pub max_risk_score: u32,   // ceiling for accepted invoices
     pub min_funding_period: u64,
+}
+
+/// Per-risk-tier face-value bounds for invoice minting/listing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmountBounds {
+    pub min: i128,
+    pub max: i128,
+}
+
+impl AmountBounds {
+    pub fn new(min: i128, max: i128) -> Self {
+        Self { min, max }
+    }
+
+    pub fn is_within(&self, amount: i128) -> bool {
+        amount >= self.min && amount <= self.max
+    }
 }
 
 /// SME profile in the risk registry

@@ -481,6 +481,12 @@ impl MarketplaceContract {
             return Err(KoraError::InvalidAmount);
         }
 
+        if let Some(bounds) = nft_client.get_amount_bounds(&invoice.risk_tier) {
+            if face_value < bounds.min || face_value > bounds.max {
+                return Err(KoraError::InvalidAmount);
+            }
+        }
+
         // Enforce the protocol-wide per-token exposure cap (#447) before mutating
         // NFT/listing state, so a rejected listing leaves no partial side effects.
         Self::add_token_exposure(&env, &token, asking_price)?;
