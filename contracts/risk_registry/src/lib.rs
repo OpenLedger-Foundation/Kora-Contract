@@ -97,6 +97,8 @@ pub enum DataKey {
     DebtorAttestors(Bytes),                 // debtor_hash -> Vec<Address> of attesting verifiers
     /// Ledger timestamp of the last set_debtor_score call per (verifier, debtor_hash).
     DebtorScoreLastUpdate(Address, Bytes),
+    /// Governed minimum average debtor risk score (0–100). 0 means no debtor gate.
+    MinimumDebtorScore,
     UpgradeProposal,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
@@ -1027,6 +1029,66 @@ impl RiskRegistryContract {
             .ok_or(RiskRegistryError::DebtorNotRegistered)?;
         Self::bump_persistent(&env, &key);
         Ok(score)
+    }
+
+    /// Set the governed minimum average debtor risk score required to list an
+    /// invoice naming that debtor. Admin only. A value of `0` disables the gate.
+    pub fn set_min_debtor_score(
+        env: Env,
+        admin: Address,
+        min_score: u32,
+    ) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::MinimumDebtorScore, &min_score);
+        Self::bump_persistent(&env, &DataKey::MinimumDebtorScore);
+        Ok(())
+    }
+
+    /// Returns the governed minimum average debtor risk score (0 = gate disabled).
+    pub fn get_min_debtor_score(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MinimumDebtorScore)
+            .unwrap_or(0)
+    }
+
+    /// Returns `true` if the debtor identified by `debtor_hash` satisfies the
+    /// governed verification gate: either the gate is disabled (min == 0), or a
+    /// debtor record exists whose averaged attestation score meets the minimum.
+    pub fn is_debtor_verified(env: Env, debtor_hash: Bytes) -> bool {
+        let min_score: u32 = Self::get_min_debtor_score(env.clone());
+        if min_score == 0 {
+            return true;
+        }
+        match Self::debtor_score_average(env, debtor_hash) {
+            Some(avg) => avg >= min_score,
+            None => false,
+        }
+    }
+
+    /// Average the active verifier attestations for a debtor, returning `None`
+    /// when no (valid, current-verifier) attestation exists.
+    fn debtor_score_average(env: Env, debtor_hash: Bytes) -> Option<u32> {
+        let attestors_key = DataKey::DebtorAttestors(debtor_hash.clone());
+        let attestors: Vec<Address> = env.storage().persistent().get(&attestors_key)?;
+        let mut total: u64 = 0;
+        let mut count: u32 = 0;
+        for verifier in attestors.iter() {
+            if Self::is_verifier(env.clone(), verifier.clone()) {
+                let key = DataKey::DebtorScoreAttestation(debtor_hash.clone(), verifier);
+                if let Some(score) = env.storage().persistent().get::<_, u32>(&key) {
+                    total = total.checked_add(score as u64)?;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some((total / (count as u64)) as u32)
     }
 
     /// Returns the current admin address.
