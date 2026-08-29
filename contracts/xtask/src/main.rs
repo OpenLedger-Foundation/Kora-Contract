@@ -22,6 +22,7 @@ const WORKSPACE_CRATES: &[&str] = &[
     "risk_registry",
     "access_control",
     "price_oracle",
+    "secondary_market",
 ];
 
 fn strip_line_comments(source: &str) -> String {

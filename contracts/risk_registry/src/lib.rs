@@ -2402,6 +2402,8 @@ mod tests {
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         assert!(client.try_top_up_stake(&admin, &verifier, &0i128).is_err());
+    }
+
     // ── set_credit_limit (require_non_negative_amount guard) ─────────────────
 
     #[test]

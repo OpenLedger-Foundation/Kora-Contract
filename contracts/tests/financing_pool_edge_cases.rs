@@ -67,7 +67,7 @@ mod financing_pool_edge_cases {
         let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
         oracle_client.initialize(&admin, &ac2);
         pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
 
         TestEnv {

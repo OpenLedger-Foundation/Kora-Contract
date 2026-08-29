@@ -18,3 +18,16 @@ kora-shared = { path = "../shared" }
 kora-access-control = { path = "../access_control" }
 kora-risk-registry = { path = "../risk_registry" }
 proptest = "1.4"
+
+# ── Formal verification (Issue #608) ─────────────────────────────────────────
+#
+# The state-machine model lives in kani/invoice_state_machine.rs.
+# It compiles as a regular integration test (cargo test) and as a Kani proof
+# target (cargo kani --harness <name>).
+#
+# To run Kani proofs locally:
+#   cargo install --locked kani-verifier
+#   cargo kani --package kora-invoice-nft
+[[test]]
+name = "kani_invoice_state_machine"
+path = "kani/invoice_state_machine.rs"

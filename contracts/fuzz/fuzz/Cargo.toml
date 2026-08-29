@@ -1,0 +1,66 @@
+[package]
+name = "kora-fuzz-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kora-fuzz = { path = ".." }
+
+# libFuzzer needs unwind so soroban's fuzz_catch_panic / catch_unwind works.
+[profile.release]
+panic = "unwind"
+debug = 1
+
+[[bin]]
+name = "fuzz_access_control"
+path = "fuzz_targets/fuzz_access_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_invoice_nft"
+path = "fuzz_targets/fuzz_invoice_nft.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_marketplace"
+path = "fuzz_targets/fuzz_marketplace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_financing_pool"
+path = "fuzz_targets/fuzz_financing_pool.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_treasury"
+path = "fuzz_targets/fuzz_treasury.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_risk_registry"
+path = "fuzz_targets/fuzz_risk_registry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_price_oracle"
+path = "fuzz_targets/fuzz_price_oracle.rs"
+test = false
+doc = false
+bench = false

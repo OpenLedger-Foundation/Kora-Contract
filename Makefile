@@ -2,11 +2,16 @@
 # Kora Protocol — Makefile
 # =============================================================================
 
-.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet
+.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep
 
 WASM_TARGET := wasm32-unknown-unknown
 CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
 COVERAGE_MIN ?= 95
+
+# Fuzzing knobs (see contracts/fuzz/README.md)
+FUZZ_ITERS  ?= 10000
+FUZZ_TARGET ?= marketplace
+FUZZ_RUNS   ?= 1000000
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -41,11 +46,29 @@ lint:
 check:
 	cargo check --all
 
+# ── Fuzz ──────────────────────────────────────────────────────────────────────
+
+# Deterministic smoke harness on stable Rust: FUZZ_ITERS seeded iterations per
+# contract plus the checked-in seed corpus. This is the CI fuzz check.
+#   make fuzz FUZZ_ITERS=50000
+fuzz:
+	FUZZ_ITERS=$(FUZZ_ITERS) cargo test -p kora-fuzz --test smoke -- --ignored --nocapture
+
+# libFuzzer deep run for one target. Needs nightly + `cargo install cargo-fuzz`.
+#   make fuzz-deep FUZZ_TARGET=marketplace FUZZ_RUNS=5000000
+fuzz-deep:
+	cd contracts/fuzz/fuzz && cargo +nightly fuzz run fuzz_$(FUZZ_TARGET) -- -runs=$(FUZZ_RUNS)
+
 # ── Audit ─────────────────────────────────────────────────────────────────────
+#
+# Run locally to replicate the `supply-chain-audit` CI gate (issue #609).
+# Requires:  cargo install cargo-deny --locked --version 0.14.24
+#            cargo install cargo-audit --locked --version 0.21.0
+# Exception process: see deny.toml and docs/INCIDENT_RESPONSE.md §7b.
 
 audit:
-	cargo audit
 	cargo deny check
+	cargo audit --deny warnings
 
 coverage:
 	@echo "Running coverage analysis (threshold: $(COVERAGE_MIN)%)..."

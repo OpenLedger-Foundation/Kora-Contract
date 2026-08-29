@@ -1,0 +1,18 @@
+[package]
+name = "kora-secondary-market"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+kora-shared = { path = "../shared" }
+kora-financing-pool = { path = "../financing_pool" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+kora-shared = { path = "../shared" }
+kora-financing-pool = { path = "../financing_pool" }
+proptest = "1.4"

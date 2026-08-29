@@ -1,5 +1,17 @@
 # Kora Protocol Dependency Audit Configuration
 # Defines acceptable licenses, banned crates, and vulnerability advisories
+#
+# CI: this file is checked by the `supply-chain-audit` CI job (issue #609)
+# via `cargo deny check`.  Any failure blocks the PR merge.
+#
+# Exception process:
+#   - New security advisory (known, accepted-risk): add to `[advisories.ignore]`
+#     below with a comment that includes the advisory ID, a brief justification,
+#     and a link to a tracking issue.
+#   - Disallowed license: add to `[licenses.allow]` with a comment.
+#   - Disallowed crate source: add to `[sources.allow-git]` with a comment.
+#
+# Re-evaluate all exceptions at each dependency update cycle.
 
 [advisories]
 # The lint level for security vulnerabilities
@@ -8,6 +20,12 @@ vulnerability = "deny"
 unmaintained = "warn"
 # The lint level for crates that have been marked as yanked in the registry
 yanked = "warn"
+# Known-accepted advisories — add entries here with rationale + tracking issue.
+# Example:
+# ignore = [
+#   { id = "RUSTSEC-2024-XXXXX", reason = "Not reachable in our usage; tracked in #NNN" },
+# ]
+ignore = []
 
 [licenses]
 # The lint level used when no other predicates are matched

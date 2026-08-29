@@ -200,3 +200,67 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
+  #
+  # Runs cargo-deny (license / banned-crate / source checks against deny.toml)
+  # and cargo-audit (vulnerability advisories against RustSec database) as a
+  # blocking CI gate.  Both tools are installed at pinned versions so results
+  # are reproducible.
+  #
+  # Exception process:
+  #   - For a known advisory that is accepted-risk: add an `[advisories.ignore]`
+  #     entry in deny.toml with a comment explaining the rationale and a
+  #     tracking issue.
+  #   - For a disallowed license or source: add an explicit `[licenses.allow]`
+  #     or `[sources.allow-git]` entry in deny.toml.
+  #
+  # Retry policy: the step retries once on non-zero exit to absorb transient
+  # registry/network failures (GitHub Actions native retry via a shell loop).
+  supply-chain-audit:
+    name: supply-chain audit (cargo-deny + cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.75"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-audit-${{ hashFiles('**/Cargo.toml', 'deny.toml') }}
+          restore-keys: ${{ runner.os }}-audit-
+
+      - name: Install cargo-deny (pinned)
+        run: |
+          # Retry once on transient network failure
+          cargo install cargo-deny --locked --version 0.14.24 \
+            || cargo install cargo-deny --locked --version 0.14.24
+
+      - name: Install cargo-audit (pinned)
+        run: |
+          cargo install cargo-audit --locked --version 0.21.0 \
+            || cargo install cargo-audit --locked --version 0.21.0
+
+      - name: cargo deny check
+        # Fail on vulnerabilities, disallowed licenses, banned crates, and
+        # disallowed registries/sources.  Retry once on transient registry
+        # network failures (exit code 1 can also mean a real deny failure,
+        # but a second attempt distinguishes the two in most cases).
+        run: |
+          cargo deny check \
+            || cargo deny check
+
+      - name: cargo audit
+        # Fetch the advisory database and check for known CVEs.
+        # --deny warnings escalates unmaintained/unsound to a failure.
+        # Retry once for network resilience.
+        run: |
+          cargo audit --deny warnings \
+            || cargo audit --deny warnings

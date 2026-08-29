@@ -58,7 +58,19 @@ mod issue_471_secondary_market_settlement {
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
         let ac2 = Address::generate(&env);
         let oracle = Address::generate(&env);
-        pool_client.initialize(&admin, &nft_id, &treasury, &ac2, &200u32, &oracle);
+        let risk_registry = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
+        pool_client.initialize(
+            &admin,
+            &nft_id,
+            &risk_registry,
+            &treasury,
+            &ac2,
+            &200u32,
+            &oracle,
+            &10_000u32,
+            &dispute_resolution,
+        );
 
         TestEnv {
             env,
