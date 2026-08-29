@@ -3,7 +3,7 @@
 use kora_shared::{
     errors::CommonError,
     events,
-    types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, ProtocolStats},
+    types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, PositionShare, ProtocolStats, ShareSaleOffer},
     validation::{bps_of, bps_of_normalized, require_valid_bps_range, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{
@@ -36,6 +36,21 @@ pub enum FinancingPoolError {
     SaleNotFound = 18,
     Unauthorized = 19,
     UpgradeTimelockNotElapsed = 20,
+    // PositionShare (#563)
+    ShareNotFound = 21,
+    InvalidShareAmount = 22,
+    AlreadySplit = 23,
+    NotPositionOwner = 24,
+    // Dispute Resolution (#565)
+    DisputeNotFound = 25,
+    DisputeAlreadyOpen = 26,
+    DisputeAlreadyResolved = 27,
+    DisputeWindowExpired = 28,
+    NotDisputeChallenger = 29,
+    NotGovernance = 30,
+    DisputeNotOpen = 31,
+    // Partial repayment (#566)
+    PartialRepayInvalid = 32,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -76,6 +91,14 @@ pub enum DataKey {
     ProtocolStats,
     /// Installment repayment schedule for a pool, keyed by invoice ID.
     InstallmentSchedule(u64),
+    /// PositionShare set for a pool, keyed by (invoice_id, original_investor).
+    PositionShares(u64, Address),
+    /// Next share index for a position (used for generating unique share IDs).
+    PositionShareCounter(u64, Address),
+    /// Pending share sale offer: keyed by (invoice_id, original_investor, share_index).
+    ShareSaleOffer(u64, Address, u32),
+    /// Dispute resolution contract address (#565).
+    DisputeResolution,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -96,6 +119,7 @@ impl FinancingPoolContract {
     /// - `late_penalty_bps` — Late-repayment penalty in basis points (0–10 000).
     /// - `price_oracle` — The deployed price oracle contract address for currency conversion.
     /// - `max_position_bps` — Maximum per-investor share of a pool in basis points (1–10 000).
+    /// - `dispute_resolution` — The deployed dispute resolution contract address. (#565)
     ///
     /// **Errors:**
     /// - `FinancingPoolError::AlreadyInitialized` — Contract has already been initialized.
@@ -113,6 +137,7 @@ impl FinancingPoolContract {
         late_penalty_bps: u32,
         price_oracle: Address,
         max_position_bps: u32,
+        dispute_resolution: Address,
     ) -> Result<(), FinancingPoolError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(FinancingPoolError::AlreadyInitialized);
@@ -128,6 +153,7 @@ impl FinancingPoolContract {
         kora_shared::validation::require_not_self(&env, &risk_registry)?;
         kora_shared::validation::require_not_self(&env, &treasury)?;
         kora_shared::validation::require_not_self(&env, &access_control)?;
+        kora_shared::validation::require_not_self(&env, &dispute_resolution)?;
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -140,6 +166,7 @@ impl FinancingPoolContract {
         env.storage().instance().set(&DataKey::LatePenaltyBps, &late_penalty_bps);
         env.storage().instance().set(&DataKey::PriceOracle, &price_oracle);
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
+        env.storage().instance().set(&DataKey::DisputeResolution, &dispute_resolution);
         Ok(())
     }
 
@@ -379,6 +406,361 @@ impl FinancingPoolContract {
             share_bps,
         );
 
+        Ok(())
+    }
+
+    /// Split a funded position into fractional, independently transferable shares.
+    ///
+    /// The caller must be the current position owner. `amount` must be > 0 and
+    /// <= the position's current `contributed` amount. A new `PositionShare`
+    /// is created with the specified `amount`; the original position's
+    /// `contributed` is reduced by the same amount. The sum of all shares
+    /// (including the remainder in the original position) always equals the
+    /// original contributed amount.
+    ///
+    /// **Parameters:**
+    /// - `caller` — Must hold the position (require_auth).
+    /// - `invoice_id` — The invoice ID of the pool.
+    /// - `amount` — The amount to split out as a new share (> 0, <= position.contributed).
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::PositionNotFound` — No position exists for `caller`.
+    /// - `FinancingPoolError::InvalidAmount` — `amount` is <= 0 or exceeds position.contributed.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is closed.
+    ///
+    /// **Security:** Requires `caller.require_auth()`.
+    pub fn split_position(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<u32, FinancingPoolError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut position: Position = positions
+            .get(caller.clone())
+            .ok_or(FinancingPoolError::PositionNotFound)?;
+
+        if amount <= 0 || amount > position.contributed {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        let counter_key = DataKey::PositionShareCounter(invoice_id, caller.clone());
+        let share_index: u32 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(0);
+        let new_index = share_index.saturating_add(1);
+
+        let share = PositionShare {
+            invoice_id,
+            original_investor: caller.clone(),
+            share_index: new_index,
+            amount,
+            owner: caller.clone(),
+        };
+
+        let mut shares: Map<(u64, Address, u32), PositionShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionShares(invoice_id, caller.clone()))
+            .unwrap_or_else(|| Map::new(&env));
+        shares.set((invoice_id, caller.clone(), new_index), share);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PositionShares(invoice_id, caller.clone()), &shares);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PositionShareCounter(invoice_id, caller.clone()), &new_index);
+
+        events::position_share_created(&env, invoice_id, &caller, new_index, amount, &caller);
+
+        Ok(new_index)
+    }
+
+    /// Transfer ownership of a fractional share to another address.
+    ///
+    /// The caller must be the current share owner. Transfers are unrestricted
+    /// (no re-entrancy risk here because this is a pure state change with no
+    /// external calls).
+    ///
+    /// **Parameters:**
+    /// - `caller` — Must hold the share (require_auth).
+    /// - `invoice_id` — The invoice ID of the pool.
+    /// - `original_investor` — The investor whose position was split.
+    /// - `share_index` — The index of the share to transfer.
+    /// - `new_owner` — The address receiving the share.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::ShareNotFound` — No such share exists.
+    /// - `FinancingPoolError::NotPositionOwner` — Caller does not own the share.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is closed.
+    ///
+    /// **Security:** Requires `caller.require_auth()`.
+    pub fn transfer_share(
+        env: Env,
+        caller: Address,
+        invoice_id: u64,
+        original_investor: Address,
+        share_index: u32,
+        new_owner: Address,
+    ) -> Result<(), FinancingPoolError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut shares: Map<(u64, Address, u32), PositionShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionShares(invoice_id, original_investor.clone()))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        let mut share: PositionShare = shares
+            .get((invoice_id, original_investor.clone(), share_index))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        if share.owner != caller {
+            return Err(FinancingPoolError::NotPositionOwner);
+        }
+
+        let old_owner = share.owner.clone();
+        share.owner = new_owner.clone();
+        shares.set((invoice_id, original_investor.clone(), share_index), share);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PositionShares(invoice_id, original_investor.clone()), &shares);
+
+        events::position_share_transferred(&env, invoice_id, &original_investor, share_index, &old_owner, &new_owner);
+
+        Ok(())
+    }
+
+    /// List a fractional share for sale on the secondary market.
+    ///
+    /// The caller must own the share. Only one active sale offer per share
+    /// is allowed.
+    pub fn list_share_for_sale(
+        env: Env,
+        seller: Address,
+        invoice_id: u64,
+        original_investor: Address,
+        share_index: u32,
+        token: Address,
+        price: i128,
+    ) -> Result<(), FinancingPoolError> {
+        seller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if price <= 0 {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let shares: Map<(u64, Address, u32), PositionShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionShares(invoice_id, original_investor.clone()))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        let share = shares
+            .get((invoice_id, original_investor.clone(), share_index))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        if share.owner != seller {
+            return Err(FinancingPoolError::NotPositionOwner);
+        }
+
+        if env.storage().persistent().has(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index)) {
+            return Err(FinancingPoolError::SaleAlreadyListed);
+        }
+
+        let offer = ShareSaleOffer {
+            seller: seller.clone(),
+            invoice_id,
+            original_investor,
+            share_index,
+            token,
+            price,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index), &offer);
+
+        events::share_listed_for_sale(&env, invoice_id, share_index, price);
+        Ok(())
+    }
+
+    /// Purchase a fractional share from the secondary market.
+    ///
+    /// Transfers the share to the buyer and moves the listed price in tokens
+    /// from buyer to seller.
+    pub fn buy_share(
+        env: Env,
+        buyer: Address,
+        invoice_id: u64,
+        seller: Address,
+        original_investor: Address,
+        share_index: u32,
+    ) -> Result<(), FinancingPoolError> {
+        buyer.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let offer: ShareSaleOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index))
+            .ok_or(FinancingPoolError::SaleNotFound)?;
+
+        if offer.seller != seller {
+            return Err(FinancingPoolError::SaleNotFound);
+        }
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut shares: Map<(u64, Address, u32), PositionShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PositionShares(invoice_id, original_investor.clone()))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        let mut share: PositionShare = shares
+            .get((invoice_id, original_investor.clone(), share_index))
+            .ok_or(FinancingPoolError::ShareNotFound)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ShareSaleOffer(invoice_id, original_investor.clone(), share_index));
+
+        share.owner = buyer.clone();
+        shares.set((invoice_id, original_investor.clone(), share_index), share);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PositionShares(invoice_id, original_investor.clone()), &shares);
+
+        let token_client = token::Client::new(&env, &offer.token);
+        token_client.transfer(&buyer, &seller, &offer.price);
+
+        events::share_sold(&env, invoice_id, share_index, &buyer, offer.price);
+        Ok(())
+    }
+
+    /// Make a partial repayment on an invoice, distributing yield pro-rata
+    /// immediately to investors based on their share of the total contributed.
+    ///
+    /// This is distinct from `repay` which waits until the pool is fully repaid.
+    /// Partial repayments allow SMEs to service debt in tranches.
+    ///
+    /// **Parameters:**
+    /// - `payer` — The address making the repayment (must sign).
+    /// - `invoice_id` — The invoice to repay against.
+    /// - `token` — The token being repaid.
+    /// - `amount` — The partial repayment amount.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::InvalidAmount` — Amount is <= 0 or exceeds MAX_AMOUNT.
+    /// - `FinancingPoolError::PoolNotFound` — No pool exists.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is already closed.
+    /// - `FinancingPoolError::PartialRepayInvalid` — Repayment would exceed total_owed.
+    ///
+    /// **Security:** Requires `payer.require_auth()`. Uses RepaymentLock.
+    pub fn repay_partial(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), FinancingPoolError> {
+        payer.require_auth();
+
+        if amount <= 0 || amount > MAX_AMOUNT {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
+            return Err(FinancingPoolError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentLock(invoice_id), &true);
+
+        let mut pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+
+        if pool.is_closed {
+            env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let new_repaid = pool
+            .repaid_amount
+            .checked_add(amount)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        if new_repaid > pool.total_owed {
+            env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
+            return Err(FinancingPoolError::PartialRepayInvalid);
+        }
+
+        pool.repaid_amount = new_repaid;
+        env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&payer, &env.current_contract_address(), &amount);
+
+        let mut stats: ProtocolStats = env.storage().instance().get(&DataKey::ProtocolStats)
+            .unwrap_or(ProtocolStats { pools_opened: 0, total_repaid: 0, pools_defaulted: 0, active_pools: 0 });
+        stats.total_repaid = stats.total_repaid.saturating_add(amount);
+        env.storage().instance().set(&DataKey::ProtocolStats, &stats);
+
+        events::repayment_made(&env, invoice_id, &payer, amount);
+
+        Self::distribute_yield(&env, invoice_id, &token, pool.repaid_amount, pool.face_value)?;
+
+        env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
         Ok(())
     }
 
@@ -845,11 +1227,41 @@ impl FinancingPoolContract {
                 .ok_or(FinancingPoolError::ArithmeticOverflow)?;
 
             total_contributed = total_contributed.saturating_add(position.contributed);
-            token_client.transfer(&env.current_contract_address(), &investor, &payout);
-            events::yield_distributed(env, invoice_id, &investor, yield_amount);
+
+            let shares: Map<(u64, Address, u32), PositionShare> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PositionShares(invoice_id, investor.clone()))
+                .unwrap_or_else(|| Map::new(env));
+
+            let mut total_share_amount: i128 = 0;
+            for share in shares.values() {
+                total_share_amount = total_share_amount.saturating_add(share.amount);
+            }
+
+            if total_share_amount > 0 && !shares.is_empty() {
+                let mut distributed: i128 = 0;
+                for share in shares.values() {
+                    let share_payout = share
+                        .amount
+                        .checked_mul(payout)
+                        .and_then(|v| v.checked_div(position.contributed))
+                        .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+                    distributed = distributed.saturating_add(share_payout);
+                    token_client.transfer(&env.current_contract_address(), &share.owner, &share_payout);
+                    events::yield_distributed(env, invoice_id, &share.owner, share_payout.saturating_sub(0));
+                }
+                let remainder = payout.saturating_sub(distributed);
+                if remainder > 0 {
+                    token_client.transfer(&env.current_contract_address(), &investor, &remainder);
+                    events::yield_distributed(env, invoice_id, &investor, remainder);
+                }
+            } else {
+                token_client.transfer(&env.current_contract_address(), &investor, &payout);
+                events::yield_distributed(env, invoice_id, &investor, yield_amount);
+            }
         }
 
-        // Reduce the aggregate now that all positions for this pool have been settled.
         let agg_key = DataKey::AggregateFunded(token.clone());
         let prev_agg: i128 = env.storage().instance().get(&agg_key).unwrap_or(0);
         env.storage()
@@ -901,6 +1313,18 @@ impl FinancingPoolContract {
 
         if pool.is_closed {
             return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        if let Some(dr_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::DisputeResolution)
+        {
+            let dr_client =
+                kora_dispute_resolution::DisputeResolutionContractClient::new(&env, &dr_contract);
+            if dr_client.try_has_open_dispute(&invoice_id).unwrap_or(false) {
+                return Err(FinancingPoolError::DisputeNotOpen);
+            }
         }
 
         if pool.repaid_amount > 0 {
@@ -1696,6 +2120,7 @@ mod tests {
             kora_access_control::AccessControlContractClient::new(&env, &access_control);
         ac_client.initialize(&admin);
         let oracle = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
         client.initialize(
             &admin,
             &nft,
@@ -1705,6 +2130,7 @@ mod tests {
             &200u32,
             &oracle,
             &10_000u32,
+            &dispute_resolution,
         );
         (env, admin, nft, treasury, access_control, client)
     }
@@ -1744,7 +2170,7 @@ mod tests {
         let rr = Address::generate(&env);
         let oracle = Address::generate(&env);
         let result =
-            client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32);
+            client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &Address::generate(&env));
         assert!(result.is_err());
     }
 
@@ -1761,7 +2187,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         let result = client.try_initialize(
-            &admin, &nft, &rr, &treasury, &ac, &10_001u32, &oracle, &5_000u32,
+            &admin, &nft, &rr, &treasury, &ac, &10_001u32, &oracle, &5_000u32, &Address::generate(&env),
         );
         assert!(result.is_err());
     }
@@ -1779,7 +2205,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         assert!(client
-            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &0u32, &oracle, &5_000u32)
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &0u32, &oracle, &5_000u32, &Address::generate(&env))
             .is_ok());
     }
 
@@ -1804,6 +2230,7 @@ mod tests {
             &200u32,
             &oracle,
             &5_000u32,
+            &Address::generate(&env),
         );
         assert!(result.is_err());
     }
@@ -1828,6 +2255,7 @@ mod tests {
             &200u32,
             &oracle,
             &5_000u32,
+            &Address::generate(&env),
         );
         assert!(result.is_err());
     }
@@ -1845,7 +2273,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         assert!(client
-            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_000u32, &oracle, &5_000u32)
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_000u32, &oracle, &5_000u32, &Address::generate(&env))
             .is_ok());
     }
 
@@ -1863,7 +2291,7 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &0u32);
+        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &0u32, &Address::generate(&env));
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
     }
 
@@ -1879,7 +2307,7 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &10_001u32);
+        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &10_001u32, &Address::generate(&env));
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
     }
 
@@ -1895,7 +2323,8 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32);
+        let dispute_resolution = Address::generate(&env);
+        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &dispute_resolution);
         let result = client.try_set_max_position_bps(&admin, &0u32);
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
         // Existing config is untouched by the rejected update.
@@ -1914,7 +2343,8 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32);
+        let dispute_resolution = Address::generate(&env);
+        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &dispute_resolution);
         client.set_max_position_bps(&admin, &7_500u32);
         assert_eq!(client.get_max_position_bps(), 7_500u32);
     }
@@ -2588,4 +3018,136 @@ mod proptests {
             prop_assert_eq!(aggregate, 0i128);
         }
     }
+}
+
+// ── PositionShare Tests (#563) ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    fn setup() -> (Env, Address, Address, Address, Address, FinancingPoolContractClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, FinancingPoolContract);
+        let client = FinancingPoolContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let nft = Address::generate(&env);
+        let risk_registry = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let access_control =
+            env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac_client =
+            kora_access_control::AccessControlContractClient::new(&env, &access_control);
+        ac_client.initialize(&admin);
+        let oracle = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
+        client.initialize(
+            &admin,
+            &nft,
+            &risk_registry,
+            &treasury,
+            &access_control,
+            &200u32,
+            &oracle,
+            &10_000u32,
+            &dispute_resolution,
+        );
+        (env, admin, nft, treasury, access_control, client)
+    }
+
+    #[test]
+    fn test_split_position_creates_share() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        seed_pool(&env, &client.address, 1u64, 10_000_000_000i128);
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
+
+        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128).unwrap();
+        assert_eq!(share_index, 1);
+    }
+
+    #[test]
+    fn test_split_position_exceeds_contributed_rejected() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        seed_pool(&env, &client.address, 1u64, 10_000_000_000i128);
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &5_000_000_000i128, &10_000_000_000i128);
+
+        let result = client.try_split_position(&investor, &1u64, &6_000_000_000i128);
+        assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidAmount);
+    }
+
+    #[test]
+    fn test_transfer_share_success() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        seed_pool(&env, &client.address, 1u64, 10_000_000_000i128);
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
+        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128).unwrap();
+
+        let new_owner = Address::generate(&env);
+        assert!(client.try_transfer_share(&investor, &1u64, &investor, &share_index, &new_owner).is_ok());
+    }
+
+    #[test]
+    fn test_list_and_buy_share() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let token = Address::generate(&env);
+        seed_pool_with_token(&env, &client.address, 1u64, 10_000_000_000i128, token.clone());
+        let seller = Address::generate(&env);
+        client.record_position(&admin, &1u64, &seller, &10_000_000_000i128, &10_000_000_000i128);
+        let share_index = client.split_position(&seller, &1u64, &4_000_000_000i128).unwrap();
+
+        client.list_share_for_sale(&seller, &1u64, &seller, &share_index, &token, &3_000_000_000i128);
+
+        let buyer = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token)
+            .mint(&buyer, &3_000_000_000i128);
+
+        assert!(client.try_buy_share(&buyer, &1u64, &seller, &seller, &share_index).is_ok());
+    }
+
+    #[test]
+    fn test_repay_partial_distributes_yield() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        let token = Address::generate(&env);
+        seed_pool_with_token(&env, &client.address, 1u64, 10_000_000_000i128, token.clone());
+        let investor = Address::generate(&env);
+        client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
+
+        let payer = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token)
+            .mint(&payer, &5_000_000_000i128);
+
+        assert!(client.try_repay_partial(&payer, &1u64, &token, &5_000_000_000i128).is_ok());
+        let pool = client.get_pool(&1u64).unwrap();
+        assert_eq!(pool.repaid_amount, 5_000_000_000i128);
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn seed_pool_with_token(
+    env: &Env,
+    contract_id: &Address,
+    invoice_id: u64,
+    face_value: i128,
+    token: Address,
+) {
+    let pool = Pool {
+        invoice_id,
+        token,
+        total_funded: 0,
+        face_value,
+        repaid_amount: 0,
+        is_closed: false,
+        late_penalty_bps: 200,
+        total_owed: face_value,
+        penalty_applied: false,
+    };
+    env.as_contract(contract_id, || {
+        env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+    });
 }

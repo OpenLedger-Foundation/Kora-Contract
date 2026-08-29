@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Invoice lifecycle status
 #[contracttype]
@@ -314,4 +314,41 @@ pub struct RecoveryProposal {
     pub created_at: u64,
     pub objections: Vec<Address>, // signers that have objected to recovery
     pub executed: bool,
+}
+
+/// A fractional claim on a Position, enabling secondary-market transfers
+/// before the underlying invoice is repaid or defaulted. (#563)
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PositionShare {
+    pub invoice_id: u64,
+    pub original_investor: Address,
+    pub share_index: u32,
+    pub amount: i128,
+    pub owner: Address,
+}
+
+/// An offer to sell a single fractional share of a position on the secondary market. (#563)
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ShareSaleOffer {
+    pub seller: Address,
+    pub invoice_id: u64,
+    pub original_investor: Address,
+    pub share_index: u32,
+    pub token: Address,
+    pub price: i128,
+}
+
+/// Dispute state for an invoice under governance review. (#565)
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Dispute {
+    pub invoice_id: u64,
+    pub challenger: Address,
+    pub evidence_cid: Option<String>,
+    pub opened_at: u64,
+    pub resolved: bool,
+    pub upheld: bool,
+    pub resolved_at: u64,
 }

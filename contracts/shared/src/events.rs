@@ -943,3 +943,174 @@ pub fn audit_checkpoint(
         ),
     );
 }
+
+// ── PositionShare Events (#563) ────────────────────────────────────────────────
+
+/// Schema: (invoice_id, original_investor, share_index, amount, new_owner, timestamp)
+pub fn position_share_created(
+    env: &Env,
+    invoice_id: u64,
+    original_investor: &Address,
+    share_index: u32,
+    amount: i128,
+    new_owner: &Address,
+) {
+    emit(
+        env,
+        symbol_short!("POS_SHR_CR"),
+        symbol_short!("SHARE_CRT"),
+        (
+            invoice_id,
+            original_investor.clone(),
+            share_index,
+            amount,
+            new_owner.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (invoice_id, original_investor, share_index, from, to, timestamp)
+pub fn position_share_transferred(
+    env: &Env,
+    invoice_id: u64,
+    original_investor: &Address,
+    share_index: u32,
+    from: &Address,
+    to: &Address,
+) {
+    emit(
+        env,
+        symbol_short!("POS_SHR_TR"),
+        symbol_short!("SHARE_TRF"),
+        (
+            invoice_id,
+            original_investor.clone(),
+            share_index,
+            from.clone(),
+            to.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (invoice_id, share_index, price, timestamp)
+pub fn share_listed_for_sale(
+    env: &Env,
+    invoice_id: u64,
+    share_index: u32,
+    price: i128,
+) {
+    emit(
+        env,
+        symbol_short!("SHARE_SALE"),
+        (
+            invoice_id,
+            share_index,
+            price,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (invoice_id, share_index, buyer, price, timestamp)
+pub fn share_sold(
+    env: &Env,
+    invoice_id: u64,
+    share_index: u32,
+    buyer: &Address,
+    price: i128,
+) {
+    emit(
+        env,
+        symbol_short!("SHARE_SOLD"),
+        (
+            invoice_id,
+            share_index,
+            buyer.clone(),
+            price,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+// ── Dispute Resolution Events (#565) ──────────────────────────────────────────
+
+/// Schema: (challenger, invoice_id, timestamp)
+pub fn dispute_opened(
+    env: &Env,
+    invoice_id: u64,
+    challenger: &Address,
+) {
+    emit(
+        env,
+        symbol_short!("DISP_OPEN"),
+        (
+            challenger.clone(),
+            invoice_id,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (invoice_id, evidence_cid, timestamp)
+pub fn dispute_evidence_submitted(
+    env: &Env,
+    invoice_id: u64,
+    evidence_cid: &String,
+) {
+    emit(
+        env,
+        symbol_short!("DISP_EVID"),
+        (
+            invoice_id,
+            evidence_cid.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (resolver, invoice_id, upheld, timestamp)
+pub fn dispute_resolved(
+    env: &Env,
+    invoice_id: u64,
+    resolver: &Address,
+    upheld: bool,
+) {
+    emit(
+        env,
+        symbol_short!("DISP_RES"),
+        (
+            resolver.clone(),
+            invoice_id,
+            upheld,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (invoice_id, amount, timestamp)
+pub fn dispute_funded(
+    env: &Env,
+    invoice_id: u64,
+    amount: i128,
+) {
+    emit(
+        env,
+        symbol_short!("DISP_FUND"),
+        (invoice_id, amount, env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (invoice_id, amount, timestamp)
+pub fn dispute_payout(
+    env: &Env,
+    invoice_id: u64,
+    amount: i128,
+) {
+    emit(
+        env,
+        symbol_short!("DISP_PAY"),
+        (invoice_id, amount, env.ledger().timestamp()),
+    );
+}

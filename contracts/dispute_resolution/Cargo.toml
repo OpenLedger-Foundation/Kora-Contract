@@ -1,5 +1,5 @@
 [package]
-name = "kora-financing-pool"
+name = "kora-dispute-resolution"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,17 +9,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 kora-shared = { path = "../shared" }
-kora-invoice-nft = { path = "../invoice_nft" }
-kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
-kora-price-oracle = { path = "../price_oracle" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
-kora-invoice-nft = { path = "../invoice_nft" }
-kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
-kora-price-oracle = { path = "../price_oracle" }
-kora-dispute-resolution = { path = "../dispute_resolution" }
 proptest = "1.4"

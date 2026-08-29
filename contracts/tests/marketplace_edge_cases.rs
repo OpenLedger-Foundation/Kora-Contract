@@ -16,7 +16,7 @@ mod marketplace_edge_cases {
     use kora_shared::errors::KoraError;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Env,
+        Address, Env, Symbol,
     };
 
     struct TestEnv {
@@ -67,7 +67,7 @@ mod marketplace_edge_cases {
         let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
         oracle_client.initialize(&admin, &ac2);
         pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
 
         // Deploy Marketplace
@@ -183,7 +183,7 @@ mod marketplace_edge_cases {
         let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
         oracle_client.initialize(&admin, &ac2);
         pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
 
         let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
@@ -243,7 +243,7 @@ mod marketplace_edge_cases {
         let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
         oracle_client.initialize(&admin, &ac2);
         pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
         );
 
         let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
@@ -733,5 +733,146 @@ mod marketplace_edge_cases {
         // Investor1 (60% share) should receive 60% of 2_000 yield = 1_200
         // Investor2 (40% share) should receive 40% of 2_000 yield = 800
         // This test verifies that distribute_yield didn't iterate empty positions
+    }
+}
+
+// ── Multi-Token Tests (#564) ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod multi_token_tests {
+    use kora_financing_pool::FinancingPoolContractClient;
+    use kora_invoice_nft::InvoiceNftContractClient;
+    use kora_marketplace::MarketplaceContractClient;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, Env, Symbol,
+    };
+
+    struct TestEnv {
+        env: Env,
+        admin: Address,
+        seller: Address,
+        investor: Address,
+        token_a: Address,
+        token_b: Address,
+        mp: MarketplaceContractClient<'static>,
+        pool_client: FinancingPoolContractClient<'static>,
+        nft: InvoiceNftContractClient<'static>,
+    }
+
+    fn deploy() -> TestEnv {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000,
+            protocol_version: 21,
+            sequence_number: 1,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let admin = Address::generate(&env);
+        let seller = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+        let nft = InvoiceNftContractClient::new(&env, &nft_id);
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac = kora_access_control::AccessControlContractClient::new(&env, &ac_id);
+        ac.initialize(&admin);
+        nft.initialize(&admin, &ac_id);
+
+        let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
+        let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
+        let rr = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let dispute_resolution = Address::generate(&env);
+        pool_client.initialize(
+            &admin, &nft_id, &rr, &Address::generate(&env), &ac_id, &200u32, &oracle, &10_000u32, &dispute_resolution,
+        );
+
+        let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
+        let mp = MarketplaceContractClient::new(&env, &mp_id);
+        mp.initialize(
+            &admin, &nft_id, &pool_id, &Address::generate(&env), &ac_id, &oracle, &rr, &50u32, &0u32,
+        );
+
+        mp.propose_token_whitelist(&admin, &token_a);
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000 + 86_401,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        mp.execute_token_whitelist(&admin, &token_a);
+
+        mp.propose_token_whitelist(&admin, &token_b);
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000 + 86_401 * 2,
+            protocol_version: 21,
+            sequence_number: 3,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        mp.execute_token_whitelist(&admin, &token_b);
+
+        TestEnv {
+            env,
+            admin,
+            seller,
+            investor,
+            token_a,
+            token_b,
+            mp,
+            pool_client,
+            nft,
+        }
+    }
+
+    #[test]
+    fn test_list_with_different_tokens() {
+        let t = deploy();
+        let debtor_hash = soroban_sdk::Bytes::from_slice(&t.env, &[0xABu8; 32]);
+        let ipfs_cid = soroban_sdk::String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+
+        let id_a = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &30u32,
+        );
+        let id_b = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &Symbol::new(&t.env, "EURC"),
+            &due_date,
+            &ipfs_cid,
+            &30u32,
+        );
+
+        let deadline = t.env.ledger().timestamp() + 86_400 * 30;
+        assert!(t.mp.try_list_invoice(&t.seller, &id_a, &9_500_000_000i128, &10_000_000_000i128, &t.token_a, &deadline).is_ok());
+        assert!(t.mp.try_list_invoice(&t.seller, &id_b, &9_500_000_000i128, &10_000_000_000i128, &t.token_b, &deadline).is_ok());
     }
 }
