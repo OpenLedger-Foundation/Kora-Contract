@@ -13,7 +13,7 @@ kora-invoice-nft = { path = "../invoice_nft" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
-kora-risk-registry = { path = "../risk_registry" }
+kora-marketplace = { path = "../marketplace" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -22,4 +22,4 @@ kora-invoice-nft = { path = "../invoice_nft" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
-proptest = "1.4"
+kora-marketplace = { path = "../marketplace" }

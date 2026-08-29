@@ -8,7 +8,7 @@ use kora_shared::{
     types::{Listing, RiskTier},
     validation::{bps_of_normalized, require_non_zero_amount, require_valid_fee_bps, require_within_max_amount, safe_add, safe_sub, UPGRADE_TIMELOCK_DELAY},
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Vec};
 
 // ~30 days in ledgers at ~5 s/ledger
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
@@ -55,6 +55,8 @@ pub enum DataKey {
     CancellationRequest(u64),
     /// Set once admin confirms a two-phase cancellation, unlocking claim_refund (#263)
     CancellationConfirmed(u64),
+    /// Tiered priority-allocation window for whitelisted investors (#576)
+    PriorityWindow(u64),
     /// Admin-configurable max aggregate outstanding asking_price for a token
     /// across all active listings (0 = uncapped). (#447)
     TokenExposureCap(Address),
@@ -87,16 +89,23 @@ pub struct MarketplaceConfig {
 
 /// Per-allocation outcome of a `fund_invoices_batch` call in best-effort
 /// (non-atomic) mode. (#448)
-///
-/// `error_code` mirrors the `KoraError` discriminant (0 = success) — plain
-/// `Result` cannot be nested inside a `Vec` returned from a contract function,
-/// so outcomes are reported through this explicit `#[contracttype]` instead.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchAllocationResult {
     pub invoice_id: u64,
     pub success: bool,
     pub error_code: u32,
+}
+
+/// A time-windowed priority allocation phase for a listing (#576).
+///
+/// While `env.ledger().timestamp() <= window_end`, only addresses in `whitelist`
+/// may fund the listing; afterwards funding opens to all investors.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PriorityWindow {
+    pub whitelist: Vec<Address>,
+    pub window_end: u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -481,6 +490,11 @@ impl MarketplaceContract {
             return Err(KoraError::InvalidAmount);
         }
 
+        // === #575: Debtor verification gate ===
+        // The named debtor must carry a risk_registry record meeting the governed
+        // minimum before the invoice can be listed on the marketplace.
+        Self::require_debtor_verified(&env, &invoice.debtor_hash)?;
+
         // Enforce the protocol-wide per-token exposure cap (#447) before mutating
         // NFT/listing state, so a rejected listing leaves no partial side effects.
         Self::add_token_exposure(&env, &token, asking_price)?;
@@ -680,6 +694,10 @@ impl MarketplaceContract {
         // rejected before touching any other state.
         Self::require_investor_accredited(&env, &investor)?;
 
+        // === #576: Tiered priority-allocation window ===
+        // Enforce the whitelist while a priority window is active for this listing.
+        Self::require_priority_window_allowed(&env, invoice_id, &investor)?;
+
         // === #435: Per-listing investor concentration cap ===
         // Compute prospective gross (pre-fee) cumulative contribution and reject
         // if it would exceed cap_bps of asking_price.  0 = uncapped (default).
@@ -869,6 +887,72 @@ impl MarketplaceContract {
             .persistent()
             .set(&DataKey::Listing(invoice_id), &listing);
         Self::bump_persistent(&env, &DataKey::Listing(invoice_id));
+
+        events::listing_cancelled(&env, invoice_id, &listing.seller);
+        Ok(())
+    }
+
+    /// Configure a time-windowed priority allocation phase for `listing_id` (#576).
+    ///
+    /// Admin only. While `env.ledger().timestamp() <= window_end`, only addresses
+    /// in `whitelist` may fund the listing; afterwards funding opens to all investors.
+    pub fn set_priority_window(
+        env: Env,
+        admin: Address,
+        listing_id: u64,
+        whitelist: Vec<Address>,
+        window_end: u64,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        let config = Self::load_config(&env)?;
+        if config.admin != admin {
+            return Err(KoraError::NotAdmin);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::PriorityWindow(listing_id), &PriorityWindow { whitelist, window_end });
+        Self::bump_persistent(&env, &DataKey::PriorityWindow(listing_id));
+        Ok(())
+    }
+
+    /// Withdraw a listed-but-unfunded invoice and cleanly revert it to `Created`,
+    /// so the SME can re-list it. Reclaims NFT ownership/state and emits a
+    /// cancellation event. Blocked once any partial funding exists. (#577)
+    ///
+    /// **Errors:** `ListingNotFound`, `ListingAlreadyCancelled`, `ListingAlreadyFunded`
+    /// (when `funded_amount > 0`), `Unauthorized`.
+    pub fn withdraw_listing(env: Env, caller: Address, invoice_id: u64) -> Result<(), KoraError> {
+        caller.require_auth();
+
+        let listing: Listing = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Listing(invoice_id))
+            .ok_or(KoraError::ListingNotFound)?;
+
+        if !listing.is_active {
+            return Err(KoraError::ListingAlreadyCancelled);
+        }
+
+        // Blocked once any capital has been committed — a partially-funded listing
+        // must go through the two-phase cancellation / refund path instead.
+        if listing.funded_amount > 0 {
+            return Err(KoraError::ListingAlreadyFunded);
+        }
+
+        let config = Self::load_config(&env)?;
+        if caller != listing.seller && caller != config.admin {
+            return Err(KoraError::Unauthorized);
+        }
+
+        // Fully revert: drop the listing record so the invoice can be re-listed.
+        env.storage().persistent().remove(&DataKey::Listing(invoice_id));
+        // Listing is no longer outstanding marketplace exposure (#447).
+        Self::remove_token_exposure(&env, &listing.token, listing.asking_price);
+
+        let nft_client =
+            kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
+        nft_client.set_created(&env.current_contract_address(), &invoice_id);
 
         events::listing_cancelled(&env, invoice_id, &listing.seller);
         Ok(())
@@ -1238,6 +1322,42 @@ impl MarketplaceContract {
         let rr = kora_risk_registry::RiskRegistryContractClient::new(env, &config.risk_registry);
         if !rr.is_compliance_attested(sme) {
             return Err(KoraError::ComplianceNotAttested);
+        }
+        Ok(())
+    }
+
+    /// Enforce the debtor verification gate before listing an invoice (#575).
+    /// The named debtor must carry a risk_registry record meeting the governed
+    /// minimum, otherwise the listing is blocked.
+    fn require_debtor_verified(env: &Env, debtor_hash: &Bytes) -> Result<(), KoraError> {
+        let config = Self::load_config(env)?;
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(env, &config.risk_registry);
+        if !rr.is_debtor_verified(debtor_hash) {
+            return Err(KoraError::ComplianceNotAttested);
+        }
+        Ok(())
+    }
+
+    /// Enforce the tiered priority-allocation window for `listing_id` (#576).
+    /// If a window is active (ledger time <= window_end) the caller must be on
+    /// its whitelist; once the window has expired funding is open to everyone.
+    fn require_priority_window_allowed(
+        env: &Env,
+        listing_id: u64,
+        investor: &Address,
+    ) -> Result<(), KoraError> {
+        let window: PriorityWindow = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::PriorityWindow(listing_id))
+        {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+        if env.ledger().timestamp() <= window.window_end {
+            if !window.whitelist.contains(investor) {
+                return Err(KoraError::Unauthorized);
+            }
         }
         Ok(())
     }
@@ -2400,6 +2520,84 @@ mod tests {
             &t.token,
             &deadline,
         ).is_ok());
+    }
+
+    // ── #575: Debtor verification gate ──────────────────────────────────────────
+
+    #[test]
+    fn test_list_invoice_rejects_unverified_debtor() {
+        let t = deploy();
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.set_min_debtor_score(&t.admin, &50u32);
+
+        let id = mint_invoice(&t);
+        let deadline = t.env.ledger().timestamp() + 86_400;
+        // Debtor hash has no risk_registry record meeting the governed minimum,
+        // so listing must be blocked.
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &id,
+            &9_500_000_000i128,
+            &10_000_000_000i128,
+            &t.token,
+            &deadline,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::ComplianceNotAttested);
+    }
+
+    // ── #576: Tiered priority-allocation window ─────────────────────────────────
+
+    #[test]
+    fn test_priority_window_blocks_non_whitelisted_until_expiry() {
+        let t = deploy();
+        let id = list_one(&t);
+        let investor = Address::generate(&t.env);
+        t.mp.set_investor_accredited(&t.admin, &investor, &true);
+
+        // Priority window ending at `deadline`, with an empty whitelist.
+        let deadline = t.env.ledger().timestamp() + 86_400;
+        let whitelist = soroban_sdk::Vec::new(&t.env);
+        t.mp.set_priority_window(&t.admin, &id, &whitelist, &deadline);
+
+        // During the window, even an accredited investor is rejected (not whitelisted).
+        let during = t.mp.try_fund_invoice(&investor, &id, &1_000_000i128);
+        assert_eq!(during.unwrap_err().unwrap(), KoraError::Unauthorized);
+
+        // After the window expires, the whitelist gate no longer applies.
+        t.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: deadline + 1,
+            protocol_version: 21,
+            sequence_number: 3,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        let after = t.mp.try_fund_invoice(&investor, &id, &1_000_000i128);
+        assert_ne!(after.unwrap_err().unwrap(), KoraError::Unauthorized);
+    }
+
+    // ── #577: Pre-funding withdrawal ────────────────────────────────────────────
+
+    #[test]
+    fn test_withdraw_listing_reverts_and_allows_relist() {
+        let t = deploy();
+        let id = list_one(&t);
+        // Withdraw the unfunded listing; it cleanly reverts to Created.
+        assert!(t.mp.try_withdraw_listing(&t.seller, &id).is_ok());
+        let deadline = t.env.ledger().timestamp() + 86_400;
+        // The same invoice can be re-listed afterwards.
+        assert!(t.mp
+            .try_list_invoice(
+                &t.seller,
+                &id,
+                &9_500_000_000i128,
+                &10_000_000_000i128,
+                &t.token,
+                &deadline,
+            )
+            .is_ok());
     }
 
     // ── get_listing ───────────────────────────────────────────────────────────
