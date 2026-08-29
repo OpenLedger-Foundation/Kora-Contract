@@ -28,7 +28,7 @@ pub fn is_locked(env: &Env) -> bool {
     env.storage().instance().has(&GuardKey::Lock)
 }
 
-// ── RAII Guard ───────────────────────────────────────────────────────────────
+// ── RAII Guard ────────────────────────────────────────────────────────────────
 
 /// RAII reentrancy guard. Acquires the lock on construction and releases it
 /// when dropped, guaranteeing exactly one release per successful acquire.
@@ -50,7 +50,6 @@ impl Drop for ReentrancyGuard {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
 
 #[cfg(test)]
 mod tests {

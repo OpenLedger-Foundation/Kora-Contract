@@ -1,6 +1,6 @@
 use crate::audit::AdminAuditEntry;
 use crate::types::RiskTier;
-use soroban_sdk::{symbol_short, Address, Bytes, Env, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Bytes, Env, String, Symbol, Vec};
 
 // ── Event Schema Version (#583) ───────────────────────────────────────────────
 //
@@ -210,6 +210,32 @@ pub fn late_penalty_applied(env: &Env, invoice_id: u64, penalty_amount: i128, to
         env,
         symbol_short!("LATE_PEN"),
         (invoice_id, penalty_amount, total_owed, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a late penalty is split between investors and treasury.
+/// Schema: (invoice_id, total_penalty, treasury_cut, investor_cut, timestamp)
+pub fn late_penalty_split(
+    env: &Env,
+    invoice_id: u64,
+    total_penalty: i128,
+    treasury_cut: i128,
+    investor_cut: i128,
+) {
+    emit(
+        env,
+        symbol_short!("PEN_SPLIT"),
+        (invoice_id, total_penalty, treasury_cut, investor_cut, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when the late-penalty treasury split ratio is updated (admin).
+/// Schema: (admin, split_bps, timestamp)
+pub fn late_penalty_split_updated(env: &Env, split_bps: u32) {
+    emit(
+        env,
+        symbol_short!("PEN_SPL_U"),
+        (split_bps, env.ledger().timestamp()),
     );
 }
 
@@ -637,6 +663,69 @@ pub fn position_sold(env: &Env, invoice_id: u64, seller: &Address, buyer: &Addre
         env,
         symbol_short!("POS_SOLD"),
         (invoice_id, seller.clone(), buyer.clone(), price, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when an investor position is transferred directly (e.g. via the
+/// secondary market contract calling `financing_pool.transfer_position`).
+///
+/// Schema: (invoice_id, from, to, timestamp)
+pub fn position_transferred(env: &Env, invoice_id: u64, from: &Address, to: &Address) {
+    emit(
+        env,
+        symbol_short!("POS_XFER"),
+        (invoice_id, from.clone(), to.clone(), env.ledger().timestamp()),
+    );
+}
+
+// ── Secondary Market Contract Events ────────────────────────────────────────────
+
+/// Emitted when the secondary market contract is initialized.
+///
+/// Schema: (admin, financing_pool, fee_bps, timestamp)
+pub fn secondary_market_initialized(
+    env: &Env,
+    admin: &Address,
+    financing_pool: &Address,
+    fee_bps: u32,
+) {
+    emit(
+        env,
+        symbol_short!("SM_INIT"),
+        (admin.clone(), financing_pool.clone(), fee_bps, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when the secondary market is paused.
+///
+/// Schema: (admin, timestamp)
+pub fn secondary_market_paused(env: &Env) {
+    emit(
+        env,
+        symbol_short!("SM_PAUS"),
+        (env.ledger().timestamp(),),
+    );
+}
+
+/// Emitted when the secondary market is unpaused.
+///
+/// Schema: (admin, timestamp)
+pub fn secondary_market_unpaused(env: &Env) {
+    emit(
+        env,
+        symbol_short!("SM_UNP"),
+        (env.ledger().timestamp(),),
+    );
+}
+
+/// Emitted when the protocol fee is updated.
+///
+/// Schema: (admin, fee_bps, timestamp)
+pub fn secondary_market_fee_updated(env: &Env, fee_bps: u32) {
+    emit(
+        env,
+        symbol_short!("SM_FEE"),
+        (fee_bps, env.ledger().timestamp()),
     );
 }
 

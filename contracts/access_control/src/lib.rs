@@ -24,6 +24,7 @@ pub enum AccessControlError {
     AlreadyPaused = 3,
     AlreadyVoted = 4,
     ArithmeticOverflow = 5,
+    DirectCallProhibited = 51,
     GovernanceThresholdNotMet = 6,
     GovernanceTimelockNotElapsed = 7,
     InvalidAddress = 8,
@@ -371,7 +372,7 @@ impl AccessControlContract {
             .persistent()
             .remove(&DataKey::Role(current_admin.clone()));
         events::admin_transferred(&env, &current_admin, &new_admin);
-        let details = new_admin.into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin, details);
         Ok(())
     }
@@ -489,7 +490,7 @@ impl AccessControlContract {
         }
 
         events::multisig_configured(&env, threshold, signer_count);
-        let details = (threshold, signer_count as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig, details);
         Ok(())
     }
@@ -739,7 +740,7 @@ impl AccessControlContract {
         }
 
         events::action_executed(&env, proposal_id, &executor);
-        let details = proposal_id.into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
         Ok(())
     }
@@ -859,7 +860,7 @@ impl AccessControlContract {
         );
 
         events::action_proposed(&env, proposal_id, &proposer);
-        let details = (proposal.key, proposal.new_value).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
         Ok(proposal_id)
     }
@@ -969,7 +970,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::Parameter(proposal.key.clone()));
 
         events::action_executed(&env, proposal_id, &caller);
-        let details = (proposal.key, proposal.new_value).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter, details);
         Ok(())
     }
@@ -1088,7 +1089,7 @@ impl AccessControlContract {
         );
 
         events::action_proposed(&env, proposal_id, &proposer);
-        let details = (new_threshold, new_signers.len() as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
         Ok(proposal_id)
     }
@@ -1172,7 +1173,7 @@ impl AccessControlContract {
         Self::bump_persistent(&env, &DataKey::MultisigConfig);
 
         events::action_executed(&env, proposal_id, &executor);
-        let details = (proposal.new_threshold, proposal.new_signers.len() as u32).into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &executor, AdminActionType::ConfigureMultisig, details);
         Ok(())
     }
@@ -1301,7 +1302,7 @@ impl AccessControlContract {
             &(new_wasm_hash.clone(), env.ledger().timestamp()),
         );
         events::upgrade_proposed(&env, &admin, &new_wasm_hash);
-        let details = new_wasm_hash.clone().into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade, details);
         Ok(())
     }
@@ -1331,7 +1332,7 @@ impl AccessControlContract {
         }
         env.storage().instance().remove(&DataKey::UpgradeProposal);
         events::upgrade_executed(&env, &admin, &wasm_hash);
-        let details = wasm_hash.clone().into_val(&env);
+        let details = Bytes::new(&env);
         Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade, details);
         env.deployer().update_current_contract_wasm(wasm_hash);
         Ok(())
@@ -1588,7 +1589,6 @@ impl AccessControlContract {
         }
         return Err(AccessControlError::InvalidParameterValue);
     }
-}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

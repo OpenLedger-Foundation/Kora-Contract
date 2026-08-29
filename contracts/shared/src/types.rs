@@ -155,24 +155,6 @@ pub struct Pool {
     pub penalty_applied: bool,
 }
 
-/// A single scheduled installment within an `InstallmentSchedule`.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Installment {
-    pub amount: i128,
-    pub due_date: u64,
-    pub paid: bool,
-}
-
-/// An ordered repayment schedule attached to a pool. `next_index` points at
-/// the next unpaid installment in `installments`.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct InstallmentSchedule {
-    pub installments: Vec<Installment>,
-    pub next_index: u32,
-}
-
 /// An active offer to sell an investor position on the secondary market
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -181,17 +163,6 @@ pub struct PositionSaleOffer {
     pub invoice_id: u64,
     pub token: Address,
     pub price: i128,
-}
-
-/// Protocol-wide aggregate statistics for the financing pool, used by
-/// dashboards/analytics via `get_protocol_stats`.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct ProtocolStats {
-    pub pools_opened: u64,
-    pub total_repaid: i128,
-    pub pools_defaulted: u64,
-    pub active_pools: u64,
 }
 
 /// An SME's early-termination buyout offer for a funded invoice.

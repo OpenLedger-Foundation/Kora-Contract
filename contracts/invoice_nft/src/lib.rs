@@ -168,6 +168,23 @@ pub struct MetadataDispute {
     pub upheld: bool,
 }
 
+/// A dispute raised against an invoice's committed `metadata_hash`.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataDispute {
+    pub challenger: Address,
+    pub evidence_hash: Bytes,
+    pub raised_at: u64,
+    pub resolved: bool,
+    pub upheld: bool,
+}
+
+/// Maximum number of historical metadata CID entries retained per invoice.
+/// Implements a ring-buffer eviction policy: when the history reaches this size,
+/// the oldest entry is dropped before a new one is appended. This bounds
+/// storage growth while preserving enough history for audit/recovery purposes.
+pub const MAX_METADATA_CID_HISTORY: u32 = 20;
+
 /// Per-SME minting velocity cap: at most `max_mints` invoices per `window_secs`.
 #[contracttype]
 #[derive(Clone)]
@@ -730,6 +747,91 @@ impl InvoiceNftContract {
         Ok(())
     }
 
+    /// Update the IPFS metadata CID for an invoice in `Created` status, appending
+    /// to a bounded on-chain history of prior CIDs (issue #571).
+    ///
+    /// IPFS CIDs are immutable post-mint; this provides a controlled escape
+    /// hatch so an SME can correct or add supporting documents without minting
+    /// a new NFT and orphaning the original. Each call replaces `invoice.ipfs_cid`
+    /// and pushes the *old* CID into the history `Vec` (evicting the oldest entry
+    /// when the cap `MAX_METADATA_CID_HISTORY` is reached).
+    ///
+    /// **Parameters:**
+    /// - `sme` — The original invoice owner (must sign and match `invoice.sme`).
+    /// - `invoice_id` — The ID of the invoice to update.
+    /// - `new_cid` — The replacement IPFS CID (max `MAX_IPFS_CID_LEN` bytes).
+    ///
+    /// **Errors:**
+    /// - `InvoiceNftError::InvoiceNotFound` — Invoice does not exist.
+    /// - `InvoiceNftError::NotInvoiceOwner` — Caller is not the invoice's SME.
+    /// - `InvoiceNftError::InvalidInvoiceStatus` — Invoice is not in `Created` status.
+    /// - `InvoiceNftError::InvalidAmount` — `new_cid` is empty.
+    /// - `InvoiceNftError::FieldTooLong` — `new_cid` exceeds `MAX_IPFS_CID_LEN`.
+    ///
+    /// **Security:** Requires `sme.require_auth()`. Rejects updates once the
+    /// invoice has left `Created` status (i.e., been listed or funded) to
+    /// prevent bait-and-switch after investors have relied on the original CID.
+    pub fn update_metadata_cid(
+        env: Env,
+        sme: Address,
+        invoice_id: u64,
+        new_cid: String,
+    ) -> Result<(), InvoiceNftError> {
+        sme.require_auth();
+        Self::require_not_paused(&env)?;
+
+        require_non_empty_string(&new_cid)?;
+        require_max_length_string(&new_cid, MAX_IPFS_CID_LEN)?;
+
+        let mut invoice = Self::load_invoice(&env, invoice_id)?;
+        if invoice.sme != sme {
+            return Err(InvoiceNftError::NotInvoiceOwner);
+        }
+        if invoice.status != InvoiceStatus::Created {
+            return Err(InvoiceNftError::InvalidInvoiceStatus);
+        }
+
+        // Append the old CID to history (ring-buffer: evict oldest if at cap).
+        let history_key = DataKey::MetadataCidHistory(invoice_id);
+        let capacity: u32 = MAX_METADATA_CID_HISTORY;
+        let mut history: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if history.len() >= capacity as u64 {
+            history.remove(0);
+        }
+        history.push_back(invoice.ipfs_cid.clone());
+        env.storage().persistent().set(&history_key, &history);
+        Self::bump_persistent(&env, &history_key);
+
+        // Replace the on-chain CID.
+        invoice.ipfs_cid = new_cid.clone();
+        env.storage().persistent().set(&DataKey::Invoice(invoice_id), &invoice);
+        Self::bump_invoice_ttl(&env, invoice_id);
+
+        events::metadata_cid_updated(&env, invoice_id, &sme, &new_cid);
+        Ok(())
+    }
+
+    /// Return the bounded history of prior IPFS CIDs for an invoice.
+    ///
+    /// The history contains at most `MAX_METADATA_CID_HISTORY` entries,
+    /// ordered oldest-to-newest. Each entry was the `ipfs_cid` before a
+    /// successful `update_metadata_cid` call. The current CID is always
+    /// the latest value on `Invoice.ipfs_cid` and is *not* included here.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_metadata_cid_history(env: Env, invoice_id: u64) -> Vec<String> {
+        let key = DataKey::MetadataCidHistory(invoice_id);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Withdraw (void) a Created invoice. Only the original SME may call this,
     /// and only while `status == Created`.
     ///
@@ -1287,6 +1389,8 @@ impl InvoiceNftContract {
             id += 1;
         }
         total
+    }
+
     /// Paginated view of the invoice IDs minted by a given SME, in mint order.
     ///
     /// **Parameters:**
@@ -1759,7 +1863,6 @@ impl InvoiceNftContract {
         );
     }
 
-    /// Extend the TTL of an arbitrary persistent storage key to prevent expiry.
     /// Extend the TTL of an arbitrary persistent storage entry to prevent expiry.
     fn bump_persistent(env: &Env, key: &DataKey) {
         env.storage()
@@ -1802,6 +1905,8 @@ impl InvoiceNftContract {
         env.storage()
             .instance()
             .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
+
     /// Append a single newly-minted invoice ID to `sme`'s invoice index.
     fn append_sme_invoice_id(env: &Env, sme: &Address, id: u64) {
         let key = DataKey::SmeInvoiceIds(sme.clone());

@@ -77,6 +77,12 @@ pub enum DataKey {
     RiskRegistry,
     Treasury,
     LatePenaltyBps,
+    /// Portion (bps, 0–10 000) of each late-penalty payment routed to the
+    /// treasury. The remainder is distributed to investors.
+    LatePenaltyTreasurySplitBps,
+    /// Accumulated treasury portion of late penalties for an invoice, to be
+    /// distributed during yield distribution.
+    PenaltyTreasuryCut(u64),
     AccessControl,
     PriceOracle,
     RepaymentLock(u64),
@@ -275,6 +281,38 @@ impl FinancingPoolContract {
         }
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
         Ok(())
+    }
+
+    /// Updates the percentage of late-penalty payments routed to the treasury.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the contract admin (requires auth).
+    /// - `split_bps` — Portion in basis points (0–10 000). 5 000 = 50%.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::NotAdmin` — Caller is not the admin.
+    /// - `FinancingPoolError::InvalidFeeRate` — `split_bps` > 10 000.
+    pub fn set_late_penalty_split(
+        env: Env,
+        admin: Address,
+        split_bps: u32,
+    ) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        require_valid_bps_range(split_bps, 0, 10_000)?;
+        env.storage().instance().set(&DataKey::LatePenaltyTreasurySplitBps, &split_bps);
+        events::late_penalty_split_updated(&env, split_bps);
+        Ok(())
+    }
+
+    /// Returns the current treasury split for late penalties.
+    ///
+    /// **Returns:** BPS value (0–10 000) representing the treasury's share.
+    pub fn get_late_penalty_split(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LatePenaltyTreasurySplitBps)
+            .unwrap_or(5_000)
     }
 
     /// Returns the current per-investor concentration cap in basis points.
@@ -825,8 +863,7 @@ impl FinancingPoolContract {
 
         if pool.is_closed {
             env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
-            return Err(KoraError::PoolAlreadyClosed);
-            return Err(FinancingPoolError::RepaymentAlreadyMade);
+            return Err(FinancingPoolError::PoolAlreadyClosed);
         }
 
         // Fetch invoice for due_date check and currency conversion
@@ -847,7 +884,6 @@ impl FinancingPoolContract {
             if idx >= len {
                 // All installments already satisfied — pool should have been closed.
                 env.storage().persistent().remove(&DataKey::RepaymentLock(invoice_id));
-                return Err(KoraError::PoolAlreadyClosed);
                 return Err(FinancingPoolError::RepaymentAlreadyMade);
             }
             let installment = schedule.installments.get(idx).unwrap();
@@ -870,12 +906,37 @@ impl FinancingPoolContract {
             if !pool.penalty_applied && pool.late_penalty_bps > 0 {
                 if env.ledger().timestamp() > installment.due_date {
                     let penalty = bps_of(pool.face_value, pool.late_penalty_bps)?;
+
+                    // Split the penalty: a configurable portion goes to the
+                    // treasury, the remainder is added to total_owed for investors.
+                    let treasury_split_bps: u32 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::LatePenaltyTreasurySplitBps)
+                        .unwrap_or(5_000);
+                    let treasury_cut = bps_of(penalty, treasury_split_bps)?;
+                    let investor_cut = penalty
+                        .checked_sub(treasury_cut)
+                        .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+
+                    // Track the treasury portion so it can be forwarded during
+                    // yield distribution.
+                    let prev_cut: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::PenaltyTreasuryCut(invoice_id))
+                        .unwrap_or(0);
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::PenaltyTreasuryCut(invoice_id), &prev_cut.saturating_add(treasury_cut));
+
                     pool.total_owed = pool
                         .total_owed
-                        .checked_add(penalty)
+                        .checked_add(investor_cut)
                         .ok_or(FinancingPoolError::ArithmeticOverflow)?;
                     pool.penalty_applied = true;
-                    events::late_penalty_applied(&env, invoice_id, penalty, pool.total_owed);
+                    events::late_penalty_applied(&env, invoice_id, investor_cut, pool.total_owed);
+                    events::late_penalty_split(&env, invoice_id, penalty, treasury_cut, investor_cut);
                 }
             }
 
@@ -888,16 +949,39 @@ impl FinancingPoolContract {
             schedule.next_index = schedule.next_index.saturating_add(1);
             events::installment_paid(&env, invoice_id, &payer, idx, effective_amount);
         } else {
-            // No schedule — original lump-sum late penalty logic.
+            // No schedule — lump-sum late penalty logic.
             if !pool.penalty_applied && pool.late_penalty_bps > 0 {
                 if env.ledger().timestamp() > invoice.due_date {
                     let penalty = bps_of(pool.face_value, pool.late_penalty_bps)?;
+
+                    // Split the penalty: a configurable portion goes to the
+                    // treasury, the remainder is added to total_owed for investors.
+                    let treasury_split_bps: u32 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::LatePenaltyTreasurySplitBps)
+                        .unwrap_or(5_000);
+                    let treasury_cut = bps_of(penalty, treasury_split_bps)?;
+                    let investor_cut = penalty
+                        .checked_sub(treasury_cut)
+                        .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+
+                    let prev_cut: i128 = env
+                        .storage()
+                        .persistent()
+                        .get(&DataKey::PenaltyTreasuryCut(invoice_id))
+                        .unwrap_or(0);
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::PenaltyTreasuryCut(invoice_id), &prev_cut.saturating_add(treasury_cut));
+
                     pool.total_owed = pool
                         .total_owed
-                        .checked_add(penalty)
+                        .checked_add(investor_cut)
                         .ok_or(FinancingPoolError::ArithmeticOverflow)?;
                     pool.penalty_applied = true;
-                    events::late_penalty_applied(&env, invoice_id, penalty, pool.total_owed);
+                    events::late_penalty_applied(&env, invoice_id, investor_cut, pool.total_owed);
+                    events::late_penalty_split(&env, invoice_id, penalty, treasury_cut, investor_cut);
                 }
             }
         }
@@ -1219,9 +1303,42 @@ impl FinancingPoolContract {
         let token_client = token::Client::new(env, token);
         let token_decimals = token_client.decimals();
 
+        // Forward the treasury's portion of late penalties (if any) before
+        // distributing the remainder to investors.
+        let treasury_cut: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PenaltyTreasuryCut(invoice_id))
+            .unwrap_or(0);
+        env.storage().persistent().remove(&DataKey::PenaltyTreasuryCut(invoice_id));
+
+        if treasury_cut > 0 {
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Treasury)
+                .ok_or(FinancingPoolError::NotInitialized)?;
+            token_client.transfer(&env.current_contract_address(), &treasury, &treasury_cut);
+
+            // Record the fee in treasury's on-chain accounting.
+            let treasury_client = kora_treasury::TreasuryContractClient::new(env, &treasury);
+            let _ = treasury_client.try_collect_fee(token, &treasury_cut);
+
+            events::late_penalty_split(
+                env,
+                invoice_id,
+                treasury_cut,
+                treasury_cut,
+                0,
+            );
+        }
+
+        // Investors receive total_repaid minus the treasury cut.
+        let investor_total = total_repaid.saturating_sub(treasury_cut);
+
         let mut total_contributed: i128 = 0;
         for (investor, position) in positions.iter() {
-            let payout = bps_of_normalized(total_repaid, position.share_bps, token_decimals)?;
+            let payout = bps_of_normalized(investor_total, position.share_bps, token_decimals)?;
             let yield_amount = payout
                 .checked_sub(position.contributed)
                 .ok_or(FinancingPoolError::ArithmeticOverflow)?;
@@ -2095,6 +2212,97 @@ impl FinancingPoolContract {
             kora_price_oracle::PriceOracleContractClient::new(env, &oracle_addr);
 
         Ok(oracle_client.convert(&amount, invoice_currency, &pool_currency))
+    }
+
+    /// Returns the Position for a specific investor in an invoice pool.
+    ///
+    /// Useful for the secondary market contract to verify that a seller holds
+    /// a position before allowing them to list it.
+    ///
+    /// **Parameters:**
+    /// - `invoice_id` — The invoice ID of the pool.
+    /// - `investor` — The investor address to query.
+    ///
+    /// **Returns:** The `Position` if found, otherwise a default/empty position.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_position(env: Env, invoice_id: u64, investor: Address) -> Position {
+        let positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        positions.get(investor.clone()).unwrap_or(Position {
+            investor,
+            invoice_id,
+            contributed: 0,
+            share_bps: 0,
+            yield_claimed: 0,
+        })
+    }
+
+    /// Transfers ownership of an investor position to a new address.
+    ///
+    /// Called by the secondary market contract (or directly by an investor) to
+    /// move a position from `from` to `to`.  The `from` address must
+    /// authenticate, proving they consent to the transfer.
+    ///
+    /// **Parameters:**
+    /// - `invoice_id` — The invoice ID of the pool.
+    /// - `from` — The current position owner (must authenticate).
+    /// - `to` — The new position owner.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::InvalidAddress` — `from` equals `to`.
+    /// - `FinancingPoolError::PoolNotFound` — Pool does not exist.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is already closed.
+    /// - `FinancingPoolError::PositionNotFound` — `from` does not hold a position.
+    ///
+    /// **Security:** Requires `from.require_auth()`.  State is updated before
+    /// any external interaction (CEI pattern).
+    pub fn transfer_position(
+        env: Env,
+        invoice_id: u64,
+        from: Address,
+        to: Address,
+    ) -> Result<(), FinancingPoolError> {
+        from.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if from == to {
+            return Err(FinancingPoolError::InvalidAddress);
+        }
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut position: Position = positions
+            .get(from.clone())
+            .ok_or(FinancingPoolError::PositionNotFound)?;
+
+        // CEI: update state before any external interaction.
+        positions.remove(from.clone());
+        position.investor = to.clone();
+        positions.set(to.clone(), position);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Positions(invoice_id), &positions);
+
+        events::position_transferred(&env, invoice_id, &from, &to);
+        Ok(())
     }
 }
 

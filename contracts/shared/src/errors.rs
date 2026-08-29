@@ -21,7 +21,9 @@ pub enum KoraError {
 
     // Invoice
     InvoiceNotFound = 10,
+    InvoiceAlreadyExists = 11,
     InvalidInvoiceStatus = 12,
+    InvoiceExpired = 13,
     InvalidAmount = 14,
     InvalidDueDate = 15,
     InvalidRiskScore = 16,
@@ -37,10 +39,18 @@ pub enum KoraError {
     ExceedsFundingTarget = 25,
     ListingFullyFunded = 27,
     FundingNotExpired = 28,
+    // RefundAlreadyClaimed = 29,
+    // FundingDeadlineTooCloseToDueDate = 103,
+    // BiddingWindowActive = 104,
+    // BiddingWindowClosed = 105,
+    // BidNotFound = 106,
+    // BidAlreadyExists = 107,
 
     // Pool
     PoolNotFound = 30,
     PoolAlreadyClosed = 31,
+    RepaymentAlreadyMade = 32,
+    InsufficientPoolBalance = 33,
     PositionNotFound = 34,
     SaleAlreadyListed = 35,
     SaleNotFound = 36,
@@ -53,37 +63,42 @@ pub enum KoraError {
     // Risk
     SMENotRegistered = 50,
     ComplianceNotAttested = 53,
-    // SME profile exists but has not been marked `verified` by a risk_registry verifier
     SMENotVerified = 129,
 
     // General
     ArithmeticOverflow = 90,
-    /// Returned by `safe_sub` when the result would underflow (a < b).
     ArithmeticUnderflow = 91,
     InvalidAddress = 92,
     EmptyString = 93,
     AlreadyInitialized = 94,
+    NoContribution = 95,
     NotInitialized = 96,
-    // Distinct error for empty bytes (semantically different from EmptyString)
     EmptyBytes = 97,
-    // Reentrancy guard triggered
     Reentrancy = 98,
-    // Byte slice has the wrong length (e.g. debtor_hash must be exactly 32 bytes)
     InvalidLength = 99,
+    FieldTooLong = 102,
+
     // Upgrade
     NoUpgradeProposed = 100,
     UpgradeTimelockNotElapsed = 101,
+
     // Parameter governance
     ParameterProposalNotFound = 110,
     ParameterProposalAlreadyExecuted = 111,
     NotMultisigSigner = 112,
+    AlreadyVoted = 113,
     GovernanceThresholdNotMet = 114,
-    // Cooldown between debtor risk score updates per (verifier, debtor_hash) pair
+    GovernanceTimelockNotElapsed = 115,
+    InvalidParameterValue = 116,
+
+    // Cooldown between debtor risk score updates
     ScoreUpdateCooldownNotElapsed = 117,
+
     // Marketplace two-phase cancellation
     CancellationPending = 118,
     NoCancellationPending = 119,
-    // invoice_nft: caller is not the invoice's original SME
+
+    // Invoice ownership, credit limit, currency allowlist
     NotInvoiceOwner = 120,
     // invoice_nft: minting this invoice would exceed the SME's pre-approved credit limit
     CreditLimitExceeded = 121,
