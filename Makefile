@@ -2,7 +2,7 @@
 # Kora Protocol — Makefile
 # =============================================================================
 
-.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep
+.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
 
 WASM_TARGET := wasm32-unknown-unknown
 CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
@@ -12,6 +12,45 @@ COVERAGE_MIN ?= 95
 FUZZ_ITERS  ?= 10000
 FUZZ_TARGET ?= marketplace
 FUZZ_RUNS   ?= 1000000
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+help:
+	@echo "Kora Protocol — Available Targets:"
+	@echo ""
+	@echo "Build targets:"
+	@echo "  build                Build all contracts for wasm32-unknown-unknown"
+	@echo "  build-optimized      Build and optimize all WASM contracts"
+	@echo ""
+	@echo "Test targets:"
+	@echo "  test                 Run all tests (unit and integration)"
+	@echo "  test-verbose         Run tests with output capture disabled"
+	@echo "  fuzz                 Run deterministic fuzz tests with seed corpus"
+	@echo "  fuzz-deep            Run libFuzzer deep fuzz testing (nightly required)"
+	@echo "  coverage             Run code coverage analysis (requires cargo-tarpaulin)"
+	@echo ""
+	@echo "Code quality targets:"
+	@echo "  fmt                  Format all Rust code using cargo fmt"
+	@echo "  lint                 Run clippy linter with strict warnings-as-errors"
+	@echo "  check                Run cargo check on all packages"
+	@echo "  audit                Run cargo-deny and cargo-audit for supply chain security"
+	@echo ""
+	@echo "Deployment targets:"
+	@echo "  deploy-testnet       Build optimized and deploy to Stellar testnet"
+	@echo "  deploy-mainnet       Build optimized and deploy to Stellar mainnet (confirmation required)"
+	@echo ""
+	@echo "Utility targets:"
+	@echo "  setup                Install Rust target and required tools"
+	@echo "  sizes                Display WASM artifact sizes for all contracts"
+	@echo "  clean                Remove all build artifacts"
+	@echo "  help                 Display this help message"
+	@echo ""
+	@echo "Usage: make <target> [VARIABLE=value ...]"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make test"
+	@echo "  make fuzz FUZZ_ITERS=50000"
+	@echo "  make coverage COVERAGE_MIN=85"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
