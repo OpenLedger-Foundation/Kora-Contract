@@ -245,6 +245,20 @@ jobs:
       - name: Validate TTL keeper script
         run: ./scripts/test-ttl-keeper.sh
 
+  # ── Reproducible build verification (issue #645) ─────────────────────────
+  #
+  # Validates that WASM binaries are built reproducibly. This ensures that
+  # the compiled output is deterministic, which is critical for proving that
+  # deployed contracts match their source code.
+  reproducible-build-check:
+    name: Reproducible build verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate reproducible build structure
+        run: ./scripts/test-reproducible-build.sh
+
   # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
   #
   # Runs cargo-deny (license / banned-crate / source checks against deny.toml)
