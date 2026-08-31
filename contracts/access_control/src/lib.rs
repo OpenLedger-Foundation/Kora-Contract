@@ -795,6 +795,147 @@ impl AccessControlContract {
         Ok(())
     }
 
+    /// Execute multiple proposals atomically in a single batch transaction.
+    /// Each proposal must have independently cleared quorum and timelock.
+    /// All proposals are executed in order (all-or-nothing semantics).
+    ///
+    /// **Parameters:**
+    /// - `executor` — A configured multisig signer address.
+    /// - `proposal_ids` — Vector of proposal IDs to execute as a batch.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotMultisigSigner` — Caller is not a configured signer.
+    /// - `AccessControlError::ProposalNotFound` — A proposal ID doesn't exist.
+    /// - `AccessControlError::ProposalAlreadyExecuted` — A proposal has already been executed.
+    /// - `AccessControlError::ProposalExpired` — A proposal's TTL has elapsed.
+    /// - `AccessControlError::ThresholdNotMet` — A proposal hasn't reached quorum.
+    /// - `AccessControlError::Unauthorized` — Conflicting proposals detected in batch (same action modified twice).
+    ///
+    /// **Security:** Requires `executor.require_auth()`. All proposals must clear quorum individually.
+    /// Conflicting proposals (e.g., both modifying the same parameter) are detected and rejected.
+    pub fn execute_batch(env: Env, executor: Address, proposal_ids: Vec<u64>) -> Result<(), AccessControlError> {
+        executor.require_auth();
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &executor)?;
+
+        // Collect all proposals and validate them
+        let mut proposals: Vec<Proposal> = Vec::new(&env);
+        for i in 0..proposal_ids.len() {
+            let proposal_id = proposal_ids.get(i).ok_or(AccessControlError::Unauthorized)?;
+            let proposal: Proposal = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Proposal(proposal_id))
+                .ok_or(AccessControlError::ProposalNotFound)?;
+
+            if proposal.executed {
+                return Err(AccessControlError::ProposalAlreadyExecuted);
+            }
+            if proposal.cancelled {
+                return Err(AccessControlError::ProposalCancelled);
+            }
+            if env.ledger().timestamp() > proposal.expires_at {
+                return Err(AccessControlError::ProposalExpired);
+            }
+            if proposal.approvals.len() < config.threshold {
+                return Err(AccessControlError::ThresholdNotMet);
+            }
+
+            // Check for conflicts with previously validated proposals
+            Self::require_no_conflict(&env, &proposal, &proposals)?;
+
+            proposals.push_back(proposal);
+        }
+
+        // All proposals validated — now execute them all atomically
+        let current_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(AccessControlError::NotInitialized)?;
+
+        for i in 0..proposals.len() {
+            if let Ok(mut proposal) = proposals.get(i).ok_or(AccessControlError::Unauthorized) {
+                proposal.executed = true;
+                if let Ok(proposal_id) = proposal_ids.get(i).ok_or(AccessControlError::Unauthorized) {
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::Proposal(proposal_id), &proposal);
+
+                    // Execute the proposal's action
+                    match &proposal.action {
+                        AdminAction::Pause => {
+                            env.storage().instance().set(&DataKey::Paused, &true);
+                            events::protocol_paused(&env, &executor);
+                        }
+                        AdminAction::Unpause => {
+                            env.storage().instance().set(&DataKey::Paused, &false);
+                            events::protocol_unpaused(&env, &executor);
+                        }
+                        AdminAction::GrantRole(target, role_val) => {
+                            let role = match role_val {
+                                1 => Role::Operator,
+                                2 => Role::Verifier,
+                                _ => return Err(AccessControlError::Unauthorized),
+                            };
+                            Self::validate_grant_role_target(&env, target, &current_admin)?;
+                            env.storage()
+                                .persistent()
+                                .set(&DataKey::Role(target.clone()), &role);
+                            Self::bump_persistent(&env, &DataKey::Role(target.clone()));
+                            Self::add_to_role_members(&env, &role, target);
+                            events::role_granted(&env, &executor, target);
+                        }
+                        AdminAction::RevokeRole(target) => {
+                            let current_role = env
+                                .storage()
+                                .persistent()
+                                .get::<_, Role>(&DataKey::Role(target.clone()))
+                                .unwrap_or(Role::None);
+                            env.storage()
+                                .persistent()
+                                .remove(&DataKey::Role(target.clone()));
+                            if current_role != Role::None {
+                                Self::remove_from_role_members(&env, &current_role, target);
+                            }
+                            events::role_revoked(&env, &executor, target);
+                        }
+                        AdminAction::TransferAdmin(new_admin) => {
+                            Self::validate_transfer_admin_target(&env, new_admin, &current_admin)?;
+                            env.storage().persistent().set(&DataKey::Admin, new_admin);
+                            Self::bump_persistent(&env, &DataKey::Admin);
+                            env.storage()
+                                .persistent()
+                                .set(&DataKey::Role(new_admin.clone()), &Role::Admin);
+                            Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
+                            events::admin_transferred(&env, &executor, new_admin);
+                        }
+                        AdminAction::RotateAdmin(new_admin) => {
+                            Self::validate_transfer_admin_target(&env, new_admin, &current_admin)?;
+                            Self::require_no_other_active_proposals(&env, proposal_id)?;
+                            env.storage().persistent().set(&DataKey::Admin, new_admin);
+                            Self::bump_persistent(&env, &DataKey::Admin);
+                            env.storage()
+                                .persistent()
+                                .set(&DataKey::Role(new_admin.clone()), &Role::Admin);
+                            Self::bump_persistent(&env, &DataKey::Role(new_admin.clone()));
+                            env.storage()
+                                .persistent()
+                                .remove(&DataKey::Role(current_admin.clone()));
+                            events::admin_rotated(&env, &executor, &current_admin, new_admin);
+                        }
+                    }
+
+                    events::action_executed(&env, proposal_id, &executor);
+                }
+            }
+        }
+
+        let details = Bytes::new(&env);
+        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
+        Ok(())
+    }
+
     /// Get a proposal by ID.
     ///
     /// **Parameters:**
@@ -1768,6 +1909,53 @@ impl AccessControlContract {
                 .set(&DataKey::Delegators(delegate.clone()), &new_delegators);
             Self::bump_persistent(env, &DataKey::Delegators(delegate.clone()));
         }
+    }
+
+    /// Check if a proposal conflicts with any in a batch.
+    /// Conflicts occur when two proposals modify the same target (e.g., both change a parameter).
+    fn require_no_conflict(env: &Env, proposal: &Proposal, batch: &Vec<Proposal>) -> Result<(), AccessControlError> {
+        for i in 0..batch.len() {
+            if let Ok(other) = batch.get(i).ok_or(AccessControlError::Unauthorized) {
+                match (&proposal.action, &other.action) {
+                    // TransferAdmin conflicts with any other admin-modifying action
+                    (AdminAction::TransferAdmin(_), AdminAction::TransferAdmin(_)) => {
+                        return Err(AccessControlError::Unauthorized);
+                    }
+                    (AdminAction::TransferAdmin(_), AdminAction::RotateAdmin(_)) => {
+                        return Err(AccessControlError::Unauthorized);
+                    }
+                    (AdminAction::RotateAdmin(_), AdminAction::TransferAdmin(_)) => {
+                        return Err(AccessControlError::Unauthorized);
+                    }
+                    (AdminAction::RotateAdmin(_), AdminAction::RotateAdmin(_)) => {
+                        return Err(AccessControlError::Unauthorized);
+                    }
+                    // Two GrantRole/RevokeRole for the same target conflict
+                    (AdminAction::GrantRole(target1, _), AdminAction::GrantRole(target2, _)) => {
+                        if target1 == target2 {
+                            return Err(AccessControlError::Unauthorized);
+                        }
+                    }
+                    (AdminAction::GrantRole(target1, _), AdminAction::RevokeRole(target2)) => {
+                        if target1 == target2 {
+                            return Err(AccessControlError::Unauthorized);
+                        }
+                    }
+                    (AdminAction::RevokeRole(target1), AdminAction::GrantRole(target2, _)) => {
+                        if target1 == target2 {
+                            return Err(AccessControlError::Unauthorized);
+                        }
+                    }
+                    (AdminAction::RevokeRole(target1), AdminAction::RevokeRole(target2)) => {
+                        if target1 == target2 {
+                            return Err(AccessControlError::Unauthorized);
+                        }
+                    }
+                    _ => {} // No conflict
+                }
+            }
+        }
+        Ok(())
     }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
