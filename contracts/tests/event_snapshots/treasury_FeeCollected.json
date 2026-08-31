@@ -1,0 +1,13 @@
+{
+  "contract": "treasury",
+  "event": "FeeCollected",
+  "schema_version": 1,
+  "fields": {
+    "invoice_id": "u64",
+    "fee_amount": "i128",
+    "fee_rate_bps": "u32",
+    "from_address": "Address",
+    "currency": "Symbol"
+  },
+  "documentation": "Emitted when protocol fees are collected from a transaction"
+}

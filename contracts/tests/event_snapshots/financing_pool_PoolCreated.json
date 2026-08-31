@@ -1,0 +1,15 @@
+{
+  "contract": "financing_pool",
+  "event": "PoolCreated",
+  "schema_version": 1,
+  "fields": {
+    "pool_id": "u64",
+    "invoice_id": "u64",
+    "target_amount": "i128",
+    "currency": "Symbol",
+    "created_by": "Address",
+    "initialized_by": "Address",
+    "status": "PoolStatus"
+  },
+  "documentation": "Emitted when a new financing pool is created for an invoice to be funded by investors"
+}
