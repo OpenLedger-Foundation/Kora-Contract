@@ -341,3 +341,32 @@ pub struct CommunityProposal {
     pub submitted_at: u64,
     pub expires_at: u64,
 }
+
+/// Asset allocation policy for treasury diversification (Issue #673).
+/// Defines target allocation ranges for each asset type to prevent unintended
+/// concentration of treasury holdings. Used by check_allocation_drift to identify
+/// when actual holdings deviate from policy parameters.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetAllocationPolicy {
+    pub asset: Address,
+    /// Minimum target allocation as a percentage (0–100, in basis points where 10000 = 100%)
+    pub min_allocation_bps: u32,
+    /// Maximum target allocation as a percentage (0–100, in basis points where 10000 = 100%)
+    pub max_allocation_bps: u32,
+    /// Timestamp when this policy was last updated
+    pub updated_at: u64,
+}
+
+/// Result of an allocation drift check (Issue #673).
+/// Identifies assets where actual holdings deviate from policy targets.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AllocationDrift {
+    pub asset: Address,
+    pub current_allocation_bps: u32,
+    pub target_min_bps: u32,
+    pub target_max_bps: u32,
+    /// true if current_allocation < target_min, false if > target_max
+    pub drifted_below: bool,
+}
