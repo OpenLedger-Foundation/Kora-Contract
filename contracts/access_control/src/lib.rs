@@ -53,6 +53,10 @@ pub enum AccessControlError {
     DirectCallProhibited = 30,
     /// Admin rotation is blocked while a governance proposal is in flight.
     RotationBlockedByPendingProposal = 31,
+    /// Guardian role not assigned (issue #669).
+    NotGuardian = 32,
+    /// Emergency pause cannot be triggered (guardian required).
+    GuardianEmergencyPauseFailed = 33,
 }
 
 impl From<CommonError> for AccessControlError {
@@ -108,6 +112,11 @@ pub enum DataKey {
     RecoveryProposal(u64),
     /// Monotonic counter for the next recovery proposal id.
     NextRecoveryProposalId,
+    // ── Emergency pause governance (#669) ──────────────────────────────────────
+    /// Timestamp of the last emergency pause triggered by a guardian.
+    LastEmergencyPauseTime,
+    /// Guardian who triggered the current emergency pause (if any).
+    EmergencyPauseInitiator,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -127,6 +136,7 @@ pub enum Role {
     Admin,
     Operator,
     Verifier,
+    Guardian, // Emergency pause role (issue #669)
     None,
 }
 
@@ -234,6 +244,69 @@ impl AccessControlContract {
         events::protocol_unpaused(&env, &admin);
         Self::append_audit_entry(&env, &admin, AdminActionType::Unpause, ().into_val(&env));
         Ok(())
+    }
+
+    // ── Emergency Pause Governance (#669) ──────────────────────────────────────
+
+    /// Emergency pause triggered by a guardian. Enables immediate protocol halt
+    /// without waiting for multisig/timelock. Any single guardian can trigger.
+    /// Requires guardian role (distinct from admin/multisig signers).
+    ///
+    /// **Parameters:**
+    /// - `guardian` — Must be assigned the `Guardian` role.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotGuardian` — Caller is not a guardian.
+    /// - `AccessControlError::AlreadyPaused` — Protocol already paused.
+    ///
+    /// **Security:** Requires `guardian.require_auth()`. No multisig or timelock
+    /// required — designed for "fast to pause, slow to unpause" security model.
+    /// Unpause requires full governance workflow (multisig + timelock).
+    pub fn emergency_pause_by_guardian(env: Env, guardian: Address) -> Result<(), AccessControlError> {
+        guardian.require_auth();
+        Self::require_guardian(&env, &guardian)?;
+
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(AccessControlError::AlreadyPaused);
+        }
+
+        let _guard = ReentrancyGuard::new(&env)?;
+        let now = env.ledger().timestamp();
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::LastEmergencyPauseTime, &now);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyPauseInitiator, &guardian);
+
+        events::protocol_paused(&env, &guardian);
+        Self::append_audit_entry(&env, &guardian, AdminActionType::Pause, ().into_val(&env));
+        Ok(())
+    }
+
+    /// Get the timestamp of the last emergency pause (if any).
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_last_emergency_pause_time(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::LastEmergencyPauseTime)
+    }
+
+    /// Get the guardian who triggered the current emergency pause (if any).
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_emergency_pause_initiator(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyPauseInitiator)
     }
 
     // ── Role management ───────────────────────────────────────────────────────
@@ -1514,6 +1587,18 @@ impl AccessControlContract {
             .ok_or(AccessControlError::NotInitialized)?;
         if &admin != caller {
             return Err(AccessControlError::NotAdmin);
+        }
+        Ok(())
+    }
+
+    fn require_guardian(env: &Env, caller: &Address) -> Result<(), AccessControlError> {
+        let role: Role = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Role(caller.clone()))
+            .unwrap_or(Role::None);
+        if role != Role::Guardian {
+            return Err(AccessControlError::NotGuardian);
         }
         Ok(())
     }
