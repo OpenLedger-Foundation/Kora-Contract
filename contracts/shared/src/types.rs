@@ -223,6 +223,10 @@ pub enum AdminAction {
     /// ownership handoff. Emits a dedicated `admin_rotated` event for
     /// off-chain monitoring to alert on.
     RotateAdmin(Address),
+    /// Resolve a dispute through governance (Issue #671).
+    /// Requires multisig quorum approval and governance timelock.
+    /// Parameters: (dispute_resolver, invoice_id, upheld)
+    ResolveDispute(Address, u64, bool),
 }
 
 /// A multisig proposal awaiting approval

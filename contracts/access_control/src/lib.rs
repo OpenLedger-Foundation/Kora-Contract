@@ -108,6 +108,8 @@ pub enum DataKey {
     RecoveryProposal(u64),
     /// Monotonic counter for the next recovery proposal id.
     NextRecoveryProposalId,
+    /// Address of the dispute_resolution contract for governance-gated resolution (Issue #671).
+    DisputeResolution,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -495,6 +497,32 @@ impl AccessControlContract {
         Ok(())
     }
 
+    /// Set the dispute resolution contract address for governance-gated resolution (Issue #671).
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `dispute_resolution` — The address of the dispute_resolution contract.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotAdmin` — Caller is not the admin.
+    /// - `AccessControlError::InvalidAddress` — `dispute_resolution` is the contract's own address.
+    pub fn set_dispute_resolution(
+        env: Env,
+        admin: Address,
+        dispute_resolution: Address,
+    ) -> Result<(), AccessControlError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &dispute_resolution)?;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeResolution, &dispute_resolution);
+        Self::bump_persistent(&env, &DataKey::DisputeResolution);
+
+        Ok(())
+    }
+
     /// Propose a new admin action. Caller must be a signer.
     ///
     /// **Parameters:**
@@ -736,6 +764,18 @@ impl AccessControlContract {
                     .persistent()
                     .remove(&DataKey::Role(current_admin.clone()));
                 events::admin_rotated(&env, &executor, &current_admin, &new_admin);
+            }
+            AdminAction::ResolveDispute(resolver, invoice_id, upheld) => {
+                // Issue #671: Governance-gated dispute resolution
+                // Route through dispute_resolution contract if available
+                if let Ok(Some(dispute_resolution)) = env.storage()
+                    .persistent()
+                    .get::<DataKey, Option<Address>>(&DataKey::DisputeResolution)
+                {
+                    let dr_client = kora_dispute_resolution::DisputeResolutionContractClient::new(&env, &dispute_resolution);
+                    dr_client.resolve_dispute(&resolver, &invoice_id, &upheld)?;
+                }
+                events::action_executed(&env, proposal_id, &executor);
             }
         }
 
