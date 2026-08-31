@@ -232,6 +232,19 @@ jobs:
       - name: Run coverage analysis
         run: make coverage COVERAGE_MIN=95
 
+  # ── TTL Keeper validation (issue #644) ───────────────────────────────────
+  #
+  # Validates that the TTL keeper script is properly configured for
+  # scheduled execution with proper error handling and network validation.
+  ttl-keeper-validation:
+    name: TTL Keeper validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate TTL keeper script
+        run: ./scripts/test-ttl-keeper.sh
+
   # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
   #
   # Runs cargo-deny (license / banned-crate / source checks against deny.toml)
