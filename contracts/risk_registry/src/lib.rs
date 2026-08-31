@@ -804,6 +804,55 @@ impl RiskRegistryContract {
         Ok(())
     }
 
+    /// Record successful invoice repayment for an SME. Admin only. Increments the
+    /// responsible verifier's reputation score by 1, rewarding accuracy.
+    ///
+    /// This function is called after an invoice has been successfully repaid, allowing
+    /// the system to reward verifiers whose risk assessments proved accurate. The reputation
+    /// score increases slowly (by 1 point per successful repayment) but decreases faster
+    /// (by 10 points per default), reflecting the importance of correctly identifying risk.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `sme` — The SME address whose invoice was successfully repaid.
+    ///
+    /// **Errors:**
+    /// - `RiskRegistryError::NotAdmin` — Caller is not the admin.
+    /// - `RiskRegistryError::SMENotRegistered` — SME has not been registered.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. Reputation is capped at 100.
+    pub fn record_successful_repayment(env: Env, admin: Address, sme: Address) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let profile: SmeProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SmeProfile(sme.clone()))
+            .ok_or(RiskRegistryError::SMENotRegistered)?;
+
+        let verifier = profile.verifier.clone();
+        let current_reputation: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerifierReputation(verifier.clone()))
+            .unwrap_or(100);
+
+        // Reputation score is capped at 100 (maximum)
+        let new_reputation = if current_reputation >= 100 {
+            100
+        } else {
+            current_reputation + 1
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierReputation(verifier.clone()), &new_reputation);
+        Self::bump_persistent(&env, &DataKey::VerifierReputation(verifier.clone()));
+        Self::append_audit_entry(&env, &admin, AdminActionType::RecordDefault);
+        Ok(())
+    }
+
     /// Store a debtor risk score keyed by debtor hash. Verifier only.
     ///
     /// Enforces a per-(verifier, debtor_hash) cooldown of MIN_SCORE_UPDATE_INTERVAL seconds
