@@ -237,6 +237,7 @@ pub struct Proposal {
     pub cancelled: bool,
     pub created_at: u64,
     pub expires_at: u64,
+    pub timelock_delay: u64, // original timelock at proposal creation (#670)
 }
 
 /// Multisig configuration
@@ -254,6 +255,7 @@ pub enum ParameterKey {
     FeeBps,         // protocol fee in basis points
     LatePenaltyBps, // late-repayment penalty in basis points
     MaxRiskScore,   // ceiling for accepted invoice risk scores (0–100)
+    TimelockDelay,  // governance timelock duration in seconds (issue #670)
 }
 
 /// A governance proposal to change a single protocol parameter.
@@ -271,6 +273,7 @@ pub struct ParameterProposal {
     pub expires_at: u64,
     pub executed: bool,
     pub cancelled: bool,
+    pub timelock_delay: u64, // original timelock at proposal creation (#670)
 }
 
 /// A multisig signer recovery proposal for lost-key scenarios.

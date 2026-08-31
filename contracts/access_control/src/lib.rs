@@ -171,6 +171,14 @@ impl AccessControlContract {
             .persistent()
             .set(&DataKey::Role(admin.clone()), &Role::Admin);
         Self::bump_persistent(&env, &DataKey::Role(admin));
+
+        // Initialize governed timelock parameter (#670): default 24 hours (86,400 seconds)
+        env.storage().persistent().set(
+            &DataKey::Parameter(ParameterKey::TimelockDelay),
+            &86_400u32,
+        );
+        Self::bump_persistent(&env, &DataKey::Parameter(ParameterKey::TimelockDelay));
+
         Ok(())
     }
 
@@ -1097,6 +1105,17 @@ impl AccessControlContract {
         env.storage().persistent().get(&DataKey::Parameter(key))
     }
 
+    /// Get the governed timelock delay in seconds (#670).
+    /// Returns the current value or default (24 hours = 86,400 seconds) if not yet governed.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_governance_timelock_delay(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Parameter(ParameterKey::TimelockDelay))
+            .unwrap_or(86_400) as u64
+    }
+
     /// Read a parameter-change proposal by id.
     ///
     /// **Parameters:**
@@ -1668,6 +1687,8 @@ impl AccessControlContract {
         let ok = match key {
             ParameterKey::FeeBps | ParameterKey::LatePenaltyBps => value <= 10_000,
             ParameterKey::MaxRiskScore => value <= 100,
+            // TimelockDelay (#670): minimum 12 hours (43,200 seconds), maximum 90 days (7,776,000 seconds)
+            ParameterKey::TimelockDelay => value >= 43_200 && value <= 7_776_000,
         };
         if ok {
             return Ok(());
