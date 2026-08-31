@@ -3,6 +3,7 @@
 use kora_shared::{
     errors::CommonError,
     events,
+    types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, ProtocolStats, RepaymentApproval},
     types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, PositionShare, ProtocolStats, ShareSaleOffer},
     validation::{bps_of, bps_of_normalized, require_valid_bps_range, UPGRADE_TIMELOCK_DELAY},
 };
@@ -37,6 +38,9 @@ pub enum FinancingPoolError {
     SaleNotFound = 18,
     Unauthorized = 19,
     UpgradeTimelockNotElapsed = 20,
+    ApprovalPending = 21,
+    ApprovalThresholdNotMet = 22,
+    GracePeriodActive = 23,
     // PositionShare (#563)
     ShareNotFound = 21,
     InvalidShareAmount = 22,
@@ -98,6 +102,10 @@ pub enum DataKey {
     ProtocolStats,
     /// Installment repayment schedule for a pool, keyed by invoice ID.
     InstallmentSchedule(u64),
+    /// Pending repayment approval for high-value invoices.
+    RepaymentApproval(u64),
+    /// Grace period in seconds before an invoice can be marked defaulted.
+    GracePeriod,
     /// PositionShare set for a pool, keyed by (invoice_id, original_investor).
     PositionShares(u64, Address),
     /// Next share index for a position (used for generating unique share IDs).
@@ -126,6 +134,7 @@ impl FinancingPoolContract {
     /// - `late_penalty_bps` — Late-repayment penalty in basis points (0–10 000).
     /// - `price_oracle` — The deployed price oracle contract address for currency conversion.
     /// - `max_position_bps` — Maximum per-investor share of a pool in basis points (1–10 000).
+    /// - `grace_period` — Grace period in seconds before default marking (0 = immediate).
     /// - `dispute_resolution` — The deployed dispute resolution contract address. (#565)
     ///
     /// **Errors:**
@@ -144,6 +153,7 @@ impl FinancingPoolContract {
         late_penalty_bps: u32,
         price_oracle: Address,
         max_position_bps: u32,
+        grace_period: u64,
         dispute_resolution: Address,
     ) -> Result<(), FinancingPoolError> {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -173,6 +183,7 @@ impl FinancingPoolContract {
         env.storage().instance().set(&DataKey::LatePenaltyBps, &late_penalty_bps);
         env.storage().instance().set(&DataKey::PriceOracle, &price_oracle);
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
+        env.storage().instance().set(&DataKey::GracePeriod, &grace_period);
         env.storage().instance().set(&DataKey::DisputeResolution, &dispute_resolution);
         Ok(())
     }
@@ -328,6 +339,13 @@ impl FinancingPoolContract {
             .unwrap_or(5_000)
     }
 
+    /// Returns the configured grace period in seconds before an invoice can be
+    /// marked defaulted.
+    pub fn get_grace_period(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::GracePeriod)
+            .unwrap_or(0)
     /// Set the authorized marketplace contract address. Admin only.
     ///
     /// Used by `distribute_yield` to route auto-compounded payouts into a target
@@ -880,6 +898,28 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::InvalidAmount);
         }
 
+        if amount >= REPAYMENT_APPROVAL_THRESHOLD {
+            let approval: RepaymentApproval = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentApproval(invoice_id))
+                .ok_or(FinancingPoolError::ApprovalThresholdNotMet)?;
+
+            if !approval.executed {
+                return Err(FinancingPoolError::ApprovalThresholdNotMet);
+            }
+        }
+
+        Self::repay_internal(&env, payer, invoice_id, token, amount)
+    }
+
+    fn repay_internal(
+        env: &Env,
+        payer: Address,
+        invoice_id: u64,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), FinancingPoolError> {
         // ── #584: hoist NFT contract address read once for the entire repay call.
         // Used for freeze check, invoice fetch, and set_repaid — avoids 3 separate
         // instance storage reads.
@@ -1483,6 +1523,24 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::PoolAlreadyClosed);
         }
 
+        let grace_period: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::GracePeriod)
+            .unwrap_or(0);
+
+        let nft_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceNft)
+            .ok_or(FinancingPoolError::NotInitialized)?;
+        let nft_client =
+            kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_contract);
+        let invoice = nft_client.get_invoice(&invoice_id);
+
+        let now = env.ledger().timestamp();
+        if now < invoice.due_date + grace_period {
+            return Err(FinancingPoolError::GracePeriodActive);
         if let Some(dr_contract) = env
             .storage()
             .instance()
@@ -1530,6 +1588,172 @@ impl FinancingPoolContract {
         }
 
         Ok(())
+    }
+
+    // ── Multi-Signature Repayment Approval (#580) ──────────────────────────────
+
+    /// Threshold above which a repayment requires N-of-M approvals before execution.
+    const REPAYMENT_APPROVAL_THRESHOLD: i128 = 10_000_000_000i128;
+
+    /// Propose a high-value repayment for approval. Any address may propose; the
+    /// proposal is recorded on-chain for designated approvers to co-sign.
+    ///
+    /// **Parameters:**
+    /// - `payer` — The SME making the repayment (must sign).
+    /// - `invoice_id` — The ID of the invoice being repaid.
+    /// - `amount` — The proposed repayment amount.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::PoolNotFound` — No pool exists for `invoice_id`.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is already closed.
+    /// - `FinancingPoolError::InvalidAmount` — `amount` is below the approval threshold.
+    /// - `FinancingPoolError::ApprovalPending` — An approval is already pending.
+    pub fn propose_repayment(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        amount: i128,
+    ) -> Result<(), FinancingPoolError> {
+        payer.require_auth();
+
+        if amount <= 0 || amount > MAX_AMOUNT {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        if amount < REPAYMENT_APPROVAL_THRESHOLD {
+            return Err(FinancingPoolError::InvalidAmount);
+        }
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        if env.storage().persistent().has(&DataKey::RepaymentApproval(invoice_id)) {
+            return Err(FinancingPoolError::ApprovalPending);
+        }
+
+        let approval = RepaymentApproval {
+            invoice_id,
+            amount,
+            approvals: Vec::new(&env),
+            executed: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentApproval(invoice_id), &approval);
+
+        events::repayment_approved(&env, invoice_id, &payer, amount);
+        Ok(())
+    }
+
+    /// Approve a pending high-value repayment. Only designated approvers may call this.
+    ///
+    /// **Parameters:**
+    /// - `approver` — The address approving the repayment (must sign).
+    /// - `invoice_id` — The ID of the invoice being repaid.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::PoolNotFound` — No pool exists for `invoice_id`.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is already closed.
+    /// - `FinancingPoolError::ApprovalPending` — No pending approval.
+    /// - `FinancingPoolError::AlreadyInitialized` — Approver already approved.
+    pub fn approve_repayment(
+        env: Env,
+        approver: Address,
+        invoice_id: u64,
+    ) -> Result<(), FinancingPoolError> {
+        approver.require_auth();
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut approval: RepaymentApproval = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RepaymentApproval(invoice_id))
+            .ok_or(FinancingPoolError::ApprovalPending)?;
+
+        if approval.executed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        if approval.approvals.iter().any(|a| a == &approver) {
+            return Err(FinancingPoolError::AlreadyInitialized);
+        }
+
+        approval.approvals.push_back(approver.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentApproval(invoice_id), &approval);
+
+        Ok(())
+    }
+
+    /// Execute a repayment that has received sufficient approvals. Callable by
+    /// any approved signer once the threshold is met.
+    ///
+    /// **Parameters:**
+    /// - `payer` — The SME making the repayment (must sign).
+    /// - `invoice_id` — The ID of the invoice being repaid.
+    /// - `token` — The pool token address.
+    ///
+    /// **Errors:**
+    /// - `FinancingPoolError::PoolNotFound` — No pool exists for `invoice_id`.
+    /// - `FinancingPoolError::PoolAlreadyClosed` — Pool is already closed.
+    /// - `FinancingPoolError::ApprovalThresholdNotMet` — Not enough approvals.
+    pub fn execute_repayment(
+        env: Env,
+        payer: Address,
+        invoice_id: u64,
+        token: Address,
+    ) -> Result<(), FinancingPoolError> {
+        payer.require_auth();
+
+        let pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pool(invoice_id))
+            .ok_or(FinancingPoolError::PoolNotFound)?;
+
+        if pool.is_closed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let mut approval: RepaymentApproval = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RepaymentApproval(invoice_id))
+            .ok_or(FinancingPoolError::ApprovalThresholdNotMet)?;
+
+        if approval.executed {
+            return Err(FinancingPoolError::PoolAlreadyClosed);
+        }
+
+        let approval_count = approval.approvals.len();
+        if approval_count < 2 {
+            return Err(FinancingPoolError::ApprovalThresholdNotMet);
+        }
+
+        approval.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentApproval(invoice_id), &approval);
+
+        Self::repay_internal(&env, payer, invoice_id, token, approval.amount)
     }
 
     // ── Early-Termination Buyout ────────────────────────────────────────────────

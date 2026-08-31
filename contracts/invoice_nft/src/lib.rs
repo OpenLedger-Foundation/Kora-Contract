@@ -17,8 +17,14 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{Invoice, InvoiceStatus, ProtocolConfig, RiskTier},
+    types::{AmountBounds, Invoice, InvoiceStatus, ProtocolConfig, RiskTier},
     validation::{
+        require_amount_within_bounds, require_future_timestamp, require_max_length_bytes,
+        require_max_length_string, require_non_empty_bytes, require_non_empty_string,
+        require_non_zero_amount, require_risk_score_within_ceiling, require_valid_risk_score,
+        MAX_DEBTOR_HASH_LEN, MAX_IPFS_CID_LEN, UPGRADE_TIMELOCK_DELAY,
+        require_valid_risk_score, extend_persistent_ttl, DEFAULT_TTL_THRESHOLD, DEFAULT_TTL_BUMP,
+        MAX_DEBTOR_HASH_LEN, MAX_IPFS_CID_LEN, UPGRADE_TIMELOCK_DELAY,
         extend_persistent_ttl, require_batch_size_within_limit, require_future_timestamp,
         require_max_length_bytes, require_max_length_string, require_non_empty_bytes,
         require_non_empty_string, require_non_zero_amount, require_risk_score_within_ceiling,
@@ -145,6 +151,8 @@ pub enum DataKey {
     AuditLogTotal,
     /// Persistent: an audit log entry at ring-buffer position `n`.
     AuditEntry(u64),
+    /// Per-risk-tier face-value bounds for invoice minting/listing.
+    AmountBounds(kora_shared::types::RiskTier),
     /// Persistent: Vec<u64> of invoice IDs minted by this SME, in mint order.
     /// Appended to in mint_invoice/mint_invoices_batch, pruned in withdraw_invoice.
     SmeInvoiceIds(Address),
@@ -465,6 +473,33 @@ impl InvoiceNftContract {
             })
     }
 
+    /// Set per-risk-tier face-value bounds. Admin only.
+    pub fn set_amount_bounds(
+        env: Env,
+        admin: Address,
+        tier: RiskTier,
+        min_amount: i128,
+        max_amount: i128,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if min_amount < 0 || max_amount < 0 || min_amount > max_amount {
+            return Err(KoraError::InvalidAmount);
+        }
+        let bounds = AmountBounds::new(min_amount, max_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::AmountBounds(tier), &bounds);
+        Ok(())
+    }
+
+    /// Get per-risk-tier face-value bounds.
+    pub fn get_amount_bounds(env: Env, tier: RiskTier) -> Option<AmountBounds> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AmountBounds(tier))
+    }
+
     /// Mint a new invoice NFT. Caller must be a verified SME.
     ///
     /// **Parameters:**
@@ -512,6 +547,12 @@ impl InvoiceNftContract {
         require_future_timestamp(&env, due_date)?;
         require_valid_risk_score(risk_score)?;
         require_risk_score_within_ceiling(risk_score, Self::get_protocol_config(env.clone()).max_risk_score)?;
+
+        let tier = RiskTier::from_score(risk_score);
+        if let Some(bounds) = Self::get_amount_bounds(env.clone(), tier) {
+            require_amount_within_bounds(amount, bounds.min, bounds.max)?;
+        }
+
         require_non_empty_bytes(&debtor_hash)?;
         require_max_length_bytes(&debtor_hash, MAX_DEBTOR_HASH_LEN)?;
         require_non_empty_string(&ipfs_cid)?;
