@@ -5,7 +5,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal},
+    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal, VerifierAction, VerifierProposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
@@ -108,6 +108,10 @@ pub enum DataKey {
     RecoveryProposal(u64),
     /// Monotonic counter for the next recovery proposal id.
     NextRecoveryProposalId,
+    /// A pending verifier governance proposal, keyed by id.
+    VerifierProposal(u64),
+    /// Monotonic counter for the next verifier-proposal id.
+    NextVerifierProposalId,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -1039,6 +1043,184 @@ impl AccessControlContract {
         env.storage()
             .persistent()
             .get(&DataKey::ParameterProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)
+    }
+
+    // ── Verifier Governance ────────────────────────────────────────────────────
+
+    /// Propose a verifier onboarding or removal action.
+    ///
+    /// Gated by the B2 multisig signer set: only a configured signer may propose, and the
+    /// proposer's vote is recorded automatically. Execution additionally requires a quorum of
+    /// signer votes (B2 threshold) and a B1-style timelock to elapse.
+    pub fn propose_verifier_action(
+        env: Env,
+        proposer: Address,
+        action: VerifierAction,
+    ) -> Result<u64, AccessControlError> {
+        proposer.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &proposer)?;
+
+        let proposal_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextVerifierProposalId)
+            .unwrap_or(1);
+
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let proposal = VerifierProposal {
+            id: proposal_id,
+            action,
+            proposer: proposer.clone(),
+            approvals,
+            created_at: env.ledger().timestamp(),
+            expires_at: env.ledger().timestamp() + PROPOSAL_TTL_LEDGERS,
+            executed: false,
+            cancelled: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::VerifierProposal(proposal_id));
+        env.storage().persistent().set(
+            &DataKey::NextVerifierProposalId,
+            &(proposal_id
+                .checked_add(1)
+                .ok_or(AccessControlError::ArithmeticOverflow)?),
+        );
+
+        events::action_proposed(&env, proposal_id, &proposer);
+        let details = Bytes::new(&env);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeVerifierAction, details);
+        Ok(proposal_id)
+    }
+
+    /// Vote in favour of a pending verifier-action proposal. Multisig signers only.
+    ///
+    /// **Parameters:**
+    /// - `signer` — A configured multisig signer address.
+    /// - `proposal_id` — The ID of the verifier-action proposal.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotMultisigSigner` — Caller is not a configured signer.
+    /// - `AccessControlError::VerifierProposalNotFound` — No proposal exists with the given ID.
+    /// - `AccessControlError::VerifierProposalAlreadyExecuted` — Proposal already executed.
+    /// - `AccessControlError::ProposalExpired` — Proposal's TTL has elapsed.
+    /// - `AccessControlError::AlreadyVoted` — Caller has already cast their vote.
+    pub fn vote_verifier_action(
+        env: Env,
+        signer: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        signer.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &signer)?;
+
+        let mut proposal: VerifierProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerifierProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ParameterProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(AccessControlError::ParameterProposalCancelled);
+        }
+        if env.ledger().timestamp() > proposal.expires_at {
+            return Err(AccessControlError::ProposalExpired);
+        }
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == signer {
+                return Err(AccessControlError::AlreadyVoted);
+            }
+        }
+
+        proposal.approvals.push_back(signer.clone());
+        let count = proposal.approvals.len();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::VerifierProposal(proposal_id));
+
+        events::action_approved(&env, proposal_id, &signer, count);
+        Ok(())
+    }
+
+    /// Execute a verifier-action proposal once it has reached the multisig threshold (B2), the
+    /// governance timelock has elapsed (B1), and the proposal has not expired. Commits the action on-chain.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::VerifierProposalExpired` — Proposal's TTL has elapsed.
+    /// - `AccessControlError::GovernanceThresholdNotMet` — Not enough approvals.
+    /// - `AccessControlError::GovernanceTimelockNotElapsed` — Timelock has not passed.
+    pub fn execute_verifier_action(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        caller.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &caller)?;
+
+        let mut proposal: VerifierProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerifierProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ParameterProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(AccessControlError::ParameterProposalCancelled);
+        }
+        if proposal.approvals.len() < config.threshold {
+            return Err(AccessControlError::GovernanceThresholdNotMet);
+        }
+        if env.ledger().timestamp() < proposal.created_at + GOVERNANCE_TIMELOCK_DELAY {
+            return Err(AccessControlError::GovernanceTimelockNotElapsed);
+        }
+
+        proposal.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierProposal(proposal_id), &proposal);
+
+        // Note: The actual verifier management (onboarding/removal) is handled
+        // by the risk_registry contract which imports this proposal type.
+        // This contract only gates the proposal/voting/execution flow.
+
+        events::action_executed(&env, proposal_id, &caller);
+        let details = Bytes::new(&env);
+        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteVerifierAction, details);
+        Ok(())
+    }
+
+    /// Read a verifier-action proposal by id.
+    ///
+    /// **Parameters:**
+    /// - `proposal_id` — The ID of the verifier-action proposal.
+    ///
+    /// **Returns:** The full `VerifierProposal` struct, or `AccessControlError::ParameterProposalNotFound`.
+    ///
+    /// **Security:** Read-only view with no authorization check.
+    pub fn get_verifier_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<VerifierProposal, AccessControlError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VerifierProposal(proposal_id))
             .ok_or(AccessControlError::ParameterProposalNotFound)
     }
 

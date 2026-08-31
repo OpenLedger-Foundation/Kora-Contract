@@ -256,6 +256,16 @@ pub enum ParameterKey {
     MaxRiskScore,   // ceiling for accepted invoice risk scores (0–100)
 }
 
+/// Verifier management actions governed by the governance process.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifierAction {
+    /// Onboard a new verifier to the risk registry
+    OnboardVerifier(Address),
+    /// Remove an existing verifier from the risk registry
+    RemoveVerifier(Address),
+}
+
 /// A governance proposal to change a single protocol parameter.
 ///
 /// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
@@ -265,6 +275,23 @@ pub struct ParameterProposal {
     pub id: u64,
     pub key: ParameterKey,
     pub new_value: u32,
+    pub proposer: Address,
+    pub approvals: Vec<Address>, // signers that have voted in favour
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+/// A governance proposal for verifier onboarding or removal.
+///
+/// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
+/// Ensures verifier trust is maintained through the same governance rigor as protocol parameters.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VerifierProposal {
+    pub id: u64,
+    pub action: VerifierAction,
     pub proposer: Address,
     pub approvals: Vec<Address>, // signers that have voted in favour
     pub created_at: u64,
