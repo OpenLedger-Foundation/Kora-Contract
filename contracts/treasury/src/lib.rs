@@ -31,6 +31,10 @@ pub enum TreasuryError {
     UpgradeTimelockNotElapsed = 13,
     WithdrawalCapTimelockNotElapsed = 14,
     WithdrawalRateLimitExceeded = 15,
+    NotEligibleStakeholder = 16,
+    NoShareAvailable = 17,
+    InvalidDistributionConfig = 18,
+    DistributionProposalNotFound = 19,
 }
 
 impl From<CommonError> for TreasuryError {
@@ -123,6 +127,21 @@ pub enum DataKey {
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
     TreasuryProposal(u64),
+    // ── Revenue-sharing distribution (#667) ─────────────────────────────────────
+    /// Current distribution epoch number (increments on each new distribution).
+    CurrentDistributionEpoch,
+    /// Stakeholder registry: set of addresses eligible for revenue sharing.
+    Stakeholders,
+    /// Per-token accumulated fees designated for stakeholder distribution.
+    DistributionPool(Address),
+    /// Pending distribution proposal: (epoch, new_stakeholders_set, proposed_at).
+    DistributionProposal,
+    /// Total share of accumulated fees distributed in a given epoch, per token.
+    EpochDistributed(u64, Address),
+    /// Amount claimed by a stakeholder in a given epoch, per token.
+    StakeholderClaim(Address, u64, Address),
+    /// Distribution configuration: share percentages and stakeholder list per epoch.
+    DistributionConfig(u64),
 }
 
 /// A highest-risk treasury action gated behind `access_control`'s multisig quorum
@@ -146,6 +165,28 @@ pub struct TreasuryProposal {
     pub approvals: Vec<Address>,
     pub executed: bool,
     pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// Revenue-sharing distribution configuration for an epoch.
+/// Defines stakeholders and their equal distribution shares.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributionConfig {
+    pub epoch: u64,
+    pub stakeholders: Vec<Address>,
+    pub created_at: u64,
+    pub distribution_bps: u32, // Basis points of fees to distribute (e.g., 5000 = 50%)
+}
+
+/// A pending distribution proposal awaiting execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DistributionProposal {
+    pub epoch: u64,
+    pub stakeholders: Vec<Address>,
+    pub distribution_bps: u32,
+    pub proposed_at: u64,
     pub expires_at: u64,
 }
 
@@ -1564,6 +1605,217 @@ impl TreasuryContract {
             .ok_or(KoraError::ProposalNotFound)
     }
 
+    // ── Revenue-Sharing Distribution (#667) ───────────────────────────────────
+
+    /// Propose a new distribution configuration with an updated stakeholder list.
+    /// Admin only. Requires full governance if multisig is configured.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `stakeholders` — Vec of addresses eligible for revenue sharing.
+    /// - `distribution_bps` — Basis points of fees to distribute (0–10,000).
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::InvalidFeeRate` — `distribution_bps` > 10,000.
+    /// - `TreasuryError::InvalidDistributionConfig` — Stakeholders list is empty.
+    pub fn propose_distribution(
+        env: Env,
+        admin: Address,
+        stakeholders: Vec<Address>,
+        distribution_bps: u32,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if stakeholders.is_empty() {
+            return Err(TreasuryError::InvalidDistributionConfig);
+        }
+        require_valid_fee_bps(distribution_bps)?;
+
+        let epoch: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let expires_at = now + TREASURY_PROPOSAL_TTL;
+
+        let proposal = DistributionProposal {
+            epoch: epoch + 1,
+            stakeholders: stakeholders.clone(),
+            distribution_bps,
+            proposed_at: now,
+            expires_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DistributionProposal, &proposal);
+        Self::bump_persistent(&env, &DataKey::DistributionProposal);
+
+        events::fee_collected(&env, &admin, epoch as i128, distribution_bps as i128, &env.current_contract_address());
+        Ok(())
+    }
+
+    /// Execute a pending distribution proposal. Admin only.
+    /// Locks in the stakeholder set for this epoch.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::DistributionProposalNotFound` — No proposal pending.
+    pub fn execute_distribution(env: Env, admin: Address) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let proposal: DistributionProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DistributionProposal)
+            .ok_or(TreasuryError::DistributionProposalNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > proposal.expires_at {
+            return Err(TreasuryError::DistributionProposalNotFound);
+        }
+
+        let config = DistributionConfig {
+            epoch: proposal.epoch,
+            stakeholders: proposal.stakeholders.clone(),
+            created_at: now,
+            distribution_bps: proposal.distribution_bps,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DistributionConfig(proposal.epoch), &config);
+        Self::bump_persistent(&env, &DataKey::DistributionConfig(proposal.epoch));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CurrentDistributionEpoch, &proposal.epoch);
+        Self::bump_persistent(&env, &DataKey::CurrentDistributionEpoch);
+
+        env.storage().persistent().remove(&DataKey::DistributionProposal);
+
+        Ok(())
+    }
+
+    /// Claim accumulated revenue share for the current epoch.
+    /// Eligible stakeholders can withdraw their pro-rata share of distributed fees.
+    ///
+    /// **Parameters:**
+    /// - `stakeholder` — The address claiming their share.
+    /// - `token` — The token to claim in.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotEligibleStakeholder` — Caller is not a registered stakeholder.
+    /// - `TreasuryError::NoShareAvailable` — No claimable share available.
+    /// - `TreasuryError::InsufficientPoolBalance` — Treasury balance insufficient.
+    pub fn claim_share(
+        env: Env,
+        stakeholder: Address,
+        token: Address,
+    ) -> Result<i128, TreasuryError> {
+        stakeholder.require_auth();
+
+        let epoch: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0);
+
+        // Load the distribution config for this epoch
+        let config: DistributionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DistributionConfig(epoch))
+            .ok_or(TreasuryError::NotEligibleStakeholder)?;
+
+        // Verify stakeholder is in the list
+        let is_eligible = config.stakeholders.iter().any(|s| s == &stakeholder);
+        if !is_eligible {
+            return Err(TreasuryError::NotEligibleStakeholder);
+        }
+
+        // Check if already claimed this epoch
+        let claim_key = DataKey::StakeholderClaim(stakeholder.clone(), epoch, token.clone());
+        if env.storage().persistent().has(&claim_key) {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Calculate available balance from distribution pool
+        let collected_key = DataKey::Collected(token.clone());
+        let total_collected: i128 = env
+            .storage()
+            .persistent()
+            .get(&collected_key)
+            .unwrap_or(0);
+
+        let pool_key = DataKey::DistributionPool(token.clone());
+        let current_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&pool_key)
+            .unwrap_or(0);
+
+        // Calculate distribution pool if not yet allocated
+        let available_pool = if current_pool == 0 {
+            bps_of(total_collected, config.distribution_bps)?
+        } else {
+            current_pool
+        };
+
+        if available_pool <= 0 {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Calculate this stakeholder's pro-rata share
+        let stakeholder_count = config.stakeholders.len() as i128;
+        let individual_share = available_pool / stakeholder_count;
+
+        if individual_share <= 0 {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Record claim
+        env.storage()
+            .persistent()
+            .set(&claim_key, &individual_share);
+        Self::bump_persistent(&env, &claim_key);
+
+        // Transfer funds
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &stakeholder, &individual_share);
+
+        events::fee_withdrawn(&env, &stakeholder, &token, individual_share);
+
+        Ok(individual_share)
+    }
+
+    /// Get current distribution epoch number.
+    pub fn get_distribution_epoch(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0)
+    }
+
+    /// Get the distribution configuration for a specific epoch.
+    pub fn get_distribution_config(env: Env, epoch: u64) -> Option<DistributionConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DistributionConfig(epoch))
+    }
+
+    /// Get the pending distribution proposal.
+    pub fn get_pending_distribution(env: Env) -> Option<DistributionProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DistributionProposal)
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), TreasuryError> {
@@ -1732,6 +1984,16 @@ impl TreasuryContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+    }
+
+    /// Calculate basis points of an amount (e.g., 50 bps of 1000 = 5).
+    fn bps_of(amount: i128, bps: u32) -> Result<i128, TreasuryError> {
+        let bps_i128 = bps as i128;
+        amount
+            .checked_mul(bps_i128)
+            .ok_or(TreasuryError::ArithmeticOverflow)?
+            .checked_div(10_000)
+            .ok_or(TreasuryError::ArithmeticOverflow)
     }
 
     fn append_audit_entry(
