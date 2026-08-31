@@ -1134,6 +1134,104 @@ impl AccessControlContract {
             .ok_or(AccessControlError::ParameterProposalNotFound)
     }
 
+    // ── Governance Audit Trail Dashboard (#668) ───────────────────────────────
+
+    /// Get the total count of multisig proposals created (for pagination).
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_total_proposal_count(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1)
+            .saturating_sub(1)
+    }
+
+    /// Get the total count of parameter-change proposals created (for pagination).
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_total_parameter_proposal_count(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::NextParamProposalId)
+            .unwrap_or(1)
+            .saturating_sub(1)
+    }
+
+    /// Query executed governance proposals (multisig actions) with voting details.
+    /// Returns proposals that have been executed, showing what changed, who voted, and when.
+    ///
+    /// **Parameters:**
+    /// - `start_id` — Start from proposal ID (typically 1 for oldest).
+    /// - `limit` — Maximum proposals to return (capped at 100).
+    ///
+    /// **Returns:** Vec of executed Proposal structs.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    /// **Note:** Dashboard consumers should filter for `executed == true` and sort by timestamp.
+    pub fn query_executed_proposals(env: Env, start_id: u64, limit: u32) -> Vec<Proposal> {
+        let limit = (limit.min(100).max(1)) as u64;
+        let mut results = Vec::new(&env);
+
+        for i in 0..limit {
+            let proposal_id = start_id.saturating_add(i);
+            if let Ok(proposal) = env.storage().persistent().get::<_, Proposal>(&DataKey::Proposal(proposal_id)) {
+                if proposal.executed {
+                    results.push_back(proposal);
+                }
+            }
+        }
+        results
+    }
+
+    /// Query executed parameter-change proposals with governance details.
+    /// Returns parameter changes that have been executed, useful for tracking protocol evolution.
+    ///
+    /// **Parameters:**
+    /// - `start_id` — Start from parameter proposal ID.
+    /// - `limit` — Maximum proposals to return (capped at 100).
+    ///
+    /// **Returns:** Vec of executed ParameterProposal structs.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn query_executed_parameter_proposals(env: Env, start_id: u64, limit: u32) -> Vec<ParameterProposal> {
+        let limit = (limit.min(100).max(1)) as u64;
+        let mut results = Vec::new(&env);
+
+        for i in 0..limit {
+            let proposal_id = start_id.saturating_add(i);
+            if let Ok(proposal) = env.storage().persistent().get::<_, ParameterProposal>(&DataKey::ParameterProposal(proposal_id)) {
+                if proposal.executed {
+                    results.push_back(proposal);
+                }
+            }
+        }
+        results
+    }
+
+    /// Get all pending (not yet executed) proposals.
+    /// Useful for monitoring governance in-flight.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn query_pending_proposals(env: Env) -> Vec<Proposal> {
+        let total: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1)
+            .saturating_sub(1);
+        let mut results = Vec::new(&env);
+
+        for id in 1..=total.min(100) {
+            if let Ok(proposal) = env.storage().persistent().get::<_, Proposal>(&DataKey::Proposal(id)) {
+                if !proposal.executed && !proposal.cancelled {
+                    results.push_back(proposal);
+                }
+            }
+        }
+        results
+    }
+
     // ── Signer Recovery ────────────────────────────────────────────────────────
 
     /// Propose a multisig signer recovery after a long timelock.
