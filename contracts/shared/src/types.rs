@@ -327,3 +327,17 @@ pub struct Dispute {
     pub upheld: bool,
     pub resolved_at: u64,
 }
+
+/// A community proposal staged for signer review (Issue #672).
+/// Non-signers can submit proposals; signers then review and formally sponsor them
+/// for inclusion in the multisig governance workflow.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CommunityProposal {
+    pub id: u64,
+    pub submitter: Address,
+    pub action: AdminAction,
+    pub description: String,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+}
