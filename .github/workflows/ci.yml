@@ -259,6 +259,22 @@ jobs:
       - name: Validate reproducible build structure
         run: ./scripts/test-reproducible-build.sh
 
+  # ── WASM size regression gate test (issue #646) ──────────────────────────
+  #
+  # Validates that the WASM size regression gate is properly configured to:
+  #   - Track all contract sizes
+  #   - Compare against baseline
+  #   - Fail on regressions exceeding threshold
+  #   - Report results clearly
+  wasm-size-gate-test:
+    name: WASM size regression gate validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate WASM size gate configuration
+        run: ./scripts/test-wasm-size-gate.sh
+
   # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
   #
   # Runs cargo-deny (license / banned-crate / source checks against deny.toml)
