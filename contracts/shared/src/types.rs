@@ -370,3 +370,38 @@ pub struct AllocationDrift {
     /// true if current_allocation < target_min, false if > target_max
     pub drifted_below: bool,
 }
+
+/// Versioned risk tier definition for governance-gated tier boundaries (Issue #674).
+/// Defines the score ranges that map risk scores (0–100) to risk tiers (AAA–C).
+/// Version-locking ensures in-flight listings remain tied to the tier definition
+/// active when they were created, preventing retroactive tier changes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RiskTierDefinition {
+    /// Version identifier for this tier definition (incremented on each governance update)
+    pub version: u32,
+    /// Score range for AAA tier (top of range inclusive): 0..aaa_max
+    pub aaa_max: u32,
+    /// Score range for AA tier: aaa_max+1..aa_max
+    pub aa_max: u32,
+    /// Score range for A tier: aa_max+1..a_max
+    pub a_max: u32,
+    /// Score range for B tier: a_max+1..b_max
+    pub b_max: u32,
+    /// C tier: b_max+1..100 (always includes the top end)
+    /// Timestamp when this version was activated
+    pub activated_at: u64,
+}
+
+impl RiskTierDefinition {
+    /// Determine the risk tier for a given score using this tier definition
+    pub fn score_to_tier(&self, score: u32) -> RiskTier {
+        match score {
+            0..=20 if score <= self.aaa_max => RiskTier::AAA,
+            21..=40 if score <= self.aa_max => RiskTier::AA,
+            41..=60 if score <= self.a_max => RiskTier::A,
+            61..=80 if score <= self.b_max => RiskTier::B,
+            _ => RiskTier::C,
+        }
+    }
+}
