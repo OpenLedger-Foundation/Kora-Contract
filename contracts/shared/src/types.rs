@@ -314,6 +314,26 @@ pub struct RecoveryProposal {
     pub executed: bool,
 }
 
+/// A governance proposal to adjust the multisig signer set and threshold.
+///
+/// This meta-governance proposal allows the multisig itself to be reconfigured through
+/// formal proposal/voting/execution, ensuring signer set changes are subject to the same
+/// governance rigor as protocol parameter changes. The new signer set only activates
+/// after its own timelock expires, preventing immediate control changes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerSetProposal {
+    pub id: u64,
+    pub new_signers: Vec<Address>,
+    pub new_threshold: u32,
+    pub proposer: Address,
+    pub approvals: Vec<Address>, // current signers that have voted in favour
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
 /// A fractional claim on a Position, enabling secondary-market transfers
 /// before the underlying invoice is repaid or defaulted. (#563)
 #[contracttype]

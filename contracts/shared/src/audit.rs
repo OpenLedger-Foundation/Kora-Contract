@@ -80,6 +80,8 @@ pub enum AdminActionType {
     ExecuteParameter,
     ProposeVerifierAction,
     ExecuteVerifierAction,
+    ProposeSignerSetChange,
+    ExecuteSignerSetChange,
     // ── Treasury ─────────────────────────────────────────────────────────────
     SetFeeBps,
     WhitelistToken,

@@ -5,7 +5,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal, VerifierAction, VerifierProposal},
+    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal, SignerSetProposal, VerifierAction, VerifierProposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
@@ -70,6 +70,10 @@ impl From<CommonError> for AccessControlError {
 /// Mirrors the B1 upgrade timelock (~24h) so parameter changes get the same cooling-off period.
 const GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
 
+/// Extended timelock for meta-governance proposals that change the multisig signer set itself.
+/// Set to 7 days to provide extra cooling-off period for changes to governance control.
+const SIGNER_SET_GOVERNANCE_TIMELOCK_DELAY: u64 = 604_800; // ~7 days at ~5s/ledger
+
 /// Long timelock for multisig recovery proposals (30 days at ~5s/ledger).
 /// Gives legitimate signer set ample opportunity to object if recovery is illegitimate.
 const RECOVERY_TIMELOCK_DELAY: u64 = 518_400; // ~30 days at ~5s/ledger
@@ -112,6 +116,10 @@ pub enum DataKey {
     VerifierProposal(u64),
     /// Monotonic counter for the next verifier-proposal id.
     NextVerifierProposalId,
+    /// A pending multisig signer set governance proposal, keyed by id.
+    SignerSetProposal(u64),
+    /// Monotonic counter for the next signer-set-proposal id.
+    NextSignerSetProposalId,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -1369,6 +1377,209 @@ impl AccessControlContract {
             .persistent()
             .get(&DataKey::RecoveryProposal(proposal_id))
             .ok_or(AccessControlError::ProposalNotFound)
+    }
+
+    // ── Multisig Signer Set Governance ─────────────────────────────────────────
+
+    /// Propose a change to the multisig signer set and/or threshold.
+    ///
+    /// This meta-governance proposal allows the multisig itself to be reconfigured through
+    /// formal governance, ensuring signer set changes are subject to the same rigorous
+    /// approval process as protocol parameters. Only configured signers may propose,
+    /// and execution requires quorum approval plus an extended 7-day timelock.
+    ///
+    /// **Parameters:**
+    /// - `proposer` — Must be a configured multisig signer.
+    /// - `new_signers` — The new set of authorized signer addresses.
+    /// - `new_threshold` — The new quorum threshold (must be > 0 and ≤ signer count).
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotMultisigSigner` — Caller is not a configured signer.
+    /// - `AccessControlError::MultisigNotConfigured` — No multisig is currently configured.
+    /// - `AccessControlError::InvalidThreshold` — Threshold is 0 or exceeds signer count.
+    ///
+    /// **Security:** Requires `proposer.require_auth()`. The proposer's vote is counted automatically.
+    pub fn propose_signer_set_change(
+        env: Env,
+        proposer: Address,
+        new_signers: Vec<Address>,
+        new_threshold: u32,
+    ) -> Result<u64, AccessControlError> {
+        proposer.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &proposer)?;
+
+        if new_threshold == 0 || new_threshold > new_signers.len() {
+            return Err(AccessControlError::InvalidThreshold);
+        }
+
+        let proposal_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextSignerSetProposalId)
+            .unwrap_or(1);
+
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+
+        let proposal = SignerSetProposal {
+            id: proposal_id,
+            new_signers,
+            new_threshold,
+            proposer: proposer.clone(),
+            approvals,
+            created_at: env.ledger().timestamp(),
+            expires_at: env.ledger().timestamp() + PROPOSAL_TTL_LEDGERS,
+            executed: false,
+            cancelled: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SignerSetProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::SignerSetProposal(proposal_id));
+        env.storage().persistent().set(
+            &DataKey::NextSignerSetProposalId,
+            &(proposal_id
+                .checked_add(1)
+                .ok_or(AccessControlError::ArithmeticOverflow)?),
+        );
+
+        events::action_proposed(&env, proposal_id, &proposer);
+        let details = Bytes::new(&env);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeSignerSetChange, details);
+        Ok(proposal_id)
+    }
+
+    /// Vote in favour of a pending signer-set change proposal. Multisig signers only.
+    ///
+    /// **Parameters:**
+    /// - `signer` — A configured multisig signer address.
+    /// - `proposal_id` — The ID of the signer-set-change proposal.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotMultisigSigner` — Caller is not a configured signer.
+    /// - `AccessControlError::ParameterProposalNotFound` — No proposal exists with the given ID.
+    /// - `AccessControlError::ParameterProposalAlreadyExecuted` — Proposal already executed.
+    /// - `AccessControlError::ProposalExpired` — Proposal's TTL has elapsed.
+    /// - `AccessControlError::AlreadyVoted` — Caller has already cast their vote.
+    pub fn vote_signer_set_change(
+        env: Env,
+        signer: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        signer.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &signer)?;
+
+        let mut proposal: SignerSetProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SignerSetProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ParameterProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(AccessControlError::ParameterProposalCancelled);
+        }
+        if env.ledger().timestamp() > proposal.expires_at {
+            return Err(AccessControlError::ProposalExpired);
+        }
+        for i in 0..proposal.approvals.len() {
+            if proposal.approvals.get(i).unwrap() == signer {
+                return Err(AccessControlError::AlreadyVoted);
+            }
+        }
+
+        proposal.approvals.push_back(signer.clone());
+        let count = proposal.approvals.len();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SignerSetProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::SignerSetProposal(proposal_id));
+
+        events::action_approved(&env, proposal_id, &signer, count);
+        Ok(())
+    }
+
+    /// Execute a signer-set change proposal once it has reached quorum, the extended timelock
+    /// has elapsed, and the proposal has not expired. Activates the new signer set and threshold.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::ParameterProposalExpired` — Proposal's TTL has elapsed.
+    /// - `AccessControlError::GovernanceThresholdNotMet` — Not enough approvals.
+    /// - `AccessControlError::GovernanceTimelockNotElapsed` — Extended timelock has not passed.
+    pub fn execute_signer_set_change(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), AccessControlError> {
+        caller.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &caller)?;
+
+        let mut proposal: SignerSetProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SignerSetProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(AccessControlError::ParameterProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(AccessControlError::ParameterProposalCancelled);
+        }
+        if proposal.approvals.len() < config.threshold {
+            return Err(AccessControlError::GovernanceThresholdNotMet);
+        }
+        if env.ledger().timestamp() < proposal.created_at + SIGNER_SET_GOVERNANCE_TIMELOCK_DELAY {
+            return Err(AccessControlError::GovernanceTimelockNotElapsed);
+        }
+
+        proposal.executed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::SignerSetProposal(proposal_id), &proposal);
+
+        // Activate the new signer set and threshold
+        let new_config = MultisigConfig {
+            threshold: proposal.new_threshold,
+            signers: proposal.new_signers,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::MultisigConfig, &new_config);
+        Self::bump_persistent(&env, &DataKey::MultisigConfig);
+
+        events::action_executed(&env, proposal_id, &caller);
+        let details = Bytes::new(&env);
+        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteSignerSetChange, details);
+        Ok(())
+    }
+
+    /// Read a signer-set-change proposal by id.
+    ///
+    /// **Parameters:**
+    /// - `proposal_id` — The ID of the signer-set-change proposal.
+    ///
+    /// **Returns:** The full `SignerSetProposal` struct, or `AccessControlError::ParameterProposalNotFound`.
+    ///
+    /// **Security:** Read-only view with no authorization check.
+    pub fn get_signer_set_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<SignerSetProposal, AccessControlError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SignerSetProposal(proposal_id))
+            .ok_or(AccessControlError::ParameterProposalNotFound)
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
