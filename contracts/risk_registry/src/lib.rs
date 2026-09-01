@@ -5,7 +5,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::SmeProfile,
+    types::{RiskTier, RiskTierDefinition, SmeProfile},
     validation::{require_non_negative_amount, require_valid_risk_score, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{
@@ -100,6 +100,13 @@ pub enum DataKey {
     /// Governed minimum average debtor risk score (0–100). 0 means no debtor gate.
     MinimumDebtorScore,
     UpgradeProposal,
+    // ── Risk Tier Definitions (Issue #674) ────────────────────────────────────
+    /// Current active versioned risk tier definition (governance-gated boundaries)
+    CurrentRiskTierDefinition,
+    /// Historical risk tier definition by version for version-locking in-flight listings
+    RiskTierDefinitionVersion(u32),
+    /// Ledger timestamp of last risk tier definition update
+    RiskTierDefinitionUpdatedAt,
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -156,6 +163,19 @@ impl RiskRegistryContract {
         env.storage()
             .persistent()
             .set(&DataKey::SlashPercentage, &slash_percentage_bps);
+
+        // Issue #674: Initialize default risk tier definition (v1 with standard boundaries)
+        let default_tiers = Self::create_default_risk_tier_definition(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CurrentRiskTierDefinition, &default_tiers);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RiskTierDefinitionVersion(1), &default_tiers);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RiskTierDefinitionUpdatedAt, &env.ledger().timestamp());
+
         events::registry_initialized(&env, &admin, &invoice_nft);
         Ok(())
     }
@@ -1373,6 +1393,115 @@ impl RiskRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
+
+    // ── Risk Tier Definitions (Issue #674) ────────────────────────────────
+
+    /// Create the default risk tier definition with standard boundaries.
+    /// AAA: 0–20, AA: 21–40, A: 41–60, B: 61–80, C: 81–100
+    fn create_default_risk_tier_definition(env: &Env) -> RiskTierDefinition {
+        RiskTierDefinition {
+            version: 1,
+            aaa_max: 20,
+            aa_max: 40,
+            a_max: 60,
+            b_max: 80,
+            activated_at: env.ledger().timestamp(),
+        }
+    }
+
+    /// Get the current active risk tier definition (Issue #674).
+    ///
+    /// **Returns:** The currently active `RiskTierDefinition`, or a default if never set.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_current_risk_tier_definition(env: Env) -> RiskTierDefinition {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CurrentRiskTierDefinition)
+            .unwrap_or_else(|_| Self::create_default_risk_tier_definition(&env))
+    }
+
+    /// Get a specific version of a risk tier definition (Issue #674).
+    ///
+    /// Used for version-locking: listings created under a specific tier version
+    /// remain tied to that version even if tiers are later redefined.
+    ///
+    /// **Parameters:**
+    /// - `version` — The tier definition version to retrieve.
+    ///
+    /// **Returns:** The `RiskTierDefinition` for that version, or `None` if not found.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_risk_tier_definition_version(env: Env, version: u32) -> Option<RiskTierDefinition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RiskTierDefinitionVersion(version))
+    }
+
+    /// Update the risk tier definition with new boundaries (Issue #674).
+    /// Admin only. Creates a new versioned definition and activates it.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `aaa_max` — Maximum score for AAA tier (0–100).
+    /// - `aa_max` — Maximum score for AA tier (0–100).
+    /// - `a_max` — Maximum score for A tier (0–100).
+    /// - `b_max` — Maximum score for B tier (0–100).
+    ///
+    /// **Errors:**
+    /// - `RiskRegistryError::NotAdmin` — Caller is not the admin.
+    /// - `RiskRegistryError::InvalidRiskScore` — Boundaries are invalid or out of order.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. In production, this should be
+    /// gated by governance proposals through the access_control contract.
+    pub fn update_risk_tier_definition(
+        env: Env,
+        admin: Address,
+        aaa_max: u32,
+        aa_max: u32,
+        a_max: u32,
+        b_max: u32,
+    ) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        // Validate: boundaries must be in order and within valid range
+        if aaa_max >= aa_max || aa_max >= a_max || a_max >= b_max || b_max > 100 {
+            return Err(RiskRegistryError::InvalidRiskScore);
+        }
+
+        // Get current version and increment
+        let current_def = Self::get_current_risk_tier_definition(&env);
+        let new_version = current_def.version.checked_add(1)
+            .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+
+        // Create and store new definition
+        let new_def = RiskTierDefinition {
+            version: new_version,
+            aaa_max,
+            aa_max,
+            a_max,
+            b_max,
+            activated_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CurrentRiskTierDefinition, &new_def);
+        Self::bump_persistent(&env, &DataKey::CurrentRiskTierDefinition);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RiskTierDefinitionVersion(new_version), &new_def);
+        Self::bump_persistent(&env, &DataKey::RiskTierDefinitionVersion(new_version));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RiskTierDefinitionUpdatedAt, &env.ledger().timestamp());
+        Self::bump_persistent(&env, &DataKey::RiskTierDefinitionUpdatedAt);
+
+        Ok(())
     }
 }
 

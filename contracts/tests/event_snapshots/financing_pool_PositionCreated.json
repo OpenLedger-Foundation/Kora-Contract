@@ -1,0 +1,14 @@
+{
+  "contract": "financing_pool",
+  "event": "PositionCreated",
+  "schema_version": 1,
+  "fields": {
+    "position_id": "u64",
+    "pool_id": "u64",
+    "investor": "Address",
+    "amount": "i128",
+    "share_bps": "u32",
+    "currency": "Symbol"
+  },
+  "documentation": "Emitted when an investor creates a position in a financing pool (makes a funding contribution)"
+}

@@ -8,6 +8,7 @@ members = [
     "contracts/risk_registry",
     "contracts/access_control",
     "contracts/price_oracle",
+    "contracts/tranche",
     "contracts/dispute_resolution",
     "contracts/tests",
     "contracts/xtask",
