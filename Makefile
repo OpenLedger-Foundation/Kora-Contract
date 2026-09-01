@@ -98,6 +98,58 @@ fuzz:
 fuzz-deep:
 	cd contracts/fuzz/fuzz && cargo +nightly fuzz run fuzz_$(FUZZ_TARGET) -- -runs=$(FUZZ_RUNS)
 
+# ── Mutation Testing (Issue #681) ──────────────────────────────────────────────
+#
+# Mutation testing evaluates test suite strength by introducing small code changes
+# and verifying if tests detect them. Line coverage measures whether code ran during
+# tests, but mutation testing verifies tests would actually catch a bug.
+#
+# Requires: cargo install cargo-mutants
+#
+# Usage:
+#   make mutants              - Run mutation testing on entire workspace
+#   make mutants TIMEOUT=60   - Run with custom timeout (seconds)
+#   make mutants-json         - Generate JSON baseline report
+#   make mutants-html         - Generate HTML report
+
+MUTANTS_TIMEOUT ?= 120
+
+mutants:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing with $(MUTANTS_TIMEOUT)s timeout..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -j 4
+
+mutants-json: mutants
+	@echo "Mutation test results available in: mutants.out/"
+
+mutants-html: mutants
+	@echo "Generating HTML report..."
+	@ls -la mutants.out/ 2>/dev/null || echo "No mutation output directory found"
+
+mutants-focus-financing-pool:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing on financing_pool contract..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -p kora-financing-pool -j 4
+
+mutants-focus-treasury:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing on treasury contract..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -p kora-treasury -j 4
+
+mutants-baseline:
+	@echo "Generating baseline mutation kill-rate report..."
+	@echo "See: https://docs.rs/cargo-mutants/latest/cargo_mutants/"
+	cargo mutants --baseline=tests --timeout $(MUTANTS_TIMEOUT) -j 4 2>&1 | tee mutants-baseline.log
+
 # ── Audit ─────────────────────────────────────────────────────────────────────
 #
 # Run locally to replicate the `supply-chain-audit` CI gate (issue #609).

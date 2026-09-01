@@ -1,0 +1,78 @@
+# Cargo Mutants Configuration for Kora Protocol
+# Issue #681: Mutation Testing Harness
+#
+# This configuration ensures consistent mutation testing behavior across the project.
+# Mutation testing measures test suite strength by introducing code changes (mutations)
+# and verifying if tests detect them.
+
+[profile.test.package.soroban_sdk]
+# Skip mutation testing on external dependencies
+# We only test our own code, not dependencies
+
+[mutants]
+# Timeout for each test run (in seconds)
+timeout = 120
+
+# Parallel jobs for mutation testing
+# Reduced from system default to avoid resource exhaustion
+jobs = 4
+
+# Skip patterns: files/patterns to exclude from mutation testing
+skip = [
+    # Documentation tests are not mutation-tested
+    "**/*.md",
+    # Test helper modules may have limited coverage
+    "**/tests/common/*.rs",
+]
+
+# Instrument only these packages for mutation testing
+# Focus on critical Kora Protocol contracts
+packages = [
+    "kora-shared",
+    "kora-invoice-nft",
+    "kora-financing-pool",     # HIGH PRIORITY: handles investments and yield
+    "kora-treasury",           # HIGH PRIORITY: handles fees and distribution
+    "kora-marketplace",
+    "kora-access-control",
+    "kora-price-oracle",
+    "kora-risk-registry",
+    "kora-dispute-resolution",
+    "kora-secondary-market",
+]
+
+# Mutation limit per package (0 = unlimited)
+# Larger packages may take longer; set limit if needed
+mutation_limit = 0
+
+# Minimum kill-rate threshold (0-100)
+# Warn if overall kill-rate falls below this percentage
+baseline_mutation_kill_rate = 95
+
+[mutants.exclude-patterns]
+# Exclude auto-generated code from mutation testing
+generated = ["**/generated/*.rs"]
+
+# Exclude test fixtures (assumed unrealistic to mutate)
+fixtures = ["**/tests/fixtures/**"]
+
+# Exclude build outputs
+build = ["target/**"]
+
+[mutants.focus]
+# High-priority contracts for mutation testing
+# Results are more critical for these packages
+
+high_risk = [
+    "kora-financing-pool",    # Handles critical financial logic
+    "kora-treasury",          # Handles critical fee/distribution logic
+]
+
+[mutants.reporting]
+# Generate HTML report for visualization
+html = true
+
+# Generate JSON report for automation
+json = true
+
+# Display summary in terminal
+summary = true

@@ -1,0 +1,13 @@
+{
+  "contract": "invoice_nft",
+  "event": "InvoiceStatusChanged",
+  "schema_version": 1,
+  "fields": {
+    "invoice_id": "u64",
+    "previous_status": "InvoiceStatus",
+    "new_status": "InvoiceStatus",
+    "changed_by": "Address",
+    "reason": "Option<String>"
+  },
+  "documentation": "Emitted when an invoice transitions between states (Created→Listed→Funded→Repaid/Defaulted)"
+}
