@@ -6,6 +6,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
+    types::{AssetAllocationPolicy, AllocationDrift},
     validation::{require_non_negative_amount, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
@@ -123,6 +124,9 @@ pub enum DataKey {
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
     TreasuryProposal(u64),
+    // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
+    /// Governed allocation policy for a given asset (target min/max ranges).
+    AssetAllocationPolicy(Address),
 }
 
 /// A highest-risk treasury action gated behind `access_control`'s multisig quorum
@@ -1776,6 +1780,142 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
+
+    // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
+
+    /// Set or update an asset allocation policy (Issue #673).
+    ///
+    /// Governs target allocation ranges for a given asset to prevent unintended
+    /// concentration of treasury holdings. Policies are informational and do not
+    /// automatically trigger rebalancing—only `check_allocation_drift` identifies drift.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `asset` — The token address to set the policy for.
+    /// - `min_allocation_bps` — Minimum target allocation in basis points (0–10,000).
+    /// - `max_allocation_bps` — Maximum target allocation in basis points (0–10,000).
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::InvalidAddress` — `asset` is invalid.
+    ///
+    /// **Security:** Requires `admin.require_auth()`.
+    pub fn set_asset_allocation_policy(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        min_allocation_bps: u32,
+        max_allocation_bps: u32,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        // Validate ranges: min must be <= max, both within 0–10000 bps
+        if min_allocation_bps > max_allocation_bps || max_allocation_bps > 10_000 {
+            return Err(TreasuryError::InvalidFeeRate);
+        }
+
+        let policy = AssetAllocationPolicy {
+            asset: asset.clone(),
+            min_allocation_bps,
+            max_allocation_bps,
+            updated_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetAllocationPolicy(asset.clone()), &policy);
+        Self::bump_persistent(&env, &DataKey::AssetAllocationPolicy(asset.clone()));
+
+        Ok(())
+    }
+
+    /// Get the allocation policy for an asset, if set (Issue #673).
+    ///
+    /// **Parameters:**
+    /// - `asset` — The token address to look up.
+    ///
+    /// **Returns:** The allocation policy, or `None` if not set.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_asset_allocation_policy(env: Env, asset: Address) -> Option<AssetAllocationPolicy> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetAllocationPolicy(asset))
+    }
+
+    /// Check allocation drift for all assets with policies (Issue #673).
+    ///
+    /// Read-only function that identifies when actual treasury holdings deviate
+    /// from policy-defined allocation ranges. Operates in an informational capacity
+    /// only—no automated rebalancing occurs.
+    ///
+    /// **Parameters:**
+    /// - `assets` — Vector of asset addresses to check.
+    /// - `total_value` — Total treasury value (in some common unit, e.g., USD equivalent).
+    ///
+    /// **Returns:** Vector of `AllocationDrift` entries for assets that exceed drift thresholds.
+    ///            Empty vector if all assets are within policy ranges.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    /// Note: This function requires external price oracle data to compute allocations.
+    /// Callers must provide accurate total_value for meaningful results.
+    pub fn check_allocation_drift(
+        env: Env,
+        assets: Vec<Address>,
+        total_value: i128,
+    ) -> Vec<AllocationDrift> {
+        let mut drifts = Vec::new(&env);
+
+        if total_value <= 0 {
+            return drifts; // Cannot compute allocations with invalid total
+        }
+
+        for asset in assets.iter() {
+            if let Some(policy) = Self::get_asset_allocation_policy(&env, asset.clone()) {
+                // Get current balance for this asset
+                if let Ok(token_client) = token::Client::new(&env, &asset) {
+                    if let Ok(balance) = token_client.try_balance(&env.current_contract_address()) {
+                        if balance >= 0 {
+                            // Compute current allocation as bps of total
+                            let current_allocation_bps: u32 = if let Ok(scaled) =
+                                (balance as u128).checked_mul(10_000)
+                            {
+                                if let Ok(result) = scaled.checked_div(total_value as u128) {
+                                    result.min(10_000) as u32
+                                } else {
+                                    10_000
+                                }
+                            } else {
+                                10_000
+                            };
+
+                            // Check if allocation drifts outside policy range
+                            if current_allocation_bps < policy.min_allocation_bps {
+                                drifts.push_back(AllocationDrift {
+                                    asset: asset.clone(),
+                                    current_allocation_bps,
+                                    target_min_bps: policy.min_allocation_bps,
+                                    target_max_bps: policy.max_allocation_bps,
+                                    drifted_below: true,
+                                });
+                            } else if current_allocation_bps > policy.max_allocation_bps {
+                                drifts.push_back(AllocationDrift {
+                                    asset: asset.clone(),
+                                    current_allocation_bps,
+                                    target_min_bps: policy.min_allocation_bps,
+                                    target_max_bps: policy.max_allocation_bps,
+                                    drifted_below: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        drifts
     }
 }
 

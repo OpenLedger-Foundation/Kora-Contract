@@ -251,6 +251,10 @@ pub enum AdminAction {
     /// ownership handoff. Emits a dedicated `admin_rotated` event for
     /// off-chain monitoring to alert on.
     RotateAdmin(Address),
+    /// Resolve a dispute through governance (Issue #671).
+    /// Requires multisig quorum approval and governance timelock.
+    /// Parameters: (dispute_resolver, invoice_id, upheld)
+    ResolveDispute(Address, u64, bool),
 }
 
 /// A multisig proposal awaiting approval
@@ -350,4 +354,82 @@ pub struct Dispute {
     pub resolved: bool,
     pub upheld: bool,
     pub resolved_at: u64,
+}
+
+/// A community proposal staged for signer review (Issue #672).
+/// Non-signers can submit proposals; signers then review and formally sponsor them
+/// for inclusion in the multisig governance workflow.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CommunityProposal {
+    pub id: u64,
+    pub submitter: Address,
+    pub action: AdminAction,
+    pub description: String,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+}
+
+/// Asset allocation policy for treasury diversification (Issue #673).
+/// Defines target allocation ranges for each asset type to prevent unintended
+/// concentration of treasury holdings. Used by check_allocation_drift to identify
+/// when actual holdings deviate from policy parameters.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetAllocationPolicy {
+    pub asset: Address,
+    /// Minimum target allocation as a percentage (0–100, in basis points where 10000 = 100%)
+    pub min_allocation_bps: u32,
+    /// Maximum target allocation as a percentage (0–100, in basis points where 10000 = 100%)
+    pub max_allocation_bps: u32,
+    /// Timestamp when this policy was last updated
+    pub updated_at: u64,
+}
+
+/// Result of an allocation drift check (Issue #673).
+/// Identifies assets where actual holdings deviate from policy targets.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AllocationDrift {
+    pub asset: Address,
+    pub current_allocation_bps: u32,
+    pub target_min_bps: u32,
+    pub target_max_bps: u32,
+    /// true if current_allocation < target_min, false if > target_max
+    pub drifted_below: bool,
+}
+
+/// Versioned risk tier definition for governance-gated tier boundaries (Issue #674).
+/// Defines the score ranges that map risk scores (0–100) to risk tiers (AAA–C).
+/// Version-locking ensures in-flight listings remain tied to the tier definition
+/// active when they were created, preventing retroactive tier changes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RiskTierDefinition {
+    /// Version identifier for this tier definition (incremented on each governance update)
+    pub version: u32,
+    /// Score range for AAA tier (top of range inclusive): 0..aaa_max
+    pub aaa_max: u32,
+    /// Score range for AA tier: aaa_max+1..aa_max
+    pub aa_max: u32,
+    /// Score range for A tier: aa_max+1..a_max
+    pub a_max: u32,
+    /// Score range for B tier: a_max+1..b_max
+    pub b_max: u32,
+    /// C tier: b_max+1..100 (always includes the top end)
+    /// Timestamp when this version was activated
+    pub activated_at: u64,
+}
+
+impl RiskTierDefinition {
+    /// Determine the risk tier for a given score using this tier definition
+    pub fn score_to_tier(&self, score: u32) -> RiskTier {
+        match score {
+            0..=20 if score <= self.aaa_max => RiskTier::AAA,
+            21..=40 if score <= self.aa_max => RiskTier::AA,
+            41..=60 if score <= self.a_max => RiskTier::A,
+            61..=80 if score <= self.b_max => RiskTier::B,
+            _ => RiskTier::C,
+        }
+    }
 }
