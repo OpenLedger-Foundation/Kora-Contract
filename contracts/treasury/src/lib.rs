@@ -58,6 +58,10 @@ impl From<CommonError> for TreasuryError {
 /// TTL for treasury multisig proposals — mirrors access_control's PROPOSAL_TTL_LEDGERS (~7 days).
 const TREASURY_PROPOSAL_TTL: u64 = 604_800;
 
+/// Timelock delay between a treasury proposal reaching quorum and being executable.
+/// Mirrors the UPGRADE_TIMELOCK_DELAY (~24h) so treasury withdrawals get the same cooling-off period.
+const TREASURY_GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
+
 // ── Storage TTL constants (~31 days in ledgers) ───────────────────────────────
 const PERSISTENT_BUMP_AMOUNT: u32 = 535_680;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 535_680 / 2;
@@ -1620,11 +1624,12 @@ impl TreasuryContract {
         Ok(())
     }
 
-    /// Execute a treasury proposal once its approval threshold is met, applying the
-    /// underlying action ('withdraw' / 'emergency_withdraw' / 'set_fee_bps' / 'propose_upgrade').
+    /// Execute a treasury proposal once its approval threshold is met, the timelock has elapsed,
+    /// and it has not expired, applying the underlying action ('withdraw' / 'emergency_withdraw' / 'set_fee_bps' / 'propose_upgrade').
     ///
     /// **Errors:**
     /// - `KoraError::ThresholdNotMet` — Not enough approvals collected yet.
+    /// - `KoraError::GovernanceTimelockNotElapsed` — Governance timelock has not yet passed.
     pub fn execute_treasury_action(env: Env, executor: Address, proposal_id: u64) -> Result<(), KoraError> {
         executor.require_auth();
         let config = Self::load_signer_config(&env)?;
@@ -1644,6 +1649,9 @@ impl TreasuryContract {
         }
         if (proposal.approvals.len()) < config.threshold {
             return Err(KoraError::ThresholdNotMet);
+        }
+        if env.ledger().timestamp() < proposal.created_at + TREASURY_GOVERNANCE_TIMELOCK_DELAY {
+            return Err(KoraError::GovernanceTimelockNotElapsed);
         }
 
         proposal.executed = true;

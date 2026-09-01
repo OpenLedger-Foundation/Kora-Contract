@@ -290,6 +290,16 @@ pub enum ParameterKey {
     TimelockDelay,  // governance timelock duration in seconds (issue #670)
 }
 
+/// Verifier management actions governed by the governance process.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifierAction {
+    /// Onboard a new verifier to the risk registry
+    OnboardVerifier(Address),
+    /// Remove an existing verifier from the risk registry
+    RemoveVerifier(Address),
+}
+
 /// A governance proposal to change a single protocol parameter.
 ///
 /// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
@@ -308,6 +318,23 @@ pub struct ParameterProposal {
     pub timelock_delay: u64, // original timelock at proposal creation (#670)
 }
 
+/// A governance proposal for verifier onboarding or removal.
+///
+/// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
+/// Ensures verifier trust is maintained through the same governance rigor as protocol parameters.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VerifierProposal {
+    pub id: u64,
+    pub action: VerifierAction,
+    pub proposer: Address,
+    pub approvals: Vec<Address>, // signers that have voted in favour
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
 /// A multisig signer recovery proposal for lost-key scenarios.
 /// Allows reconfiguring the signer set after a long timelock if quorum becomes unreachable.
 #[contracttype]
@@ -320,6 +347,26 @@ pub struct RecoveryProposal {
     pub created_at: u64,
     pub objections: Vec<Address>, // signers that have objected to recovery
     pub executed: bool,
+}
+
+/// A governance proposal to adjust the multisig signer set and threshold.
+///
+/// This meta-governance proposal allows the multisig itself to be reconfigured through
+/// formal proposal/voting/execution, ensuring signer set changes are subject to the same
+/// governance rigor as protocol parameter changes. The new signer set only activates
+/// after its own timelock expires, preventing immediate control changes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignerSetProposal {
+    pub id: u64,
+    pub new_signers: Vec<Address>,
+    pub new_threshold: u32,
+    pub proposer: Address,
+    pub approvals: Vec<Address>, // current signers that have voted in favour
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
 }
 
 /// A fractional claim on a Position, enabling secondary-market transfers

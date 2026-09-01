@@ -74,6 +74,10 @@ impl From<CommonError> for AccessControlError {
 /// Mirrors the B1 upgrade timelock (~24h) so parameter changes get the same cooling-off period.
 const GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
 
+/// Extended timelock for meta-governance proposals that change the multisig signer set itself.
+/// Set to 7 days to provide extra cooling-off period for changes to governance control.
+const SIGNER_SET_GOVERNANCE_TIMELOCK_DELAY: u64 = 604_800; // ~7 days at ~5s/ledger
+
 /// Long timelock for multisig recovery proposals (30 days at ~5s/ledger).
 /// Gives legitimate signer set ample opportunity to object if recovery is illegitimate.
 const RECOVERY_TIMELOCK_DELAY: u64 = 518_400; // ~30 days at ~5s/ledger
