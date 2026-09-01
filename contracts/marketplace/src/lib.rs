@@ -490,6 +490,11 @@ impl MarketplaceContract {
             return Err(KoraError::InvalidAmount);
         }
 
+        if let Some(bounds) = nft_client.get_amount_bounds(&invoice.risk_tier) {
+            if face_value < bounds.min || face_value > bounds.max {
+                return Err(KoraError::InvalidAmount);
+            }
+        }
         // === #575: Debtor verification gate ===
         // The named debtor must carry a risk_registry record meeting the governed
         // minimum before the invoice can be listed on the marketplace.

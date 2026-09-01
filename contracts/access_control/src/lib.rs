@@ -5,7 +5,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{AdminAction, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal},
+    types::{AdminAction, CommunityProposal, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
@@ -78,6 +78,11 @@ const GOVERNANCE_TIMELOCK_DELAY: u64 = UPGRADE_TIMELOCK_DELAY;
 /// Gives legitimate signer set ample opportunity to object if recovery is illegitimate.
 const RECOVERY_TIMELOCK_DELAY: u64 = 518_400; // ~30 days at ~5s/ledger
 
+/// Cooldown period between community proposal submissions per address (Issue #672).
+/// Set to 1 day (~17,280 ledgers at ~5s/ledger) to prevent spam while enabling
+/// regular community participation.
+const COMMUNITY_PROPOSAL_COOLDOWN: u64 = 17_280; // ~1 day at ~5s/ledger
+
 // ── TTL constants (~30 days) ──────────────────────────────────────────────────
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
 const PERSISTENT_TTL_BUMP: u32 = 518_400;
@@ -112,11 +117,15 @@ pub enum DataKey {
     RecoveryProposal(u64),
     /// Monotonic counter for the next recovery proposal id.
     NextRecoveryProposalId,
-    // ── Emergency pause governance (#669) ──────────────────────────────────────
-    /// Timestamp of the last emergency pause triggered by a guardian.
-    LastEmergencyPauseTime,
-    /// Guardian who triggered the current emergency pause (if any).
-    EmergencyPauseInitiator,
+    /// Address of the dispute_resolution contract for governance-gated resolution (Issue #671).
+    DisputeResolution,
+    // ── Community Proposals (Issue #672) ──────────────────────────────────────
+    /// Pending community proposal awaiting signer sponsorship, keyed by id.
+    CommunityProposal(u64),
+    /// Monotonic counter for the next community proposal id.
+    NextCommunityProposalId,
+    /// Timestamp of the last community proposal submission by an address (cooldown tracking).
+    CommunityProposalCooldown(Address),
     // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
@@ -576,6 +585,32 @@ impl AccessControlContract {
         Ok(())
     }
 
+    /// Set the dispute resolution contract address for governance-gated resolution (Issue #671).
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `dispute_resolution` — The address of the dispute_resolution contract.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotAdmin` — Caller is not the admin.
+    /// - `AccessControlError::InvalidAddress` — `dispute_resolution` is the contract's own address.
+    pub fn set_dispute_resolution(
+        env: Env,
+        admin: Address,
+        dispute_resolution: Address,
+    ) -> Result<(), AccessControlError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &dispute_resolution)?;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeResolution, &dispute_resolution);
+        Self::bump_persistent(&env, &DataKey::DisputeResolution);
+
+        Ok(())
+    }
+
     /// Propose a new admin action. Caller must be a signer.
     ///
     /// **Parameters:**
@@ -817,6 +852,18 @@ impl AccessControlContract {
                     .persistent()
                     .remove(&DataKey::Role(current_admin.clone()));
                 events::admin_rotated(&env, &executor, &current_admin, &new_admin);
+            }
+            AdminAction::ResolveDispute(resolver, invoice_id, upheld) => {
+                // Issue #671: Governance-gated dispute resolution
+                // Route through dispute_resolution contract if available
+                if let Ok(Some(dispute_resolution)) = env.storage()
+                    .persistent()
+                    .get::<DataKey, Option<Address>>(&DataKey::DisputeResolution)
+                {
+                    let dr_client = kora_dispute_resolution::DisputeResolutionContractClient::new(&env, &dispute_resolution);
+                    dr_client.resolve_dispute(&resolver, &invoice_id, &upheld)?;
+                }
+                events::action_executed(&env, proposal_id, &executor);
             }
         }
 
@@ -1134,102 +1181,181 @@ impl AccessControlContract {
             .ok_or(AccessControlError::ParameterProposalNotFound)
     }
 
-    // ── Governance Audit Trail Dashboard (#668) ───────────────────────────────
+    // ── Community Proposals (Issue #672) ────────────────────────────────────
 
-    /// Get the total count of multisig proposals created (for pagination).
+    /// Submit a community proposal for signer review (Issue #672).
     ///
-    /// **Security:** Read-only view. No authorization required.
-    pub fn get_total_proposal_count(env: Env) -> u64 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::NextProposalId)
-            .unwrap_or(1)
-            .saturating_sub(1)
-    }
-
-    /// Get the total count of parameter-change proposals created (for pagination).
-    ///
-    /// **Security:** Read-only view. No authorization required.
-    pub fn get_total_parameter_proposal_count(env: Env) -> u64 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::NextParamProposalId)
-            .unwrap_or(1)
-            .saturating_sub(1)
-    }
-
-    /// Query executed governance proposals (multisig actions) with voting details.
-    /// Returns proposals that have been executed, showing what changed, who voted, and when.
+    /// Non-signers can submit proposals that signers will review and formally sponsor.
+    /// Enforces a per-submitter cooldown period to prevent spam. Each submission must
+    /// include a description for signer context.
     ///
     /// **Parameters:**
-    /// - `start_id` — Start from proposal ID (typically 1 for oldest).
-    /// - `limit` — Maximum proposals to return (capped at 100).
+    /// - `submitter` — The proposing community member (must sign).
+    /// - `action` — The `AdminAction` to propose.
+    /// - `description` — Motivation/context for the proposal.
     ///
-    /// **Returns:** Vec of executed Proposal structs.
+    /// **Returns:** The ID of the staged community proposal.
     ///
-    /// **Security:** Read-only view. No authorization required.
-    /// **Note:** Dashboard consumers should filter for `executed == true` and sort by timestamp.
-    pub fn query_executed_proposals(env: Env, start_id: u64, limit: u32) -> Vec<Proposal> {
-        let limit = (limit.min(100).max(1)) as u64;
-        let mut results = Vec::new(&env);
+    /// **Errors:**
+    /// - `AccessControlError::GovernanceTimelockNotElapsed` — Submitter's cooldown is active.
+    /// - `AccessControlError::ArithmeticOverflow` — Proposal ID counter overflowed.
+    ///
+    /// **Security:** Requires `submitter.require_auth()`. Cooldown is enforced per address
+    /// to prevent rapid-fire spam submission. Non-signers remain non-signers; only signers
+    /// can formally propose actions to governance.
+    pub fn submit_community_proposal(
+        env: Env,
+        submitter: Address,
+        action: AdminAction,
+        description: String,
+    ) -> Result<u64, AccessControlError> {
+        submitter.require_auth();
 
-        for i in 0..limit {
-            let proposal_id = start_id.saturating_add(i);
-            if let Ok(proposal) = env.storage().persistent().get::<_, Proposal>(&DataKey::Proposal(proposal_id)) {
-                if proposal.executed {
-                    results.push_back(proposal);
-                }
-            }
+        // Check cooldown: block if submitter has submitted within the cooldown window
+        let last_submission: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CommunityProposalCooldown(submitter.clone()))
+            .unwrap_or(0);
+
+        if env.ledger().timestamp() < last_submission + COMMUNITY_PROPOSAL_COOLDOWN {
+            return Err(AccessControlError::GovernanceTimelockNotElapsed);
         }
-        results
+
+        // Get the next proposal ID
+        let proposal_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextCommunityProposalId)
+            .unwrap_or(1);
+
+        let proposal = CommunityProposal {
+            id: proposal_id,
+            submitter: submitter.clone(),
+            action,
+            description,
+            submitted_at: env.ledger().timestamp(),
+            expires_at: env.ledger().timestamp() + PROPOSAL_TTL_LEDGERS,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommunityProposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::CommunityProposal(proposal_id));
+
+        // Update cooldown for this submitter
+        env.storage()
+            .persistent()
+            .set(&DataKey::CommunityProposalCooldown(submitter.clone()), &env.ledger().timestamp());
+        Self::bump_persistent(&env, &DataKey::CommunityProposalCooldown(submitter.clone()));
+
+        // Increment proposal ID counter
+        env.storage().persistent().set(
+            &DataKey::NextCommunityProposalId,
+            &(proposal_id
+                .checked_add(1)
+                .ok_or(AccessControlError::ArithmeticOverflow)?),
+        );
+
+        events::action_proposed(&env, proposal_id, &submitter);
+        Ok(proposal_id)
     }
 
-    /// Query executed parameter-change proposals with governance details.
-    /// Returns parameter changes that have been executed, useful for tracking protocol evolution.
+    /// Retrieve a staged community proposal by ID.
     ///
     /// **Parameters:**
-    /// - `start_id` — Start from parameter proposal ID.
-    /// - `limit` — Maximum proposals to return (capped at 100).
+    /// - `proposal_id` — The ID of the community proposal.
     ///
-    /// **Returns:** Vec of executed ParameterProposal structs.
+    /// **Returns:** The `CommunityProposal` struct, or `AccessControlError::ProposalNotFound`.
     ///
-    /// **Security:** Read-only view. No authorization required.
-    pub fn query_executed_parameter_proposals(env: Env, start_id: u64, limit: u32) -> Vec<ParameterProposal> {
-        let limit = (limit.min(100).max(1)) as u64;
-        let mut results = Vec::new(&env);
-
-        for i in 0..limit {
-            let proposal_id = start_id.saturating_add(i);
-            if let Ok(proposal) = env.storage().persistent().get::<_, ParameterProposal>(&DataKey::ParameterProposal(proposal_id)) {
-                if proposal.executed {
-                    results.push_back(proposal);
-                }
-            }
-        }
-        results
+    /// **Security:** Read-only view with no authorization check.
+    pub fn get_community_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<CommunityProposal, AccessControlError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CommunityProposal(proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)
     }
 
-    /// Get all pending (not yet executed) proposals.
-    /// Useful for monitoring governance in-flight.
+    /// Sponsor a community proposal, converting it to a formal multisig proposal (Issue #672).
     ///
-    /// **Security:** Read-only view. No authorization required.
-    pub fn query_pending_proposals(env: Env) -> Vec<Proposal> {
-        let total: u64 = env
+    /// Signers use this to elevate a community proposal to formal governance status.
+    /// The signer's vote is recorded automatically on sponsorship.
+    ///
+    /// **Parameters:**
+    /// - `signer` — A configured multisig signer.
+    /// - `community_proposal_id` — The ID of the staged community proposal.
+    ///
+    /// **Returns:** The ID of the newly created multisig proposal.
+    ///
+    /// **Errors:**
+    /// - `AccessControlError::NotMultisigSigner` — Caller is not a configured signer.
+    /// - `AccessControlError::ProposalNotFound` — Community proposal doesn't exist.
+    /// - `AccessControlError::ProposalExpired` — Community proposal's TTL has elapsed.
+    ///
+    /// **Security:** Requires `signer.require_auth()` and multisig configuration.
+    pub fn sponsor_community_proposal(
+        env: Env,
+        signer: Address,
+        community_proposal_id: u64,
+    ) -> Result<u64, AccessControlError> {
+        signer.require_auth();
+
+        let config = Self::load_multisig_config(&env)?;
+        Self::require_signer(&config, &signer)?;
+
+        let community_proposal: CommunityProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CommunityProposal(community_proposal_id))
+            .ok_or(AccessControlError::ProposalNotFound)?;
+
+        if env.ledger().timestamp() > community_proposal.expires_at {
+            return Err(AccessControlError::ProposalExpired);
+        }
+
+        // Create formal multisig proposal from community proposal
+        let proposal_id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::NextProposalId)
-            .unwrap_or(1)
-            .saturating_sub(1);
-        let mut results = Vec::new(&env);
+            .unwrap_or(1);
 
-        for id in 1..=total.min(100) {
-            if let Ok(proposal) = env.storage().persistent().get::<_, Proposal>(&DataKey::Proposal(id)) {
-                if !proposal.executed && !proposal.cancelled {
-                    results.push_back(proposal);
-                }
-            }
-        }
-        results
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(signer.clone());
+
+        let proposal = Proposal {
+            id: proposal_id,
+            action: community_proposal.action,
+            proposer: community_proposal.submitter.clone(),
+            approvals,
+            executed: false,
+            cancelled: false,
+            created_at: env.ledger().timestamp(),
+            expires_at: env.ledger().timestamp() + PROPOSAL_TTL_LEDGERS,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::bump_persistent(&env, &DataKey::Proposal(proposal_id));
+
+        env.storage().persistent().set(
+            &DataKey::NextProposalId,
+            &(proposal_id
+                .checked_add(1)
+                .ok_or(AccessControlError::ArithmeticOverflow)?),
+        );
+
+        // Clean up community proposal
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CommunityProposal(community_proposal_id));
+
+        events::action_proposed(&env, proposal_id, &signer);
+        Ok(proposal_id)
     }
 
     // ── Signer Recovery ────────────────────────────────────────────────────────

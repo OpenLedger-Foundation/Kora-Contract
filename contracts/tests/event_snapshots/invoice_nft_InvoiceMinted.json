@@ -1,0 +1,20 @@
+{
+  "contract": "invoice_nft",
+  "event": "InvoiceMinted",
+  "schema_version": 1,
+  "fields": {
+    "invoice_id": "u64",
+    "sme": "Address",
+    "amount": "i128",
+    "currency": "Symbol",
+    "due_date": "u64",
+    "risk_score": "u32",
+    "risk_tier": "RiskTier",
+    "ipfs_cid": "String",
+    "debtor_hash": "Bytes",
+    "metadata_hash": "Bytes",
+    "notes": "Option<String>",
+    "status": "InvoiceStatus"
+  },
+  "documentation": "Emitted when a new invoice NFT is minted by an SME. Contains all initial invoice metadata."
+}
