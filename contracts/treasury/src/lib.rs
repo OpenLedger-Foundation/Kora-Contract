@@ -11,6 +11,8 @@ use kora_shared::{
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 
+mod report;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -880,6 +882,95 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .get(&DataKey::AuditTotal)
+            .unwrap_or(0)
+    }
+
+    // ── Transparency Reports ──────────────────────────────────────────────────
+
+    /// Generate and store a treasury transparency report for the current epoch.
+    /// Summarizes inflows (fees collected), outflows (withdrawals), and ending balances per token.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `epoch` — The epoch identifier for this report.
+    /// - `whitelisted_tokens` — Vector of token addresses to include in the report.
+    ///
+    /// **Returns:** The generated report.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. Report is persisted for historical tracking.
+    pub fn generate_transparency_report(
+        env: Env,
+        admin: Address,
+        epoch: u64,
+        whitelisted_tokens: Vec<Address>,
+    ) -> Result<report::TreasuryReport, TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let mut report = report::TreasuryReport::new(&env, epoch);
+
+        // Aggregate data for each whitelisted token
+        for i in 0..whitelisted_tokens.len() {
+            if let Ok(token) = whitelisted_tokens.get(i) {
+                // Get accumulated inflows (fees collected for this token)
+                let inflows: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Collected(token.clone()))
+                    .unwrap_or(0);
+
+                // Get current balance (ending balance)
+                let balance = token::Client::new(&env, &token).balance(&env.current_contract_address());
+
+                // For now, outflows is calculated as (inflows - ending_balance)
+                // In a more complete implementation, we would track explicit withdrawal events
+                let outflows = (inflows - balance).max(0);
+
+                report.set_token_balance(token.clone(), inflows, outflows, balance);
+            }
+        }
+
+        // Store the report for historical reference
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryReport(epoch), &report);
+        Self::bump_persistent(&env, &DataKey::TreasuryReport(epoch));
+
+        // Update the last reported epoch
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastReportedEpoch, &epoch);
+        Self::bump_persistent(&env, &DataKey::LastReportedEpoch);
+
+        Ok(report)
+    }
+
+    /// Retrieve a previously generated transparency report by epoch.
+    ///
+    /// **Parameters:**
+    /// - `epoch` — The epoch identifier of the report to retrieve.
+    ///
+    /// **Returns:** The report if it exists, None otherwise.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_transparency_report(env: Env, epoch: u64) -> Option<report::TreasuryReport> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasuryReport(epoch))
+    }
+
+    /// Get the most recent epoch for which a report was generated.
+    ///
+    /// **Returns:** The epoch number, or 0 if no reports have been generated yet.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_last_reported_epoch(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LastReportedEpoch)
             .unwrap_or(0)
     }
 
