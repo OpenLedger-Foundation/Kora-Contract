@@ -6,6 +6,7 @@ use kora_shared::{
     errors::CommonError,
     events,
     reentrancy::ReentrancyGuard,
+    types::{AssetAllocationPolicy, AllocationDrift},
     validation::{require_non_negative_amount, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
@@ -33,6 +34,10 @@ pub enum TreasuryError {
     UpgradeTimelockNotElapsed = 13,
     WithdrawalCapTimelockNotElapsed = 14,
     WithdrawalRateLimitExceeded = 15,
+    NotEligibleStakeholder = 16,
+    NoShareAvailable = 17,
+    InvalidDistributionConfig = 18,
+    DistributionProposalNotFound = 19,
 }
 
 impl From<CommonError> for TreasuryError {
@@ -125,11 +130,9 @@ pub enum DataKey {
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
     TreasuryProposal(u64),
-    // ── Transparency Reports ──────────────────────────────────────────────────
-    /// A stored treasury report, keyed by epoch.
-    TreasuryReport(u64),
-    /// The most recent epoch for which a report was generated.
-    LastReportedEpoch,
+    // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
+    /// Governed allocation policy for a given asset (target min/max ranges).
+    AssetAllocationPolicy(Address),
 }
 
 /// A highest-risk treasury action gated behind `access_control`'s multisig quorum
@@ -153,6 +156,28 @@ pub struct TreasuryProposal {
     pub approvals: Vec<Address>,
     pub executed: bool,
     pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// Revenue-sharing distribution configuration for an epoch.
+/// Defines stakeholders and their equal distribution shares.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributionConfig {
+    pub epoch: u64,
+    pub stakeholders: Vec<Address>,
+    pub created_at: u64,
+    pub distribution_bps: u32, // Basis points of fees to distribute (e.g., 5000 = 50%)
+}
+
+/// A pending distribution proposal awaiting execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DistributionProposal {
+    pub epoch: u64,
+    pub stakeholders: Vec<Address>,
+    pub distribution_bps: u32,
+    pub proposed_at: u64,
     pub expires_at: u64,
 }
 
@@ -1660,6 +1685,217 @@ impl TreasuryContract {
             .ok_or(KoraError::ProposalNotFound)
     }
 
+    // ── Revenue-Sharing Distribution (#667) ───────────────────────────────────
+
+    /// Propose a new distribution configuration with an updated stakeholder list.
+    /// Admin only. Requires full governance if multisig is configured.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `stakeholders` — Vec of addresses eligible for revenue sharing.
+    /// - `distribution_bps` — Basis points of fees to distribute (0–10,000).
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::InvalidFeeRate` — `distribution_bps` > 10,000.
+    /// - `TreasuryError::InvalidDistributionConfig` — Stakeholders list is empty.
+    pub fn propose_distribution(
+        env: Env,
+        admin: Address,
+        stakeholders: Vec<Address>,
+        distribution_bps: u32,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if stakeholders.is_empty() {
+            return Err(TreasuryError::InvalidDistributionConfig);
+        }
+        require_valid_fee_bps(distribution_bps)?;
+
+        let epoch: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let expires_at = now + TREASURY_PROPOSAL_TTL;
+
+        let proposal = DistributionProposal {
+            epoch: epoch + 1,
+            stakeholders: stakeholders.clone(),
+            distribution_bps,
+            proposed_at: now,
+            expires_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DistributionProposal, &proposal);
+        Self::bump_persistent(&env, &DataKey::DistributionProposal);
+
+        events::fee_collected(&env, &admin, epoch as i128, distribution_bps as i128, &env.current_contract_address());
+        Ok(())
+    }
+
+    /// Execute a pending distribution proposal. Admin only.
+    /// Locks in the stakeholder set for this epoch.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::DistributionProposalNotFound` — No proposal pending.
+    pub fn execute_distribution(env: Env, admin: Address) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let proposal: DistributionProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DistributionProposal)
+            .ok_or(TreasuryError::DistributionProposalNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > proposal.expires_at {
+            return Err(TreasuryError::DistributionProposalNotFound);
+        }
+
+        let config = DistributionConfig {
+            epoch: proposal.epoch,
+            stakeholders: proposal.stakeholders.clone(),
+            created_at: now,
+            distribution_bps: proposal.distribution_bps,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DistributionConfig(proposal.epoch), &config);
+        Self::bump_persistent(&env, &DataKey::DistributionConfig(proposal.epoch));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::CurrentDistributionEpoch, &proposal.epoch);
+        Self::bump_persistent(&env, &DataKey::CurrentDistributionEpoch);
+
+        env.storage().persistent().remove(&DataKey::DistributionProposal);
+
+        Ok(())
+    }
+
+    /// Claim accumulated revenue share for the current epoch.
+    /// Eligible stakeholders can withdraw their pro-rata share of distributed fees.
+    ///
+    /// **Parameters:**
+    /// - `stakeholder` — The address claiming their share.
+    /// - `token` — The token to claim in.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotEligibleStakeholder` — Caller is not a registered stakeholder.
+    /// - `TreasuryError::NoShareAvailable` — No claimable share available.
+    /// - `TreasuryError::InsufficientPoolBalance` — Treasury balance insufficient.
+    pub fn claim_share(
+        env: Env,
+        stakeholder: Address,
+        token: Address,
+    ) -> Result<i128, TreasuryError> {
+        stakeholder.require_auth();
+
+        let epoch: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0);
+
+        // Load the distribution config for this epoch
+        let config: DistributionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DistributionConfig(epoch))
+            .ok_or(TreasuryError::NotEligibleStakeholder)?;
+
+        // Verify stakeholder is in the list
+        let is_eligible = config.stakeholders.iter().any(|s| s == &stakeholder);
+        if !is_eligible {
+            return Err(TreasuryError::NotEligibleStakeholder);
+        }
+
+        // Check if already claimed this epoch
+        let claim_key = DataKey::StakeholderClaim(stakeholder.clone(), epoch, token.clone());
+        if env.storage().persistent().has(&claim_key) {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Calculate available balance from distribution pool
+        let collected_key = DataKey::Collected(token.clone());
+        let total_collected: i128 = env
+            .storage()
+            .persistent()
+            .get(&collected_key)
+            .unwrap_or(0);
+
+        let pool_key = DataKey::DistributionPool(token.clone());
+        let current_pool: i128 = env
+            .storage()
+            .persistent()
+            .get(&pool_key)
+            .unwrap_or(0);
+
+        // Calculate distribution pool if not yet allocated
+        let available_pool = if current_pool == 0 {
+            bps_of(total_collected, config.distribution_bps)?
+        } else {
+            current_pool
+        };
+
+        if available_pool <= 0 {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Calculate this stakeholder's pro-rata share
+        let stakeholder_count = config.stakeholders.len() as i128;
+        let individual_share = available_pool / stakeholder_count;
+
+        if individual_share <= 0 {
+            return Err(TreasuryError::NoShareAvailable);
+        }
+
+        // Record claim
+        env.storage()
+            .persistent()
+            .set(&claim_key, &individual_share);
+        Self::bump_persistent(&env, &claim_key);
+
+        // Transfer funds
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &stakeholder, &individual_share);
+
+        events::fee_withdrawn(&env, &stakeholder, &token, individual_share);
+
+        Ok(individual_share)
+    }
+
+    /// Get current distribution epoch number.
+    pub fn get_distribution_epoch(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CurrentDistributionEpoch)
+            .unwrap_or(0)
+    }
+
+    /// Get the distribution configuration for a specific epoch.
+    pub fn get_distribution_config(env: Env, epoch: u64) -> Option<DistributionConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DistributionConfig(epoch))
+    }
+
+    /// Get the pending distribution proposal.
+    pub fn get_pending_distribution(env: Env) -> Option<DistributionProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DistributionProposal)
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) -> Result<(), TreasuryError> {
@@ -1830,6 +2066,16 @@ impl TreasuryContract {
         );
     }
 
+    /// Calculate basis points of an amount (e.g., 50 bps of 1000 = 5).
+    fn bps_of(amount: i128, bps: u32) -> Result<i128, TreasuryError> {
+        let bps_i128 = bps as i128;
+        amount
+            .checked_mul(bps_i128)
+            .ok_or(TreasuryError::ArithmeticOverflow)?
+            .checked_div(10_000)
+            .ok_or(TreasuryError::ArithmeticOverflow)
+    }
+
     fn append_audit_entry(
         env: &Env,
         actor: &Address,
@@ -1872,6 +2118,142 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
+
+    // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
+
+    /// Set or update an asset allocation policy (Issue #673).
+    ///
+    /// Governs target allocation ranges for a given asset to prevent unintended
+    /// concentration of treasury holdings. Policies are informational and do not
+    /// automatically trigger rebalancing—only `check_allocation_drift` identifies drift.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `asset` — The token address to set the policy for.
+    /// - `min_allocation_bps` — Minimum target allocation in basis points (0–10,000).
+    /// - `max_allocation_bps` — Maximum target allocation in basis points (0–10,000).
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::InvalidAddress` — `asset` is invalid.
+    ///
+    /// **Security:** Requires `admin.require_auth()`.
+    pub fn set_asset_allocation_policy(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        min_allocation_bps: u32,
+        max_allocation_bps: u32,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        // Validate ranges: min must be <= max, both within 0–10000 bps
+        if min_allocation_bps > max_allocation_bps || max_allocation_bps > 10_000 {
+            return Err(TreasuryError::InvalidFeeRate);
+        }
+
+        let policy = AssetAllocationPolicy {
+            asset: asset.clone(),
+            min_allocation_bps,
+            max_allocation_bps,
+            updated_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AssetAllocationPolicy(asset.clone()), &policy);
+        Self::bump_persistent(&env, &DataKey::AssetAllocationPolicy(asset.clone()));
+
+        Ok(())
+    }
+
+    /// Get the allocation policy for an asset, if set (Issue #673).
+    ///
+    /// **Parameters:**
+    /// - `asset` — The token address to look up.
+    ///
+    /// **Returns:** The allocation policy, or `None` if not set.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    pub fn get_asset_allocation_policy(env: Env, asset: Address) -> Option<AssetAllocationPolicy> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetAllocationPolicy(asset))
+    }
+
+    /// Check allocation drift for all assets with policies (Issue #673).
+    ///
+    /// Read-only function that identifies when actual treasury holdings deviate
+    /// from policy-defined allocation ranges. Operates in an informational capacity
+    /// only—no automated rebalancing occurs.
+    ///
+    /// **Parameters:**
+    /// - `assets` — Vector of asset addresses to check.
+    /// - `total_value` — Total treasury value (in some common unit, e.g., USD equivalent).
+    ///
+    /// **Returns:** Vector of `AllocationDrift` entries for assets that exceed drift thresholds.
+    ///            Empty vector if all assets are within policy ranges.
+    ///
+    /// **Security:** Read-only view. No authorization required.
+    /// Note: This function requires external price oracle data to compute allocations.
+    /// Callers must provide accurate total_value for meaningful results.
+    pub fn check_allocation_drift(
+        env: Env,
+        assets: Vec<Address>,
+        total_value: i128,
+    ) -> Vec<AllocationDrift> {
+        let mut drifts = Vec::new(&env);
+
+        if total_value <= 0 {
+            return drifts; // Cannot compute allocations with invalid total
+        }
+
+        for asset in assets.iter() {
+            if let Some(policy) = Self::get_asset_allocation_policy(&env, asset.clone()) {
+                // Get current balance for this asset
+                if let Ok(token_client) = token::Client::new(&env, &asset) {
+                    if let Ok(balance) = token_client.try_balance(&env.current_contract_address()) {
+                        if balance >= 0 {
+                            // Compute current allocation as bps of total
+                            let current_allocation_bps: u32 = if let Ok(scaled) =
+                                (balance as u128).checked_mul(10_000)
+                            {
+                                if let Ok(result) = scaled.checked_div(total_value as u128) {
+                                    result.min(10_000) as u32
+                                } else {
+                                    10_000
+                                }
+                            } else {
+                                10_000
+                            };
+
+                            // Check if allocation drifts outside policy range
+                            if current_allocation_bps < policy.min_allocation_bps {
+                                drifts.push_back(AllocationDrift {
+                                    asset: asset.clone(),
+                                    current_allocation_bps,
+                                    target_min_bps: policy.min_allocation_bps,
+                                    target_max_bps: policy.max_allocation_bps,
+                                    drifted_below: true,
+                                });
+                            } else if current_allocation_bps > policy.max_allocation_bps {
+                                drifts.push_back(AllocationDrift {
+                                    asset: asset.clone(),
+                                    current_allocation_bps,
+                                    target_min_bps: policy.min_allocation_bps,
+                                    target_max_bps: policy.max_allocation_bps,
+                                    drifted_below: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        drifts
     }
 }
 

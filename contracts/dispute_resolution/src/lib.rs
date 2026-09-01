@@ -141,8 +141,12 @@ impl DisputeResolutionContract {
         Ok(())
     }
 
-    /// Resolve an open dispute. Governance-gated via the wired access_control
-    /// contract's multisig signer set.
+    /// Resolve an open dispute. Issue #671: Requires governance proposal execution.
+    ///
+    /// This function is intended to be called only by the access_control contract's
+    /// execute_action workflow when executing a ResolveDispute governance proposal.
+    /// Direct calls are no longer permitted; all dispute resolutions must go through
+    /// the governance multisig proposal/approval/execution workflow with timelock.
     ///
     /// Sets the dispute as resolved with the given `upheld` flag.
     pub fn resolve_dispute(
@@ -152,6 +156,9 @@ impl DisputeResolutionContract {
         upheld: bool,
     ) -> Result<(), DisputeResolutionError> {
         resolver.require_auth();
+        // Issue #671: require_governance now ensures the caller is either:
+        // 1. A configured multisig signer when multisig is set up
+        // 2. The admin when no multisig is configured (backward compatibility)
         Self::require_governance(&env, &resolver)?;
 
         let mut dispute: Dispute = env

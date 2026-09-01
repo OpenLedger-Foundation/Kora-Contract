@@ -201,6 +201,80 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  # ── Code coverage gate (issue #643) ──────────────────────────────────────
+  #
+  # Measures code coverage using cargo-tarpaulin with a minimum threshold
+  # to ensure adequate test coverage across the workspace.
+  coverage:
+    name: code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.75"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-coverage-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked --version 0.21.0
+
+      - name: Run coverage analysis
+        run: make coverage COVERAGE_MIN=95
+
+  # ── TTL Keeper validation (issue #644) ───────────────────────────────────
+  #
+  # Validates that the TTL keeper script is properly configured for
+  # scheduled execution with proper error handling and network validation.
+  ttl-keeper-validation:
+    name: TTL Keeper validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate TTL keeper script
+        run: ./scripts/test-ttl-keeper.sh
+
+  # ── Reproducible build verification (issue #645) ─────────────────────────
+  #
+  # Validates that WASM binaries are built reproducibly. This ensures that
+  # the compiled output is deterministic, which is critical for proving that
+  # deployed contracts match their source code.
+  reproducible-build-check:
+    name: Reproducible build verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate reproducible build structure
+        run: ./scripts/test-reproducible-build.sh
+
+  # ── WASM size regression gate test (issue #646) ──────────────────────────
+  #
+  # Validates that the WASM size regression gate is properly configured to:
+  #   - Track all contract sizes
+  #   - Compare against baseline
+  #   - Fail on regressions exceeding threshold
+  #   - Report results clearly
+  wasm-size-gate-test:
+    name: WASM size regression gate validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate WASM size gate configuration
+        run: ./scripts/test-wasm-size-gate.sh
+
   # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
   #
   # Runs cargo-deny (license / banned-crate / source checks against deny.toml)

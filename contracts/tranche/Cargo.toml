@@ -1,0 +1,12 @@
+[package]
+name = "kora-tranche"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kora-shared = { path = "../shared" }
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+kora-shared = { path = "../shared", features = ["testutils"] }
+soroban-sdk = { workspace = true, features = ["testutils"] }

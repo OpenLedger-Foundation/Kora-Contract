@@ -2,7 +2,7 @@
 # Kora Protocol — Makefile
 # =============================================================================
 
-.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep
+.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
 
 WASM_TARGET := wasm32-unknown-unknown
 CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
@@ -12,6 +12,45 @@ COVERAGE_MIN ?= 95
 FUZZ_ITERS  ?= 10000
 FUZZ_TARGET ?= marketplace
 FUZZ_RUNS   ?= 1000000
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+
+help:
+	@echo "Kora Protocol — Available Targets:"
+	@echo ""
+	@echo "Build targets:"
+	@echo "  build                Build all contracts for wasm32-unknown-unknown"
+	@echo "  build-optimized      Build and optimize all WASM contracts"
+	@echo ""
+	@echo "Test targets:"
+	@echo "  test                 Run all tests (unit and integration)"
+	@echo "  test-verbose         Run tests with output capture disabled"
+	@echo "  fuzz                 Run deterministic fuzz tests with seed corpus"
+	@echo "  fuzz-deep            Run libFuzzer deep fuzz testing (nightly required)"
+	@echo "  coverage             Run code coverage analysis (requires cargo-tarpaulin)"
+	@echo ""
+	@echo "Code quality targets:"
+	@echo "  fmt                  Format all Rust code using cargo fmt"
+	@echo "  lint                 Run clippy linter with strict warnings-as-errors"
+	@echo "  check                Run cargo check on all packages"
+	@echo "  audit                Run cargo-deny and cargo-audit for supply chain security"
+	@echo ""
+	@echo "Deployment targets:"
+	@echo "  deploy-testnet       Build optimized and deploy to Stellar testnet"
+	@echo "  deploy-mainnet       Build optimized and deploy to Stellar mainnet (confirmation required)"
+	@echo ""
+	@echo "Utility targets:"
+	@echo "  setup                Install Rust target and required tools"
+	@echo "  sizes                Display WASM artifact sizes for all contracts"
+	@echo "  clean                Remove all build artifacts"
+	@echo "  help                 Display this help message"
+	@echo ""
+	@echo "Usage: make <target> [VARIABLE=value ...]"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make test"
+	@echo "  make fuzz FUZZ_ITERS=50000"
+	@echo "  make coverage COVERAGE_MIN=85"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -58,6 +97,58 @@ fuzz:
 #   make fuzz-deep FUZZ_TARGET=marketplace FUZZ_RUNS=5000000
 fuzz-deep:
 	cd contracts/fuzz/fuzz && cargo +nightly fuzz run fuzz_$(FUZZ_TARGET) -- -runs=$(FUZZ_RUNS)
+
+# ── Mutation Testing (Issue #681) ──────────────────────────────────────────────
+#
+# Mutation testing evaluates test suite strength by introducing small code changes
+# and verifying if tests detect them. Line coverage measures whether code ran during
+# tests, but mutation testing verifies tests would actually catch a bug.
+#
+# Requires: cargo install cargo-mutants
+#
+# Usage:
+#   make mutants              - Run mutation testing on entire workspace
+#   make mutants TIMEOUT=60   - Run with custom timeout (seconds)
+#   make mutants-json         - Generate JSON baseline report
+#   make mutants-html         - Generate HTML report
+
+MUTANTS_TIMEOUT ?= 120
+
+mutants:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing with $(MUTANTS_TIMEOUT)s timeout..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -j 4
+
+mutants-json: mutants
+	@echo "Mutation test results available in: mutants.out/"
+
+mutants-html: mutants
+	@echo "Generating HTML report..."
+	@ls -la mutants.out/ 2>/dev/null || echo "No mutation output directory found"
+
+mutants-focus-financing-pool:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing on financing_pool contract..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -p kora-financing-pool -j 4
+
+mutants-focus-treasury:
+	@command -v cargo-mutants >/dev/null 2>&1 || { \
+		echo "Error: cargo-mutants not found. Install with: cargo install cargo-mutants"; \
+		exit 1; \
+	}
+	@echo "Running mutation testing on treasury contract..."
+	cargo mutants --timeout $(MUTANTS_TIMEOUT) -p kora-treasury -j 4
+
+mutants-baseline:
+	@echo "Generating baseline mutation kill-rate report..."
+	@echo "See: https://docs.rs/cargo-mutants/latest/cargo_mutants/"
+	cargo mutants --baseline=tests --timeout $(MUTANTS_TIMEOUT) -j 4 2>&1 | tee mutants-baseline.log
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
 #
