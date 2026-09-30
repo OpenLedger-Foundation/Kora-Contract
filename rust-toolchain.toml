@@ -9,6 +9,6 @@
 # To install: rustup toolchain install 1.75.0
 # =============================================================================
 [toolchain]
-channel = "1.75.0"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]

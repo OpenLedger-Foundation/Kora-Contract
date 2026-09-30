@@ -103,9 +103,8 @@ pub const VERIFIER_READD_COOLDOWN_SECS: u64 = 7 * 24 * 3_600; // 7 days
 /// Prevents rapid manipulation immediately before a funding or default decision.
 pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
 
-// Maximum number of distinct verifiers allowed to attest a single debtor's risk
-// score, bounding the unbounded-Vec DoS surface in get_debtor_score aggregation.
-const MAX_VERIFIERS_PER_DEBTOR: u32 = 50;
+/// Maximum number of verifiers allowed to submit attestations for a single debtor.
+pub const MAX_VERIFIERS_PER_DEBTOR: u32 = 50;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -138,6 +137,7 @@ pub enum DataKey {
     Verifier(Address),
     VerifierStake(Address), // amount of tokens staked by verifier
     VerifierReputation(Address), // reputation score of verifier
+    VerifierWeight(Address), // configurable composite weight of verifier
     // ── Verifier rotation lifecycle (Issue #739) ─────────────────────────────
     /// Structured lifecycle status for a verifier address.
     VerifierStatus(Address),
@@ -1560,7 +1560,25 @@ impl RiskRegistryContract {
             .has(&DataKey::SubAccount(addr))
     }
 
-    /// Returns the debtor score or `RiskRegistryError::DebtorNotRegistered` if not found.
+    /// Set a verifier's score weighting factor for composite score calculations. Admin only.
+    pub fn set_verifier_weight(
+        env: Env,
+        admin: Address,
+        verifier: Address,
+        weight: u32,
+    ) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_verifier(&env, &verifier)?;
+        if weight == 0 {
+            return Err(RiskRegistryError::InvalidAmount);
+        }
+        env.storage().persistent().set(&DataKey::VerifierWeight(verifier.clone()), &weight);
+        Self::bump_persistent(&env, &DataKey::VerifierWeight(verifier));
+        Ok(())
+    }
+
+    /// Returns the composite weighted debtor score across active verifiers or `RiskRegistryError::DebtorNotRegistered` if not found.
     pub fn get_debtor_score(env: Env, debtor_hash: Bytes) -> Result<u32, RiskRegistryError> {
         let attestors_key = DataKey::DebtorAttestors(debtor_hash.clone());
         let attestors: Vec<Address> = env
@@ -1570,28 +1588,41 @@ impl RiskRegistryContract {
             .ok_or(RiskRegistryError::DebtorNotRegistered)?;
         Self::bump_persistent(&env, &attestors_key);
 
-        let mut total_score: u64 = 0;
-        let mut count: u32 = 0;
+        let mut total_weighted_score: u64 = 0;
+        let mut total_weight: u64 = 0;
 
         for verifier in attestors.iter() {
             if Self::verifier_counts_toward_aggregate(&env, &verifier) {
-                let key = DataKey::DebtorScoreAttestation(debtor_hash.clone(), verifier);
+                let key = DataKey::DebtorScoreAttestation(debtor_hash.clone(), verifier.clone());
                 if let Some(score) = env.storage().persistent().get::<_, u32>(&key) {
-                    total_score = total_score
-                        .checked_add(score as u64)
+                    let weight: u64 = env
+                        .storage()
+                        .persistent()
+                        .get::<_, u32>(&DataKey::VerifierWeight(verifier.clone()))
+                        .unwrap_or_else(|| Self::get_verifier_reputation(env.clone(), verifier.clone()).max(1))
+                        as u64;
+
+                    let weighted_score = (score as u64)
+                        .checked_mul(weight)
                         .ok_or(RiskRegistryError::ArithmeticOverflow)?;
-                    count += 1;
+
+                    total_weighted_score = total_weighted_score
+                        .checked_add(weighted_score)
+                        .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+                    total_weight = total_weight
+                        .checked_add(weight)
+                        .ok_or(RiskRegistryError::ArithmeticOverflow)?;
                     Self::bump_persistent(&env, &key);
                 }
             }
         }
 
-        if count == 0 {
+        if total_weight == 0 {
             return Err(RiskRegistryError::DebtorNotRegistered);
         }
 
-        let avg = total_score / (count as u64);
-        Ok(avg as u32)
+        let composite_score = total_weighted_score / total_weight;
+        Ok(composite_score as u32)
     }
 
     /// Current risk tier for a debtor, derived from active verifier attestations.
@@ -4166,5 +4197,33 @@ mod tests {
             client.get_debtor_score_attestation(&verifier_a, &debtor_hash),
             20u32
         );
+    }
+
+    #[test]
+    fn test_weighted_composite_score_aggregation() {
+        let (env, admin, _, staking_token, client) = setup();
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let debtor_hash = Bytes::from_slice(&env, &[7u8; 32]);
+
+        mint_stake(&env, &staking_token, &v1, 2_000_000i128);
+        mint_stake(&env, &staking_token, &v2, 2_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&v1, &2_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&v2, &2_000_000i128);
+
+        client.add_verifier(&admin, &v1, &1_000_000i128);
+        client.add_verifier(&admin, &v2, &1_000_000i128);
+
+        // v1 weight = 1, score = 20
+        // v2 weight = 3, score = 60
+        client.set_verifier_weight(&admin, &v1, &1u32);
+        client.set_verifier_weight(&admin, &v2, &3u32);
+
+        client.set_debtor_score(&v1, &debtor_hash, &20u32);
+        client.set_debtor_score(&v2, &debtor_hash, &60u32);
+
+        // Composite score = (20*1 + 60*3) / (1 + 3) = (20 + 180) / 4 = 50
+        let composite = client.get_debtor_score(&debtor_hash);
+        assert_eq!(composite, 50u32);
     }
 }

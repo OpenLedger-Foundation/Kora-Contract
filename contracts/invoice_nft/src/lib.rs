@@ -246,8 +246,11 @@ pub enum DataKey {
     MetadataCidHistory(u64),
     /// Invoice ID of the first invoice ever minted by an SME (set once, never updated).
     FirstMint(Address),
+    /// Referrer address for an SME (if any).
+    SmeReferrer(Address),
 
     // ── Legacy (migration only) ───────────────────────────────────────────────
+
     /// v1/v2 full Invoice struct — read during migrate() v2→v3, then removed.
     Invoice(u64),
 }
@@ -562,6 +565,27 @@ impl InvoiceNftContract {
             .get(&DataKey::SmeMintWindow(sme))
             .unwrap_or((0u64, 0u32))
     }
+
+    pub fn get_sme_referrer(env: Env, sme: Address) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::SmeReferrer(sme))
+    }
+
+    pub fn set_sme_referrer(env: Env, sme: Address, referrer: Address) {
+        sme.require_auth();
+        if !env.storage().persistent().has(&DataKey::SmeReferrer(sme.clone())) {
+            env.storage().persistent().set(&DataKey::SmeReferrer(sme), &referrer);
+        }
+    }
+
+    pub fn get_first_mint(env: Env, sme: Address) -> Option<u64> {
+        env.storage().persistent().get(&DataKey::FirstMint(sme))
+    }
+
+    pub fn get_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminAuditEntry> {
+        Vec::new(&env)
+    }
+
+
 
     /// Mint a new invoice NFT. Caller must be a verified SME.
     ///

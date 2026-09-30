@@ -36,7 +36,6 @@ pub enum PriceOracleError {
     PegNotConfigured = 13,
     PriceHistoryNotAvailable = 14,
     AllFeedsStale = 15,
-    FallbackNotConfigured = 16,
     /// Price update rejected: change vs. the previous price exceeds the
     /// configured max-rate-of-change circuit breaker.
     RateChangeExceeded = 17,

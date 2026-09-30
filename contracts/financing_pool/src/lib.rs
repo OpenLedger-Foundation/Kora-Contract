@@ -2,7 +2,7 @@
 
 // Formal verification model — host-only (requires std).
 // Gated so it never gets compiled into the WASM binary.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod verification {
     pub mod model {
         include!("../verification/model.rs");
@@ -84,6 +84,10 @@ pub enum FinancingPoolError {
     ApprovalPending = 33,
     ApprovalThresholdNotMet = 34,
     GracePeriodActive = 35,
+    InvalidMigrationTarget = 36,
+    TooManyInvestors = 37,
+    EscrowPending = 38,
+    BatchSizeExceeded = 39,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -98,6 +102,14 @@ impl From<CommonError> for FinancingPoolError {
         }
     }
 }
+
+impl From<kora_shared::migration::MigrationError> for FinancingPoolError {
+    fn from(_: kora_shared::migration::MigrationError) -> Self {
+        FinancingPoolError::InvalidMigrationTarget
+    }
+}
+
+
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -146,6 +158,10 @@ pub enum DataKey {
     Marketplace,
     /// Per-investor auto-compound preference, keyed by investor address (#578)
     AutoCompound(Address),
+    /// Schema version for storage migrations.
+    SchemaVersion,
+    /// Pending escrow marker for invoice ID.
+    EscrowPending(u64),
 }
 
 /// Investor preference to auto-compound a matured position's payout into a

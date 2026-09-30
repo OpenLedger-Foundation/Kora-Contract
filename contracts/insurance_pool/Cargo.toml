@@ -1,17 +1,16 @@
 [package]
-name = "debtor_attestation"
+name = "kora-insurance-pool"
 version = "0.1.0"
 edition = "2021"
-description = "Debtor-side confirmation contract for invoice authenticity"
-license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs"
 
 [dependencies]
 soroban-sdk = { workspace = true }
 kora-shared = { path = "../shared" }
+kora-risk-registry = { path = "../risk_registry" }
+kora-financing-pool = { path = "../financing_pool" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
