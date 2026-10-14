@@ -5,7 +5,13 @@
 .PHONY: build test clean fmt lint check audit coverage coverage-per-contract deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
 
 WASM_TARGET := wasm32-unknown-unknown
-CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
+
+# Authoritative list of deployable contracts matching scripts/deploy.sh (lines 147–167)
+# and the full protocol suite (dispute_escrow, fractionalizer, governance, etc.)
+CONTRACTS   := access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle \
+               dispute_escrow dispute_resolution fractionalizer governance governance_voting \
+               parameter_registry referral_rewards secondary_market tranche verifier_nomination vesting
+
 COVERAGE_MIN ?= 95
 
 # Per-contract coverage floors (issue #683).
@@ -19,12 +25,24 @@ COVERAGE_MIN ?= 95
 #   access_control  — thin role/permission wrapper, lower floor documented here.
 #   risk_registry   — thin registry wrapper, lower floor documented here.
 # Override any floor on the command line, e.g. COVERAGE_MIN_TREASURY=90.
-COVERAGE_MIN_ACCESS_CONTROL   ?= 85
-COVERAGE_MIN_INVOICE_NFT      ?= 95
-COVERAGE_MIN_MARKETPLACE      ?= 95
-COVERAGE_MIN_FINANCING_POOL   ?= 95
-COVERAGE_MIN_TREASURY         ?= 95
-COVERAGE_MIN_RISK_REGISTRY    ?= 85
+COVERAGE_MIN_ACCESS_CONTROL        ?= 85
+COVERAGE_MIN_INVOICE_NFT           ?= 95
+COVERAGE_MIN_MARKETPLACE           ?= 95
+COVERAGE_MIN_FINANCING_POOL        ?= 95
+COVERAGE_MIN_TREASURY              ?= 95
+COVERAGE_MIN_RISK_REGISTRY         ?= 85
+COVERAGE_MIN_PRICE_ORACLE          ?= 85
+COVERAGE_MIN_DISPUTE_ESCROW        ?= 85
+COVERAGE_MIN_DISPUTE_RESOLUTION    ?= 85
+COVERAGE_MIN_FRACTIONALIZER        ?= 85
+COVERAGE_MIN_GOVERNANCE            ?= 85
+COVERAGE_MIN_GOVERNANCE_VOTING     ?= 85
+COVERAGE_MIN_PARAMETER_REGISTRY    ?= 85
+COVERAGE_MIN_REFERRAL_REWARDS      ?= 85
+COVERAGE_MIN_SECONDARY_MARKET      ?= 85
+COVERAGE_MIN_TRANCHE               ?= 85
+COVERAGE_MIN_VERIFIER_NOMINATION   ?= 85
+COVERAGE_MIN_VESTING               ?= 85
 
 # Fuzzing knobs (see contracts/fuzz/README.md)
 FUZZ_ITERS  ?= 10000
@@ -38,7 +56,9 @@ help:
 	@echo ""
 	@echo "Build targets:"
 	@echo "  build                Build all contracts for wasm32-unknown-unknown"
-	@echo "  build-optimized      Build and optimize all WASM contracts"
+	@echo "  build-optimized      Build and optimize all WASM contracts in CONTRACTS"
+	@echo "                       (Matches deploy.sh: access_control, invoice_nft, treasury,"
+	@echo "                        financing_pool, marketplace, price_oracle, governance, etc.)"
 	@echo ""
 	@echo "Test targets:"
 	@echo "  test                 Run all tests (unit and integration)"

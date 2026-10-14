@@ -36,6 +36,7 @@ rustup target add wasm32-unknown-unknown
 
 make check      # cargo check --all — fastest way to confirm your toolchain works
 make build      # cargo build --target wasm32-unknown-unknown --release
+make build-optimized # optimizes all release WASMs in CONTRACTS (aligned with scripts/deploy.sh)
 make test       # cargo test --all
 make lint       # cargo clippy --all --all-targets -- -D warnings
 make fmt        # cargo fmt --all
