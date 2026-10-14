@@ -41,6 +41,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: taiki-e/install-action@cargo-deny
       - uses: swatinem/rust-cache@v2
       - run: cargo deny check
+
+  panic-safety-audit:
+    name: Panic Safety Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Run Panic Safety Audit Scanner
+        run: cargo run -p kora-xtask --bin panic-safety-audit -- --report-path target/panic-safety-audit-report.json --markdown-path target/panic-safety-audit-report.md
+      - name: Upload Panic Safety Audit Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panic-safety-audit-report
+          path: |
+            target/panic-safety-audit-report.json
+            target/panic-safety-audit-report.md
+

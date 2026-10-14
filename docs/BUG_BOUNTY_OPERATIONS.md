@@ -672,13 +672,46 @@ A: Use Tor + burner email for submission. Specify "anonymous credit" in report. 
 security@kora.finance  
 PGP: https://kora.finance/.well-known/pgp-key.txt
 
-**Incident Commander (Emergencies):**  
-PagerDuty: +1-XXX-XXX-XXXX  
-Rotation: https://internal.kora.finance/oncall
-
 **External Auditors:**  
 [Firm Name] — audits@firm.com  
 Emergency Contact: +1-XXX-XXX-XXXX
+
+---
+
+## Panic Safety & Production Exemption Policy
+
+### Overview
+In accordance with Kora's security hardening standards, production smart contract code (`contracts/*/src/`) strictly denies `.unwrap()`, `.expect()`, and direct `panic!()` invocations to eliminate denial-of-service vulnerabilities and unexpected transaction reverts.
+
+All production contracts are statically audited via an automated AST scanner:
+```bash
+cargo run -p kora-xtask --bin panic-safety-audit
+```
+
+### Exemption Criteria
+An exemption in `contracts/panic_safety_allowlist.json` is granted **only** when all of the following conditions are satisfied:
+1. **Provable Invariant**: The operation is mathematically or structurally guaranteed to never panic (e.g., loop index strictly bounded by `0..vec.len()`, or preceding explicit length verification).
+2. **Explicit Justification**: The entry in `contracts/panic_safety_allowlist.json` contains a clear technical explanation documenting the invariant.
+3. **No Alternative**: Replacing the unwrap with `?` error propagation or safe fallback would introduce unnecessary bytecode overhead or is constrained by an external Soroban SDK API interface.
+
+### Exemption Request Process
+1. Run the local scanner:
+   ```bash
+   cargo run -p kora-xtask --bin panic-safety-audit
+   ```
+2. For each identified unwrap, attempt to refactor using `?` error propagation or safe helper functions from `kora_shared::validation`.
+3. If an exemption is strictly required, append an entry to `contracts/panic_safety_allowlist.json`:
+   ```json
+   {
+     "file": "contracts/<crate>/src/lib.rs",
+     "line": <line_number>,
+     "kind": "unwrap",
+     "snippet": "<code_snippet>",
+     "justification": "<detailed_security_invariant_explanation>"
+   }
+   ```
+4. Verify the scanner passes with 0 violations and 0 stale allowlist entries.
+5. All exemptions must receive sign-off from the Security Team during PR review.
 
 ---
 

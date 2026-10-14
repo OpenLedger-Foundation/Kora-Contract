@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Panic Safety Allowlist",
+  "description": "Curated allowlist of audited panic paths in production contract crates (contracts/*/src). Any unapproved .unwrap(), .expect(), or panic! in production source triggers test failure.",
+  "exemptions": [
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 1239,
+      "kind": "unwrap",
+      "snippet": "if proposal.approvals.get(i).unwrap() == signer {",
+      "justification": "Loop index `i` is strictly bounded by `0..proposal.approvals.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 2031,
+      "kind": "unwrap",
+      "snippet": "if &members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {",
+      "justification": "Loop index `i` is strictly bounded by `0..members.len()`, guaranteeing `get(i)` returns Some."
+    },
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 2049,
+      "kind": "unwrap",
+      "snippet": "if &members.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == address {",
+      "justification": "Loop index `i` is strictly bounded by `0..members.len()`, guaranteeing `get(i)` returns Some."
+    },
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 2053,
+      "kind": "unwrap",
+      "snippet": "members.set(i, last.unwrap());",
+      "justification": "`last` is retrieved immediately after verifying `members.len() > 0`, guaranteeing an element exists."
+    },
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 2256,
+      "kind": "unwrap",
+      "snippet": "if &delegators.get(i).unwrap() == signer {",
+      "justification": "Loop index `i` is strictly bounded by `0..delegators.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/access_control/src/lib.rs",
+      "line": 2272,
+      "kind": "unwrap",
+      "snippet": "let addr = delegators.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..delegators.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1058,
+      "kind": "unwrap",
+      "snippet": "let installment = schedule.installments.get(idx).unwrap();",
+      "justification": "`idx` is validated to be strictly less than `schedule.installments.len()` before accessing."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1283,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = invoice_ids.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoice_ids.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1343,
+      "kind": "unwrap",
+      "snippet": "let pool = pools.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..pools.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1363,
+      "kind": "unwrap",
+      "snippet": "let first = allocations.get(0).unwrap();",
+      "justification": "`allocations` is checked to have `len() > 0` before zero-index access."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1369,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = invoice_ids.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoice_ids.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1379,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = invoice_ids.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoice_ids.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1380,
+      "kind": "unwrap",
+      "snippet": "let alloc = allocations.get(i).unwrap();",
+      "justification": "`allocations` length is validated equal to `invoice_ids.len()` prior to loop."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1385,
+      "kind": "unwrap",
+      "snippet": "let mut pool = pools.get(i).unwrap();",
+      "justification": "`pools` length is validated equal to `invoice_ids.len()` prior to loop."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1431,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = closed_pools.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..closed_pools.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1436,
+      "kind": "unwrap",
+      "snippet": ".unwrap();",
+      "justification": "Storage key is verified to exist based on matching closed pool ID record."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 1460,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = invoice_ids.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoice_ids.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/financing_pool/src/lib.rs",
+      "line": 2355,
+      "kind": "unwrap",
+      "snippet": "page.push_back(all.get(i as u32).unwrap());",
+      "justification": "Pagination index `i` is bounded by `start..end` where `end <= all.len()`."
+    },
+    {
+      "file": "contracts/invoice_nft/src/lib.rs",
+      "line": 702,
+      "kind": "unwrap",
+      "snippet": "let entry = invoices.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoices.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/invoice_nft/src/lib.rs",
+      "line": 721,
+      "kind": "unwrap",
+      "snippet": "let entry = invoices.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoices.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/invoice_nft/src/lib.rs",
+      "line": 775,
+      "kind": "unwrap",
+      "snippet": "env.storage().persistent().set(&first_key, &ids.get(0).unwrap());",
+      "justification": "`ids` is validated non-empty before zero-index access."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 317,
+      "kind": "unwrap",
+      "snippet": "if newest_idx < len && ring.slots.get(newest_idx).unwrap().timestamp == now {",
+      "justification": "Guarded by `newest_idx < len` bounds check in the preceding boolean expression."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 648,
+      "kind": "unwrap",
+      "snippet": "if sorted.get(j).unwrap() < sorted.get(i).unwrap() {",
+      "justification": "Indices `i` and `j` are strictly bounded by `0..len` in selection sort."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 649,
+      "kind": "unwrap",
+      "snippet": "let temp = sorted.get(j).unwrap();",
+      "justification": "Index `j` is strictly bounded by `0..len` in selection sort."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 650,
+      "kind": "unwrap",
+      "snippet": "sorted.set(j, sorted.get(i).unwrap());",
+      "justification": "Index `i` is strictly bounded by `0..len` in selection sort."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 657,
+      "kind": "unwrap",
+      "snippet": "sorted.get(len / 2).unwrap()",
+      "justification": "`len` is validated greater than zero; `len / 2 < len` always holds."
+    },
+    {
+      "file": "contracts/price_oracle/src/lib.rs",
+      "line": 659,
+      "kind": "unwrap",
+      "snippet": "(sorted.get(len / 2 - 1).unwrap() + sorted.get(len / 2).unwrap()) / 2",
+      "justification": "Even length calculation where `len >= 2`; `len/2 - 1` and `len/2` are both strictly `< len`."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 72,
+      "kind": "unwrap",
+      "snippet": "let allocation: i128 = env.storage().instance().get(&Key::Allocation).unwrap();",
+      "justification": "Contract state `Allocation` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 76,
+      "kind": "unwrap",
+      "snippet": "let token_addr: Address = env.storage().instance().get(&Key::Token).unwrap();",
+      "justification": "Contract state `Token` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 102,
+      "kind": "unwrap",
+      "snippet": "let bonus: i128 = env.storage().instance().get(&Key::Bonus).unwrap();",
+      "justification": "Contract state `Bonus` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 103,
+      "kind": "unwrap",
+      "snippet": "let funded: i128 = env.storage().instance().get(&Key::Funded).unwrap();",
+      "justification": "Contract state `Funded` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 104,
+      "kind": "unwrap",
+      "snippet": "let paid: i128 = env.storage().instance().get(&Key::Paid).unwrap();",
+      "justification": "Contract state `Paid` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/referral_rewards/src/lib.rs",
+      "line": 106,
+      "kind": "unwrap",
+      "snippet": "let token_addr: Address = env.storage().instance().get(&Key::Token).unwrap();",
+      "justification": "Contract state `Token` is initialized during contract deployment and invariant holds."
+    },
+    {
+      "file": "contracts/risk_registry/src/lib.rs",
+      "line": 1870,
+      "kind": "unwrap",
+      "snippet": ".set(&DataKey::DisputeCount(verifier.clone()), &(count.checked_add(1).unwrap()));",
+      "justification": "Dispute count is bounded and cannot realistically reach integer limits; safe increment."
+    },
+    {
+      "file": "contracts/risk_registry/src/lib.rs",
+      "line": 1936,
+      "kind": "unwrap",
+      "snippet": "let token_addr: Address = env.storage().persistent().get(&DataKey::StakingToken).unwrap();",
+      "justification": "`StakingToken` is written during initialization and invariant holds."
+    },
+    {
+      "file": "contracts/tranche/src/lib.rs",
+      "line": 115,
+      "kind": "unwrap",
+      "snippet": "let invoice_id = invoice_ids.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..invoice_ids.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/treasury/src/lib.rs",
+      "line": 1179,
+      "kind": "unwrap",
+      "snippet": "let token_addr = tokens.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..tokens.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/treasury/src/lib.rs",
+      "line": 1180,
+      "kind": "unwrap",
+      "snippet": "let symbol = token_symbols.get(i).unwrap();",
+      "justification": "Vector lengths of `tokens`, `token_symbols`, and `token_decimals` are validated equal prior to loop entry in `require_vectors_same_length`."
+    },
+    {
+      "file": "contracts/treasury/src/lib.rs",
+      "line": 1181,
+      "kind": "unwrap",
+      "snippet": "let decimals = token_decimals.get(i).unwrap();",
+      "justification": "Vector lengths of `tokens`, `token_symbols`, and `token_decimals` are validated equal prior to loop entry in `require_vectors_same_length`."
+    },
+    {
+      "file": "contracts/treasury/src/lib.rs",
+      "line": 2165,
+      "kind": "unwrap",
+      "snippet": "let (dest, bps) = splits.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..splits.len()`, guaranteeing `get(i)` is within bounds."
+    },
+    {
+      "file": "contracts/treasury/src/lib.rs",
+      "line": 2256,
+      "kind": "unwrap",
+      "snippet": "let (dest, bps) = splits.get(i).unwrap();",
+      "justification": "Loop index `i` is strictly bounded by `0..splits.len()`, guaranteeing `get(i)` is within bounds."
+    }
+  ]
+}

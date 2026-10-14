@@ -339,7 +339,26 @@ After fixes are complete:
 3. Quarterly audit to verify no regressions
 4. Security review before mainnet deployment
 
+## Automated Panic Safety Audit (`panic-safety-audit`)
+
+An AST-based static scanner is integrated into `contracts/xtask` to ensure no unapproved `.unwrap()`, `.expect()`, or `panic!` calls exist in production contract crates (`contracts/*/src/`):
+
+```bash
+# Run panic safety audit scanner locally
+cargo run -p kora-xtask --bin panic-safety-audit
+
+# Custom report outputs
+cargo run -p kora-xtask --bin panic-safety-audit -- --report-path target/panic-safety-audit-report.json --markdown-path target/panic-safety-audit-report.md
+```
+
+### Validation Invariants:
+1. **Zero Unapproved Panics**: Any `.unwrap()` or `.expect()` in non-test production code without an entry in `contracts/panic_safety_allowlist.json` will fail the audit and CI.
+2. **Mandatory Justification**: Every allowlist entry must specify file, line, kind, and a clear security justification explaining why the operation is guaranteed safe.
+3. **No Stale Exemptions**: If code refactoring removes an unwrap, the corresponding entry in `contracts/panic_safety_allowlist.json` must be removed.
+4. **CI Enforcement**: The audit runs automatically in `.github/workflows/security.yml` under the `panic-safety-audit` job.
+
 ## Questions?
 
 See `docs/SECURITY_LINTS.md` for detailed lint explanations.
 Open issues with `security` label for questions or exceptions.
+

@@ -16,10 +16,19 @@ path = "src/bin/upgrade_coordinator.rs"
 name = "wasm-metrics"
 path = "src/bin/wasm_metrics.rs"
 
+[[bin]]
+name = "panic-safety-audit"
+path = "src/bin/panic_safety_audit.rs"
+
+[[bin]]
+name = "check-access-matrix"
+path = "src/bin/check_access_matrix.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
 quote = "1"
 proptest = "1"

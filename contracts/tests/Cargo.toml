@@ -74,6 +74,11 @@ path = "auth_fuzzing.rs"
 name = "economic_attack_simulation"
 path = "economic_attack_simulation.rs"
 
+# ── Panic Safety Audit harness (Issue #921) ──────────────────────────────────
+[[test]]
+name = "panic_safety_audit"
+path = "panic_safety_audit.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
@@ -85,4 +90,8 @@ kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
+syn = { version = "2", features = ["full", "visit"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 
