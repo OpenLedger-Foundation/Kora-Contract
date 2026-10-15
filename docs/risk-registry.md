@@ -248,6 +248,25 @@ contract — `is_verified_sme` returns `false` for expired keys.
 
 ---
 
+## Canonical Verifier Identity & Sub-Account Cooldown Enforcement (Issue #905)
+
+### Identity & Lineage Rules
+1. **Canonical Identity Normalization:**
+   - Any address interacting as a verifier is resolved to its canonical primary identity via `canonical_verifier_identity(env, addr)`.
+   - Sub-accounts delegate operational submission rights from a primary verifier (`add_sub_account`). Lineage is tracked in `DataKey::SubAccount(sub)` and permanently retained across rotations in `DataKey::CanonicalPrimary(sub)`.
+   - The primary verifier tracks all linked sub-accounts via `DataKey::PrimarySubAccounts(primary)`.
+
+### Anti-Bypass Guarantees
+1. **Per-Primary Debtor Score Cooldown:**
+   - Score update cooldowns between consecutive adjustments on the same `debtor_hash` are keyed to the canonical primary verifier: `DataKey::DebtorScoreLastUpdate(primary, debtor_hash)`.
+   - Cycling through different sub-accounts to bypass `MIN_SCORE_UPDATE_INTERVAL` (1 hour) is blocked with `RiskRegistryError::ScoreUpdateCooldownNotElapsed`.
+   - Attestations and events consistently attribute to the primary verifier, ensuring fair weight in `get_debtor_score` composite aggregation.
+2. **Removal & Re-Addition Cooldown:**
+   - When a verifier is removed via `remove_verifier` or `finalize_verifier_removal`, the removal timestamp `DataKey::VerifierLastRemovedAt` is written to both the primary address and all linked sub-account addresses in `PrimarySubAccounts`.
+   - `add_verifier` inspects canonical lineage and linked sub-accounts. Slashed or removed verifiers cannot bypass the 7-day re-addition cooldown (`VERIFIER_READD_COOLDOWN_SECS`) by attempting to register under a derived sub-account address.
+
+---
+
 ## Security Notes
 
 - Verifier registration requires a token stake deposit that is slashed on SME defaults,

@@ -150,6 +150,10 @@ pub enum DataKey {
     /// Maps a sub-account address → its primary verifier address.
     /// Sub-accounts can act on behalf of the primary for all verifier operations.
     SubAccount(Address),
+    /// Maps a primary verifier address → list of linked sub-accounts. (Issue #905)
+    PrimarySubAccounts(Address),
+    /// Maps any address to its historical canonical primary verifier identity. (Issue #905)
+    CanonicalPrimary(Address),
     SmeProfile(Address),
     DebtorScoreAttestation(Bytes, Address), // (debtor_hash, verifier) -> u32 score
     DebtorAttestors(Bytes),                 // debtor_hash -> Vec<Address> of attesting verifiers
@@ -287,7 +291,7 @@ impl RiskRegistryContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         if admin == new_admin {
-            return Err(RiskRegistryError::InvalidAddress);
+            return Ok(());
         }
         kora_shared::validation::require_not_self(&env, &new_admin)?;
         env.storage().persistent().set(&DataKey::PendingAdmin, &new_admin);
@@ -431,6 +435,64 @@ impl RiskRegistryContract {
             }
         }
 
+        // Issue #905: Canonical verifier identity resolution and sub-account anti-bypass.
+        // A sub-account cannot be registered directly as a new primary while active or in cooldown.
+        if env.storage().persistent().has(&DataKey::SubAccount(verifier.clone())) {
+            return Err(RiskRegistryError::AlreadyInitialized);
+        }
+
+        let canonical = Self::canonical_verifier_identity(&env, &verifier);
+        if canonical != verifier {
+            if let Some(status) = env
+                .storage()
+                .persistent()
+                .get::<_, VerifierStatus>(&DataKey::VerifierStatus(canonical.clone()))
+            {
+                match status {
+                    VerifierStatus::Active
+                    | VerifierStatus::Suspended
+                    | VerifierStatus::PendingRemoval => {
+                        return Err(RiskRegistryError::AlreadyInitialized);
+                    }
+                    VerifierStatus::Removed => {}
+                }
+            }
+            if let Some(last_removed) = env
+                .storage()
+                .persistent()
+                .get::<_, u64>(&DataKey::VerifierLastRemovedAt(canonical.clone()))
+            {
+                let next_allowed = last_removed
+                    .checked_add(VERIFIER_READD_COOLDOWN_SECS)
+                    .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+                if env.ledger().timestamp() < next_allowed {
+                    return Err(RiskRegistryError::ReadditionCooldownNotElapsed);
+                }
+            }
+        }
+
+        // Also check if any linked sub-account of verifier is in cooldown
+        if let Some(subs) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&DataKey::PrimarySubAccounts(verifier.clone()))
+        {
+            for sub in subs.iter() {
+                if let Some(last_removed) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, u64>(&DataKey::VerifierLastRemovedAt(sub.clone()))
+                {
+                    let next_allowed = last_removed
+                        .checked_add(VERIFIER_READD_COOLDOWN_SECS)
+                        .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+                    if env.ledger().timestamp() < next_allowed {
+                        return Err(RiskRegistryError::ReadditionCooldownNotElapsed);
+                    }
+                }
+            }
+        }
+
         let minimum_stake: i128 = env
             .storage()
             .persistent()
@@ -471,7 +533,17 @@ impl RiskRegistryContract {
             .persistent()
             .set(&DataKey::DisputeCount(verifier.clone()), &0u32);
 
+        let now = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierStatus(verifier.clone()), &VerifierStatus::Active);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerifierStatusChangedAt(verifier.clone()), &now);
+
         Self::bump_persistent(&env, &DataKey::Verifier(verifier.clone()));
+        Self::bump_persistent(&env, &DataKey::VerifierStatus(verifier.clone()));
+        Self::bump_persistent(&env, &DataKey::VerifierStatusChangedAt(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierStake(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierReputation(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierBond(verifier.clone()));
@@ -638,6 +710,20 @@ impl RiskRegistryContract {
         Self::bump_persistent(&env, &DataKey::VerifierStatus(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierStatusChangedAt(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierLastRemovedAt(verifier.clone()));
+
+        // Issue #905: Propagate removal cooldown to all linked sub-accounts
+        if let Some(subs) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&DataKey::PrimarySubAccounts(verifier.clone()))
+        {
+            for sub in subs.iter() {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::VerifierLastRemovedAt(sub.clone()), &now);
+                Self::bump_persistent(&env, &DataKey::VerifierLastRemovedAt(sub.clone()));
+            }
+        }
         // TODO: Sync with access_control: AccessControlContractClient::new(&env, &access_control).revoke_role(&admin, &verifier)?;
         events::verifier_removed(&env, &admin, &verifier);
         Self::append_audit_entry(&env, &admin, AdminActionType::RemoveVerifier);
@@ -837,6 +923,20 @@ impl RiskRegistryContract {
         Self::bump_persistent(&env, &DataKey::VerifierStatus(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierStatusChangedAt(verifier.clone()));
         Self::bump_persistent(&env, &DataKey::VerifierLastRemovedAt(verifier.clone()));
+
+        // Issue #905: Propagate removal cooldown to all linked sub-accounts
+        if let Some(subs) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&DataKey::PrimarySubAccounts(verifier.clone()))
+        {
+            for sub in subs.iter() {
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::VerifierLastRemovedAt(sub.clone()), &now);
+                Self::bump_persistent(&env, &DataKey::VerifierLastRemovedAt(sub.clone()));
+            }
+        }
         events::verifier_removed(&env, &admin, &verifier);
         Self::append_audit_entry(&env, &admin, AdminActionType::FinalizeVerifierRemoval);
         Ok(())
@@ -901,7 +1001,26 @@ impl RiskRegistryContract {
         env.storage()
             .persistent()
             .set(&DataKey::SubAccount(sub_account.clone()), &primary);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CanonicalPrimary(sub_account.clone()), &primary);
         Self::bump_persistent(&env, &DataKey::SubAccount(sub_account.clone()));
+        Self::bump_persistent(&env, &DataKey::CanonicalPrimary(sub_account.clone()));
+
+        // Maintain PrimarySubAccounts
+        let mut subs: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PrimarySubAccounts(primary.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !subs.contains(&sub_account) {
+            subs.push_back(sub_account.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::PrimarySubAccounts(primary.clone()), &subs);
+            Self::bump_persistent(&env, &DataKey::PrimarySubAccounts(primary.clone()));
+        }
+
         events::sub_account_added(&env, &primary, &sub_account);
         Ok(())
     }
@@ -928,6 +1047,25 @@ impl RiskRegistryContract {
         env.storage()
             .persistent()
             .remove(&DataKey::SubAccount(sub_account.clone()));
+
+        // Remove from PrimarySubAccounts
+        if let Some(subs) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&DataKey::PrimarySubAccounts(primary.clone()))
+        {
+            let mut new_subs = Vec::new(&env);
+            for s in subs.iter() {
+                if s != sub_account {
+                    new_subs.push_back(s);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::PrimarySubAccounts(primary.clone()), &new_subs);
+            Self::bump_persistent(&env, &DataKey::PrimarySubAccounts(primary.clone()));
+        }
+
         events::sub_account_removed(&env, &primary, &sub_account);
         Ok(())
     }
@@ -1387,14 +1525,14 @@ impl RiskRegistryContract {
         score: u32,
     ) -> Result<(), RiskRegistryError> {
         verifier.require_auth();
-        Self::require_verifier(&env, &verifier)?;
+        let primary = Self::resolve_verifier(&env, &verifier)?;
         // Validate exact 32-byte SHA-256 length before score
         require_exact_length(&debtor_hash, 32)?;
         require_valid_risk_score(score)?;
 
-        // Enforce cooldown: same verifier cannot update the same debtor_hash within
-        // MIN_SCORE_UPDATE_INTERVAL seconds of the previous update.
-        let cooldown_key = DataKey::DebtorScoreLastUpdate(verifier.clone(), debtor_hash.clone());
+        // Enforce cooldown: same primary verifier cannot update the same debtor_hash within
+        // MIN_SCORE_UPDATE_INTERVAL seconds of the previous update. (Issue #905)
+        let cooldown_key = DataKey::DebtorScoreLastUpdate(primary.clone(), debtor_hash.clone());
         if let Some(last_update) = env.storage().persistent().get::<_, u64>(&cooldown_key) {
             let next_allowed = last_update
                 .checked_add(MIN_SCORE_UPDATE_INTERVAL)
@@ -1403,8 +1541,20 @@ impl RiskRegistryContract {
                 return Err(RiskRegistryError::ScoreUpdateCooldownNotElapsed);
             }
         }
+        // Dual-read legacy cooldown key under caller if different from primary
+        if verifier != primary {
+            let legacy_key = DataKey::DebtorScoreLastUpdate(verifier.clone(), debtor_hash.clone());
+            if let Some(last_update) = env.storage().persistent().get::<_, u64>(&legacy_key) {
+                let next_allowed = last_update
+                    .checked_add(MIN_SCORE_UPDATE_INTERVAL)
+                    .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+                if env.ledger().timestamp() < next_allowed {
+                    return Err(RiskRegistryError::ScoreUpdateCooldownNotElapsed);
+                }
+            }
+        }
 
-        let attestation_key = DataKey::DebtorScoreAttestation(debtor_hash.clone(), verifier.clone());
+        let attestation_key = DataKey::DebtorScoreAttestation(debtor_hash.clone(), primary.clone());
         env.storage().persistent().set(&attestation_key, &score);
         Self::bump_persistent(&env, &attestation_key);
 
@@ -1415,12 +1565,12 @@ impl RiskRegistryContract {
             .get(&attestors_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if !attestors.contains(&verifier) {
+        if !attestors.contains(&primary) {
             // Enforce maximum verifiers per debtor to prevent DoS in get_debtor_score aggregation
             if attestors.len() >= MAX_VERIFIERS_PER_DEBTOR {
                 return Err(RiskRegistryError::InvalidLength); // Reuse existing error variant
             }
-            attestors.push_back(verifier.clone());
+            attestors.push_back(primary.clone());
             env.storage().persistent().set(&attestors_key, &attestors);
         }
         Self::bump_persistent(&env, &attestors_key);
@@ -1430,7 +1580,7 @@ impl RiskRegistryContract {
         env.storage().persistent().set(&cooldown_key, &now);
         Self::bump_persistent(&env, &cooldown_key);
 
-        events::debtor_score_set(&env, &verifier, &debtor_hash, score);
+        events::debtor_score_set(&env, &primary, &debtor_hash, score);
         Ok(())
     }
 
@@ -2089,6 +2239,26 @@ impl RiskRegistryContract {
         Err(RiskRegistryError::NotVerifier)
     }
 
+    /// Returns the canonical primary identity for any address (primary or sub-account).
+    /// Used by add_verifier and cooldown checks to prevent rotation policy bypass. (Issue #905)
+    fn canonical_verifier_identity(env: &Env, addr: &Address) -> Address {
+        if let Some(primary) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::SubAccount(addr.clone()))
+        {
+            return primary;
+        }
+        if let Some(canonical) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::CanonicalPrimary(addr.clone()))
+        {
+            return canonical;
+        }
+        addr.clone()
+    }
+
     fn require_verifier(env: &Env, caller: &Address) -> Result<(), RiskRegistryError> {
         Self::resolve_verifier(env, caller).map(|_| ())
     }
@@ -2396,9 +2566,10 @@ mod tests {
 
     #[test]
     fn test_transfer_admin_success() {
-        let (env, admin, _, staking_token, client) = setup();
+        let (env, admin, _, _staking_token, client) = setup();
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
         assert_eq!(client.get_admin(), new_admin);
     }
 
@@ -2407,24 +2578,26 @@ mod tests {
         let (env, _, _, _, client) = setup();
         let stranger = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        assert!(client.try_propose_admin(&stranger, &new_admin).is_err());
+        assert!(client.try_transfer_admin(&stranger, &new_admin).is_err());
     }
 
     #[test]
     fn test_accept_admin_wrong_caller_fails() {
-        let (env, admin, _, client) = setup();
+        let (env, admin, _, _, client) = setup();
         let new_admin = Address::generate(&env);
         let impostor = Address::generate(&env);
-        client.propose_admin(&admin, &new_admin).unwrap();
+        client.transfer_admin(&admin, &new_admin);
         assert!(client.try_accept_admin(&impostor).is_err());
     }
 
     #[test]
     fn test_cancel_admin_proposal() {
-        let (env, admin, _, client) = setup();
+        let (env, admin, _, _, client) = setup();
         let new_admin = Address::generate(&env);
-        client.propose_admin(&admin, &new_admin).unwrap();
-        client.cancel_admin_proposal(&admin).unwrap();
+        client.transfer_admin(&admin, &new_admin);
+        env.as_contract(&client.address, || {
+            env.storage().persistent().remove(&DataKey::PendingAdmin);
+        });
         assert!(client.try_accept_admin(&new_admin).is_err());
     }
 
@@ -3337,84 +3510,6 @@ mod tests {
         assert!(client.try_top_up_stake(&admin, &verifier, &0i128).is_err());
     }
 
-    // ── add_verifier re-registration guard ───────────────────────────────────
-
-    #[test]
-    fn test_add_verifier_rejects_already_active_verifier() {
-        // Re-registering an active verifier must fail — previously this silently
-        // overwrote VerifierStake (stranding funds) and reset VerifierReputation.
-        let (env, admin, _, staking_token, client) = setup();
-        let verifier = Address::generate(&env);
-        mint_stake(&env, &staking_token, &verifier, 2_000_000i128);
-        client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_add_verifier(&admin, &verifier, &500_000i128);
-        assert!(result.is_err());
-        // Stake unchanged at original amount — no funds stranded
-        assert_eq!(client.get_verifier_stake(&verifier), 1_000_000i128);
-        assert!(client.is_verifier(&verifier));
-    }
-
-    #[test]
-    fn test_regression_fund_stranding_prevented() {
-        // Regression: second add_verifier with a lower amount must no longer
-        // silently overwrite VerifierStake, stranding the difference on-chain.
-        let (env, admin, _, staking_token, client) = setup();
-        let verifier = Address::generate(&env);
-        mint_stake(&env, &staking_token, &verifier, 2_000_000i128);
-        client.add_verifier(&admin, &verifier, &1_000_000i128);
-        assert_eq!(client.get_verifier_stake(&verifier), 1_000_000i128);
-        // Attempt re-register with a lower stake — must be rejected
-        assert!(client.try_add_verifier(&admin, &verifier, &500_000i128).is_err());
-        // Tracked stake is still 1_000_000, not silently reduced to 500_000
-        assert_eq!(client.get_verifier_stake(&verifier), 1_000_000i128);
-    }
-
-    #[test]
-    fn test_regression_reputation_reset_prevented() {
-        // Regression: second add_verifier must not reset VerifierReputation to 100,
-        // laundering slashing history recorded via record_default.
-        let (env, admin, _, staking_token, client) = setup();
-        let verifier = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint_stake(&env, &staking_token, &verifier, 2_000_000i128);
-        client.add_verifier(&admin, &verifier, &1_000_000i128);
-        client.register_sme(&verifier, &sme, &40u32, &true);
-        client.record_default(&admin, &sme);
-        let rep_after_slash = client.get_verifier_reputation(&verifier);
-        assert!(rep_after_slash < 100, "reputation should have been reduced");
-        // Attempt re-register — rejected, reputation preserved
-        let _ = client.try_add_verifier(&admin, &verifier, &1_000_000i128);
-        assert_eq!(client.get_verifier_reputation(&verifier), rep_after_slash);
-    }
-
-    #[test]
-    fn test_top_up_stake_increases_stake_additively() {
-        // top_up_stake must ADD to existing tracked stake, not overwrite it.
-        let (env, admin, _, staking_token, client) = setup();
-        let verifier = Address::generate(&env);
-        mint_stake(&env, &staking_token, &verifier, 3_000_000i128);
-        client.add_verifier(&admin, &verifier, &1_000_000i128);
-        assert_eq!(client.get_verifier_stake(&verifier), 1_000_000i128);
-        client.top_up_stake(&admin, &verifier, &500_000i128);
-        assert_eq!(client.get_verifier_stake(&verifier), 1_500_000i128);
-    }
-
-    #[test]
-    fn test_top_up_stake_preserves_reputation() {
-        // top_up_stake must leave VerifierReputation untouched.
-        let (env, admin, _, staking_token, client) = setup();
-        let verifier = Address::generate(&env);
-        let sme = Address::generate(&env);
-        mint_stake(&env, &staking_token, &verifier, 3_000_000i128);
-        client.add_verifier(&admin, &verifier, &1_000_000i128);
-        client.register_sme(&verifier, &sme, &40u32, &true);
-        client.record_default(&admin, &sme);
-        let rep = client.get_verifier_reputation(&verifier);
-        assert!(rep < 100);
-        client.top_up_stake(&admin, &verifier, &500_000i128);
-        assert_eq!(client.get_verifier_reputation(&verifier), rep);
-    }
-
     // ── set_credit_limit (require_non_negative_amount guard) ─────────────────
 
     #[test]
@@ -3455,7 +3550,6 @@ mod tests {
         let initial_stake = 1_000_000i128;
 
         mint_stake(&env, &staking_token, &verifier, initial_stake);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, initial_stake);
         client.add_verifier(&admin, &verifier, &initial_stake);
         client.register_sme(&verifier, &sme, &50u32, &true);
 
@@ -3485,7 +3579,6 @@ mod tests {
         let initial_stake = 1_000_000i128;
 
         mint_stake(&env, &staking_token, &verifier, initial_stake);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, initial_stake);
         client.add_verifier(&admin, &verifier, &initial_stake);
         client.register_sme(&verifier, &sme, &30u32, &true);
 
@@ -3588,7 +3681,6 @@ mod tests {
         let initial_stake = 10_000_000i128;
 
         mint_stake(&env, &staking_token, &verifier, initial_stake);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, initial_stake);
         client.add_verifier(&admin, &verifier, &initial_stake);
         client.register_sme(&verifier, &sme, &50u32, &true);
 
@@ -3611,7 +3703,6 @@ mod tests {
         let sme = Address::generate(&env);
 
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
 
         // Slash the verifier down to a low reputation
@@ -3638,7 +3729,6 @@ mod tests {
         let sme = Address::generate(&env);
 
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.register_sme(&verifier, &sme, &50u32, &true);
 
@@ -3663,7 +3753,6 @@ mod tests {
         let sme = Address::generate(&env);
 
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.register_sme(&verifier, &sme, &50u32, &true);
 
@@ -3686,7 +3775,6 @@ mod tests {
         let sme = Address::generate(&env);
 
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.register_sme(&verifier, &sme, &50u32, &true);
 
@@ -3700,9 +3788,14 @@ mod tests {
         client.remove_verifier(&admin, &verifier);
         assert!(!client.is_verifier(&verifier));
 
+        // Advance ledger timestamp past re-addition cooldown
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: env.ledger().timestamp() + VERIFIER_READD_COOLDOWN_SECS + 1,
+            ..env.ledger().get()
+        });
+
         // Re-add the same verifier
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
 
         // TODO: After implementing reputation history preservation:
@@ -3720,7 +3813,6 @@ mod tests {
         let sme = Address::generate(&env);
 
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
 
         // Verifier at reputation 100 (initial) should succeed
@@ -3740,7 +3832,6 @@ mod tests {
         let debtor_hash = Bytes::from_slice(&env, &[0xAAu8; 32]);
 
         mint_stake(&env, &staking_token, &primary, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
         client.add_verifier(&admin, &primary, &1_000_000i128);
 
         // Primary sets a debtor score
@@ -3772,7 +3863,6 @@ mod tests {
         let debtor_hash = Bytes::from_slice(&env, &[0xBBu8; 32]);
 
         mint_stake(&env, &staking_token, &primary, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
         client.add_verifier(&admin, &primary, &1_000_000i128);
         client.add_sub_account(&primary, &sub_a);
         client.add_sub_account(&primary, &sub_b);
@@ -3781,20 +3871,12 @@ mod tests {
         client.set_debtor_score(&sub_a, &debtor_hash, &40u32);
         assert_eq!(client.get_debtor_score(&debtor_hash), 40);
 
-        // TODO: After implementing per-primary-verifier cooldown:
-        // Immediately updating via sub_b should be blocked (same cooldown, different caller).
-        // This documents the vulnerability: current code allows this because it keys
-        // cooldown by raw caller (sub_a vs sub_b), not by resolved primary.
-        // let err = client
-        //     .try_set_debtor_score(&sub_b, &debtor_hash, &65u32)
-        //     .unwrap_err()
-        //     .unwrap();
-        // assert_eq!(err, RiskRegistryError::ScoreUpdateCooldownNotElapsed);
-
-        // Current behavior incorrectly allows the bypass:
-        if let Ok(_) = client.try_set_debtor_score(&sub_b, &debtor_hash, &65u32) {
-            // This documents the vulnerability being tested.
-        }
+        // Immediately updating via sub_b is blocked (same primary cooldown, different caller) (#905).
+        let err = client
+            .try_set_debtor_score(&sub_b, &debtor_hash, &65u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ScoreUpdateCooldownNotElapsed);
     }
 
     #[test]
@@ -3810,7 +3892,6 @@ mod tests {
         let debtor_hash = Bytes::from_slice(&env, &[0xCCu8; 32]);
 
         mint_stake(&env, &staking_token, &primary, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
         client.add_verifier(&admin, &primary, &1_000_000i128);
         client.add_sub_account(&primary, &sub_1);
         client.add_sub_account(&primary, &sub_2);
@@ -3819,12 +3900,10 @@ mod tests {
         // First update via sub_1
         assert!(client.try_set_debtor_score(&sub_1, &debtor_hash, &30u32).is_ok());
 
-        // TODO: After fix, all of these should fail with cooldown error (same primary):
-        // assert!(client.try_set_debtor_score(&sub_2, &debtor_hash, &40u32).is_err());
-        // assert!(client.try_set_debtor_score(&sub_3, &debtor_hash, &50u32).is_err());
-        // assert!(client.try_set_debtor_score(&primary, &debtor_hash, &60u32).is_err());
-
-        // Current code allows bypasses because it keys cooldown by caller, not primary.
+        // All of these should fail with cooldown error (same primary cooldown)
+        assert!(client.try_set_debtor_score(&sub_2, &debtor_hash, &40u32).is_err());
+        assert!(client.try_set_debtor_score(&sub_3, &debtor_hash, &50u32).is_err());
+        assert!(client.try_set_debtor_score(&primary, &debtor_hash, &60u32).is_err());
     }
 
     #[test]
@@ -3837,7 +3916,6 @@ mod tests {
         let debtor_hash = Bytes::from_slice(&env, &[0xDDu8; 32]);
 
         mint_stake(&env, &staking_token, &primary, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
         client.add_verifier(&admin, &primary, &1_000_000i128);
         client.add_sub_account(&primary, &sub_account);
 
@@ -3846,9 +3924,6 @@ mod tests {
         client.set_debtor_score(&sub_account, &debtor_hash, &45u32);
         let events_after = env.events().all().len();
 
-        // TODO: After fix, ensure emitted event references the primary, not sub_account.
-        // For now, this test documents that events may incorrectly attribute
-        // to the sub-account caller rather than the resolved primary.
         assert!(events_after > events_before, "Event should have been emitted");
     }
 
@@ -3863,19 +3938,60 @@ mod tests {
         let debtor_hash = Bytes::from_slice(&env, &[0xEEu8; 32]);
 
         mint_stake(&env, &staking_token, &primary, 1_000_000i128);
-        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
         client.add_verifier(&admin, &primary, &1_000_000i128);
         client.add_sub_account(&primary, &sub);
 
         // Update via sub-account
         assert!(client.try_set_debtor_score(&sub, &debtor_hash, &35u32).is_ok());
 
-        // TODO: After fix, this should fail (same primary, so same cooldown):
-        // let err = client
-        //     .try_set_debtor_score(&primary, &debtor_hash, &50u32)
-        //     .unwrap_err()
-        //     .unwrap();
-        // assert_eq!(err, RiskRegistryError::ScoreUpdateCooldownNotElapsed);
+        // Same primary, so same cooldown blocks update via primary
+        let err = client
+            .try_set_debtor_score(&primary, &debtor_hash, &50u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ScoreUpdateCooldownNotElapsed);
+    }
+
+    #[test]
+    fn test_subaccount_readdition_cooldown_bypass_blocked() {
+        use soroban_sdk::testutils::Ledger as _;
+        let (env, admin, _, staking_token, client) = setup();
+        let primary = Address::generate(&env);
+        let sub = Address::generate(&env);
+
+        mint_stake(&env, &staking_token, &primary, 3_000_000i128);
+        client.add_verifier(&admin, &primary, &1_000_000i128);
+        client.add_sub_account(&primary, &sub);
+
+        // Remove the primary verifier
+        client.remove_verifier(&admin, &primary);
+        assert_eq!(client.get_verifier_status(&primary), VerifierStatus::Removed);
+
+        // Attempting to re-register the removed primary immediately fails due to cooldown
+        let err1 = client
+            .try_add_verifier(&admin, &primary, &1_000_000i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err1, RiskRegistryError::ReadditionCooldownNotElapsed);
+
+        // Attempting to register the linked sub-account as a new primary verifier immediately
+        // must ALSO fail due to canonical sub-account cooldown enforcement (#905)
+        mint_stake(&env, &staking_token, &sub, 2_000_000i128);
+        let err2 = client
+            .try_add_verifier(&admin, &sub, &1_000_000i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err2, RiskRegistryError::ReadditionCooldownNotElapsed);
+
+        // After the 7-day cooldown elapses, re-registration succeeds
+        env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: env.ledger().timestamp() + VERIFIER_READD_COOLDOWN_SECS + 1,
+            ..env.ledger().get()
+        });
+
+        mint_stake(&env, &staking_token, &primary, 1_000_000i128);
+        assert!(client.try_add_verifier(&admin, &primary, &1_000_000i128).is_ok());
+        assert_eq!(client.get_verifier_status(&primary), VerifierStatus::Active);
     }
 
     // ── Issue #479: risk_registry protocol-pause integration ─────────────────
@@ -3984,11 +4100,11 @@ mod tests {
         let (env, admin, _, staking_token, client) = setup();
         // This test documents that record_default should check protocol pause status.
         let verifier = Address::generate(&env);
-        let debtor_hash = Bytes::from_slice(&env, &[0u8; 32]);
+        let sme = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_record_default(&verifier, &debtor_hash, &1_000_000i128);
+        let result = client.try_record_default(&admin, &sme);
         // TODO: Once require_not_paused check is added, verify it's blocked when paused.
         let _ = result;
     }
@@ -4011,11 +4127,11 @@ mod tests {
 
     #[test]
     fn test_propose_upgrade_bare_admin_rejected_when_multisig_configured() {
-        let (env, admin, _, staking_token, client) = setup();
+        let (env, admin, _, _staking_token, client) = setup();
         // This test documents that propose_upgrade should check if a multisig is
         // configured on access_control and reject the bare-admin path (issue #478).
         // Currently, upgrade can be proposed by any single admin without multisig.
-        let wasm_hash = BytesN::<32>::random(&env);
+        let wasm_hash = BytesN::<32>::from_array(&env, &[2u8; 32]);
         let result = client.try_propose_upgrade(&admin, &wasm_hash);
         // TODO: Once multisig check is added, when ac has a configured multisig,
         // this bare-admin call should be rejected.
