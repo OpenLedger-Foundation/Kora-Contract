@@ -8,6 +8,8 @@ import {
   Position,
   RiskTier,
   SmeProfile,
+  GovernanceProposal,
+  GovernanceVoteRecord,
 } from "./types";
 
 // ── InvoiceNftClient ──────────────────────────────────────────────────────────
@@ -276,3 +278,38 @@ export class PriceOracleClient extends BaseClient {
     );
   }
 }
+
+// ── GovernanceVotingClient ────────────────────────────────────────────────────
+
+export class GovernanceVotingClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  async getProposal(proposalId: bigint): Promise<GovernanceProposal | null> {
+    const result = await this.invoke("get_proposal", [this.u64(proposalId)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as GovernanceProposal;
+  }
+
+  async getVotingWeight(address: string): Promise<bigint> {
+    const result = await this.invoke("get_voting_weight", [this.addr(address)]);
+    return scValToNative(result) as bigint;
+  }
+
+  async getVoteRecord(proposalId: bigint, voter: string): Promise<GovernanceVoteRecord | null> {
+    const result = await this.invoke("get_vote_record", [this.u64(proposalId), this.addr(voter)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as GovernanceVoteRecord;
+  }
+
+  async getDelegate(delegator: string): Promise<string | null> {
+    const result = await this.invoke("get_delegate", [this.addr(delegator)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as string;
+  }
+}
+

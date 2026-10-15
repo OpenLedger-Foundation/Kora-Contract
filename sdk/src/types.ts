@@ -72,3 +72,33 @@ export interface MarketplaceConfig {
   accessControl: string;
   feeBps: number;
 }
+
+// ── Governance Types ──────────────────────────────────────────────────────────
+
+export type ProposalType = "Financial" | "Sentiment" | "Upgrade" | "ParameterChange";
+export type VotingMode = "Standard" | "Quadratic";
+
+export interface GovernanceProposal {
+  id: bigint;
+  proposer: string;
+  title: string;
+  description: string;
+  proposalType: ProposalType;
+  votingMode: VotingMode;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  votesAbstain: bigint;
+  createdAt: bigint;
+  expiresAt: bigint;
+  executed: boolean;
+  quorumRequired: bigint;
+}
+
+export interface GovernanceVoteRecord {
+  voter: string;
+  choice: "For" | "Against" | "Abstain";
+  weight: bigint;
+  voiceCreditsSpent: bigint;
+  votedAt: bigint;
+}
+

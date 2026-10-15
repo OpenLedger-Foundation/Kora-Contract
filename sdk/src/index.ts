@@ -5,6 +5,7 @@ export type { DeploymentManifest } from "./deployment";
 export {
   AccessControlClient,
   FinancingPoolClient,
+  GovernanceVotingClient,
   InvoiceNftClient,
   MarketplaceClient,
   PriceOracleClient,
@@ -18,12 +19,17 @@ export type { TransactionReconciliation } from "./transactionRecovery";
 export { createEventSubscription } from "./subscriptions";
 export type { EventSubscriptionOptions } from "./subscriptions";
 export type {
+  GovernanceProposal,
+  GovernanceVoteRecord,
   Invoice,
   InvoiceStatus,
   Listing,
   MarketplaceConfig,
   Pool,
   Position,
+  ProposalType,
   RiskTier,
   SmeProfile,
+  VotingMode,
 } from "./types";
+
