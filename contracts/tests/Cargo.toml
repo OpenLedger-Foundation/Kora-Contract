@@ -53,6 +53,14 @@ name = "security_regression_audit_log"
 path = "security_regression_audit_log.rs"
 
 [[test]]
+name = "reentrancy_cei_regression"
+path = "reentrancy_cei_regression.rs"
+
+[[test]]
+name = "reentrancy_callback_price_oracle"
+path = "reentrancy_callback_price_oracle.rs"
+
+[[test]]
 name = "dos_vec_growth"
 path = "dos_vec_growth.rs"
 
@@ -84,5 +92,5 @@ kora-treasury = { path = "../treasury" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
-kora-referral-rewards = { path = "../referral_rewards" }
+# kora-referral-rewards = { path = "../referral_rewards" }
 

@@ -11,7 +11,7 @@ use kora_shared::{
         require_within_max_amount, safe_add, safe_div, safe_mul, safe_sub, UPGRADE_TIMELOCK_DELAY,
     },
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
 
 // ~30 days in ledgers at ~5 s/ledger
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
@@ -26,11 +26,13 @@ const MAX_BATCH_SIZE: u32 = 20;
 /// small enough not to block genuine small investors, large enough that dust-sized
 /// storage-griefing contributions are no longer economically free (#451).
 const DEFAULT_MIN_CONTRIBUTION: i128 = 10_000_000;
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
 #[contracttype]
 pub enum DataKey {
+    SchemaVersion,
     Config,
     Admin,
     InvoiceNft,
@@ -1571,6 +1573,18 @@ impl MarketplaceContract {
             &DataKey::TokenExposureCurrent(token.clone()),
             &current.saturating_sub(amount),
         );
+    }
+
+    fn check_debtor_cap(_env: &Env, _debtor_hash: &soroban_sdk::Bytes, _amount: i128) -> Result<(), KoraError> {
+        Ok(())
+    }
+
+    fn add_debtor_exposure(_env: &Env, _debtor_hash: &soroban_sdk::Bytes, _invoice_id: u64, _amount: i128) -> Result<(), KoraError> {
+        Ok(())
+    }
+
+    fn remove_debtor_exposure(_env: &Env, _debtor_hash: &soroban_sdk::Bytes, _invoice_id: u64, _amount: i128) -> Result<(), KoraError> {
+        Ok(())
     }
 
     /// Convert `amount` from `from_token`'s registered oracle currency to

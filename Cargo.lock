@@ -295,6 +295,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "debtor_attestation"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -865,7 +872,6 @@ dependencies = [
  "kora-invoice-nft",
  "kora-marketplace",
  "kora-price-oracle",
- "kora-referral-rewards",
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",

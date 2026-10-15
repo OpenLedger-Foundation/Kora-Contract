@@ -68,6 +68,7 @@ whether a reentrancy guard is present, and the fix applied (if any).
 | MP-8 | `claim_refund` | `token_client.transfer` (pool→investor) | Token contract | ✅ Yes — `RefundClaimed` flag set to `true` before transfer | None (single-actor claim; guard not needed) | Safe | — |
 | MP-9 | `claim_refund` | `treasury_client.refund_fee` | `treasury` | ✅ Yes — called after investor refund flag set | None | Safe | — |
 | MP-10 | `withdraw_listing` | `nft_client.set_created` | `invoice_nft` | ✅ Yes — listing record removed before NFT call | None (no token transfer) | Safe | — |
+| MP-11 | `convert_via_oracle` | `oracle_client.convert` | `price_oracle` | ✅ Yes — called during currency conversion before token transfers | ✅ `ReentrancyGuard` (from `fund_invoice`) | Safe | Verified in `reentrancy_callback_price_oracle.rs` (#922) |
 
 ### `contracts/treasury/src/lib.rs`
 
@@ -79,6 +80,7 @@ whether a reentrancy guard is present, and the fix applied (if any).
 | TR-4 | `refund_fee` | token `transfer` (treasury→recipient) | Token contract | ✅ Yes — collected ledger decremented before transfer | None (marketplace-restricted path; single auth check) | Safe | — |
 | TR-5 | `withdraw_batch` | token `transfer` (per entry) | Token contract | ✅ Yes — all-or-nothing checks pass before any transfer; per-entry ledger update before each transfer | ✅ `ReentrancyGuard` (batch-level) | Safe | — |
 | TR-6 | `claim_share` | token `transfer` | Token contract | ✅ Yes — `StakeholderClaim` key set before transfer | None (stakeholder-restricted) | ⚠️ No guard — see note | No guard added; CEI is sufficient here |
+| TR-7 | `get_total_collected_value` | `oracle_client.try_convert_with_decimals` | `price_oracle` | N/A — read-only fee valuation view | ✅ Target functions (`withdraw`) protected by `ReentrancyGuard` & admin auth | Safe | Verified in `reentrancy_callback_price_oracle.rs` (#922) |
 
 > **TR-6 note:** `claim_share` has no `ReentrancyGuard`. The function is not
 > gated behind an admin key; any registered stakeholder can call it. However,
@@ -148,6 +150,17 @@ following indirect patterns were considered:
    happens after the pool is fully closed. Even if `record_default` itself
    called back into `financing_pool`, the pool's `PoolAlreadyClosed` check would
    block any further state change.
+
+4. **`price_oracle` callbacks during `fund_invoice` and valuation (#922)** —
+   When `marketplace::fund_invoice` converts amounts across currencies via
+   `convert_via_oracle`, control flows to the configured price oracle. An adversarial
+   oracle attempting to reenter `marketplace::fund_invoice` or `financing_pool::repay`
+   during this conversion callback is strictly rejected:
+   - `fund_invoice` holds an instance-level `ReentrancyGuard`, failing any second entry closed.
+   - `financing_pool` enforces `RepaymentLock` preventing state manipulation during in-flight operations.
+   - Treasury valuation via `get_total_collected_value` cleanly isolates multi-asset computation.
+   - Multi-hop nested callbacks (depth > 1) fail closed atomically.
+   - Validated end-to-end in regression suite `contracts/tests/reentrancy_callback_price_oracle.rs`.
 
 ---
 

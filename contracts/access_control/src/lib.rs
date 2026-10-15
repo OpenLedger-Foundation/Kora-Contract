@@ -1866,7 +1866,7 @@ impl AccessControlContract {
 
     /// Initiate a structured rotation election for an expiring or expired council seat.
     /// Can be initiated by any active signer or admin.
-    pub fn initiate_council_rotation_election(
+    pub fn init_council_rotation_election(
         env: Env,
         initiator: Address,
         expiring_seat: Address,
@@ -1950,7 +1950,7 @@ impl AccessControlContract {
     /// Invariant: Safe minimum quorum is preserved throughout transition.
     /// An expiring seat's authority only lapses once replacement is confirmed.
     /// If election fails, automatic term extension activates pending a new election.
-    pub fn conclude_council_rotation_election(
+    pub fn end_council_rotation_election(
         env: Env,
         caller: Address,
         election_id: u64,

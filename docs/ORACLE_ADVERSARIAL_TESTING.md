@@ -352,5 +352,6 @@ If manipulation detected:
   same principle of checking rejected operations leave observable state intact.
 - Original issue: "Build adversarial test suite for price_oracle manipulation scenarios"
 - Related contracts: `price_oracle`, `marketplace`, `financing_pool`
+- Price oracle callback reentrancy regression test suite: `contracts/tests/reentrancy_callback_price_oracle.rs` (#922)
 - Security model: Admin-selected honest-majority feeders
 - External dependencies: Access control contract for pause functionality

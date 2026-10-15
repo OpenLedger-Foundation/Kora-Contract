@@ -2,7 +2,7 @@
 
 // Formal verification model — host-only (requires std).
 // Gated so it never gets compiled into the WASM binary.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "verification", not(target_arch = "wasm32")))]
 pub mod verification {
     pub mod model {
         include!("../verification/model.rs");
@@ -84,6 +84,10 @@ pub enum FinancingPoolError {
     ApprovalPending = 33,
     ApprovalThresholdNotMet = 34,
     GracePeriodActive = 35,
+    InvalidMigrationTarget = 36,
+    TooManyInvestors = 37,
+    EscrowPending = 38,
+    BatchSizeExceeded = 39,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -94,8 +98,15 @@ impl From<CommonError> for FinancingPoolError {
             CommonError::InvalidFeeRate => FinancingPoolError::InvalidFeeRate,
             CommonError::InvalidDueDate => FinancingPoolError::InvalidDueDate,
             CommonError::ArithmeticOverflow => FinancingPoolError::ArithmeticOverflow,
+            CommonError::BatchSizeExceeded => FinancingPoolError::BatchSizeExceeded,
             _ => FinancingPoolError::InvalidAmount,
         }
+    }
+}
+
+impl From<kora_shared::migration::MigrationError> for FinancingPoolError {
+    fn from(_: kora_shared::migration::MigrationError) -> Self {
+        FinancingPoolError::InvalidMigrationTarget
     }
 }
 
@@ -103,6 +114,8 @@ impl From<CommonError> for FinancingPoolError {
 
 #[contracttype]
 pub enum DataKey {
+    SchemaVersion,
+    EscrowPending(u64),
     Pool(u64),
     Positions(u64),
     Admin,
@@ -3753,29 +3766,29 @@ mod share_tests {
         let pool = client.get_pool(&1u64).unwrap();
         assert_eq!(pool.repaid_amount, 5_000_000_000i128);
     }
-}
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn seed_pool_with_token(
-    env: &Env,
-    contract_id: &Address,
-    invoice_id: u64,
-    face_value: i128,
-    token: Address,
-) {
-    let pool = Pool {
-        invoice_id,
-        token,
-        total_funded: 0,
-        face_value,
-        repaid_amount: 0,
-        is_closed: false,
-        late_penalty_bps: 200,
-        total_owed: face_value,
-        penalty_applied: false,
-    };
-    env.as_contract(contract_id, || {
-        env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
-    });
+    fn seed_pool_with_token(
+        env: &Env,
+        contract_id: &Address,
+        invoice_id: u64,
+        face_value: i128,
+        token: Address,
+    ) {
+        let pool = Pool {
+            invoice_id,
+            token,
+            total_funded: 0,
+            face_value,
+            repaid_amount: 0,
+            is_closed: false,
+            late_penalty_bps: 200,
+            total_owed: face_value,
+            penalty_applied: false,
+        };
+        env.as_contract(contract_id, || {
+            env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+        });
+    }
 }
