@@ -25,7 +25,21 @@ const MANIFEST_CONTRACT_KEYS: Record<keyof KoraAddresses, string> = {
   riskRegistry: "risk_registry",
   accessControl: "access_control",
   priceOracle: "price_oracle",
+  disputeEscrow: "dispute_escrow",
+  fractionalizer: "fractionalizer",
+  secondaryMarket: "secondary_market",
+  governanceVoting: "governance_voting",
 };
+
+const REQUIRED_CONTRACTS: (keyof KoraAddresses)[] = [
+  "invoiceNft",
+  "marketplace",
+  "financingPool",
+  "treasury",
+  "riskRegistry",
+  "accessControl",
+  "priceOracle",
+];
 
 /**
  * Transforms a parsed deployment manifest (the shape `scripts/deploy.sh`
@@ -44,7 +58,9 @@ export function manifestToAddresses(manifest: DeploymentManifest): KoraAddresses
     const manifestKey = MANIFEST_CONTRACT_KEYS[field];
     const entry = manifest.contracts?.[manifestKey];
     if (!entry || !entry.address) {
-      missing.push(manifestKey);
+      if (REQUIRED_CONTRACTS.includes(field)) {
+        missing.push(manifestKey);
+      }
       continue;
     }
     addresses[field] = entry.address;

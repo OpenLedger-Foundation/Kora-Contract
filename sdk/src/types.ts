@@ -72,3 +72,69 @@ export interface MarketplaceConfig {
   accessControl: string;
   feeBps: number;
 }
+
+// ── Dispute Escrow Types ──────────────────────────────────────────────────────
+
+export interface EscrowDispute {
+  invoiceId: bigint;
+  challenger: string;
+  payer: string;
+  token: string;
+  amount: bigint;
+  openedAt: bigint;
+  resolved: boolean;
+  paidToPool: boolean;
+}
+
+// ── Fractionalizer Types ──────────────────────────────────────────────────────
+
+export interface WrapRecord {
+  invoiceId: bigint;
+  originalInvestor: string;
+  totalShares: bigint;
+  outstandingShares: bigint;
+  contributed: bigint;
+  token: string;
+  totalPayout: bigint;
+  settled: boolean;
+}
+
+// ── Secondary Market Types ────────────────────────────────────────────────────
+
+export interface PositionSaleOffer {
+  seller: string;
+  invoiceId: bigint;
+  token: string;
+  price: bigint;
+}
+
+// ── Governance Voting Types ───────────────────────────────────────────────────
+
+export type ProposalType = "Financial" | "Sentiment" | "Upgrade" | "ParameterChange";
+export type VotingMode = "Standard" | "Quadratic";
+export type GovernanceChoice = "For" | "Against" | "Abstain";
+
+export interface GovernanceProposal {
+  id: bigint;
+  proposer: string;
+  title: string;
+  description: string;
+  proposalType: ProposalType;
+  votingMode: VotingMode;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  votesAbstain: bigint;
+  createdAt: bigint;
+  expiresAt: bigint;
+  executed: boolean;
+  quorumRequired: bigint;
+}
+
+export interface GovernanceVoteRecord {
+  voter: string;
+  choice: GovernanceChoice;
+  weight: bigint;
+  voiceCreditsSpent: bigint;
+  votedAt: bigint;
+}
+

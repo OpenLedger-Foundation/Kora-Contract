@@ -1,13 +1,21 @@
-import { Keypair, scValToNative } from "@stellar/stellar-sdk";
+import { Keypair, scValToNative, nativeToScVal } from "@stellar/stellar-sdk";
 import { BaseClient, NetworkConfig } from "./base";
 import {
+  EscrowDispute,
+  GovernanceChoice,
+  GovernanceProposal,
+  GovernanceVoteRecord,
   Invoice,
   Listing,
   MarketplaceConfig,
   Pool,
   Position,
+  PositionSaleOffer,
+  ProposalType,
   RiskTier,
   SmeProfile,
+  VotingMode,
+  WrapRecord,
 } from "./types";
 
 // ── InvoiceNftClient ──────────────────────────────────────────────────────────
@@ -276,3 +284,391 @@ export class PriceOracleClient extends BaseClient {
     );
   }
 }
+
+// ── DisputeEscrowClient ───────────────────────────────────────────────────────
+
+export class DisputeEscrowClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  async initialize(admin: Keypair, pool: string): Promise<void> {
+    await this.invoke(
+      "initialize",
+      [this.addr(admin.publicKey()), this.addr(pool)],
+      admin
+    );
+  }
+
+  async openDispute(
+    challenger: Keypair,
+    payer: string,
+    invoiceId: bigint,
+    amount: bigint
+  ): Promise<void> {
+    await this.invoke(
+      "open_dispute",
+      [
+        this.addr(challenger.publicKey()),
+        this.addr(payer),
+        this.u64(invoiceId),
+        this.i128(amount),
+      ],
+      challenger
+    );
+  }
+
+  async resolveDispute(
+    adminOrResolver: Keypair,
+    invoiceId: bigint,
+    payPool: boolean
+  ): Promise<void> {
+    await this.invoke(
+      "resolve_dispute",
+      [
+        this.addr(adminOrResolver.publicKey()),
+        this.u64(invoiceId),
+        this.bool(payPool),
+      ],
+      adminOrResolver
+    );
+  }
+
+  async resolveTimeout(invoiceId: bigint, caller?: Keypair): Promise<void> {
+    await this.invoke("resolve_timeout", [this.u64(invoiceId)], caller);
+  }
+
+  async getDispute(invoiceId: bigint): Promise<EscrowDispute | null> {
+    const result = await this.invoke("get_dispute", [this.u64(invoiceId)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as EscrowDispute;
+  }
+}
+
+// ── FractionalizerClient ──────────────────────────────────────────────────────
+
+export class FractionalizerClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  async initialize(
+    admin: Keypair,
+    financingPool: string,
+    accessControl: string
+  ): Promise<void> {
+    await this.invoke(
+      "initialize",
+      [
+        this.addr(admin.publicKey()),
+        this.addr(financingPool),
+        this.addr(accessControl),
+      ],
+      admin
+    );
+  }
+
+  async wrap(
+    investor: Keypair,
+    invoiceId: bigint,
+    totalShares: bigint
+  ): Promise<void> {
+    await this.invoke(
+      "wrap",
+      [
+        this.addr(investor.publicKey()),
+        this.u64(invoiceId),
+        this.u64(totalShares),
+      ],
+      investor
+    );
+  }
+
+  async transferShares(
+    from: Keypair,
+    originalInvestor: string,
+    invoiceId: bigint,
+    to: string,
+    amount: bigint
+  ): Promise<void> {
+    await this.invoke(
+      "transfer_shares",
+      [
+        this.addr(from.publicKey()),
+        this.addr(originalInvestor),
+        this.u64(invoiceId),
+        this.addr(to),
+        this.u64(amount),
+      ],
+      from
+    );
+  }
+
+  async settle(
+    invoiceId: bigint,
+    originalInvestor: string,
+    caller?: Keypair
+  ): Promise<void> {
+    await this.invoke(
+      "settle",
+      [this.u64(invoiceId), this.addr(originalInvestor)],
+      caller
+    );
+  }
+
+  async redeem(
+    holder: Keypair,
+    invoiceId: bigint,
+    originalInvestor: string
+  ): Promise<bigint> {
+    const result = await this.invoke(
+      "redeem",
+      [
+        this.addr(holder.publicKey()),
+        this.u64(invoiceId),
+        this.addr(originalInvestor),
+      ],
+      holder
+    );
+    return scValToNative(result) as bigint;
+  }
+
+  async unwrap(investor: Keypair, invoiceId: bigint): Promise<void> {
+    await this.invoke(
+      "unwrap",
+      [this.addr(investor.publicKey()), this.u64(invoiceId)],
+      investor
+    );
+  }
+
+  async getWrap(
+    invoiceId: bigint,
+    originalInvestor: string
+  ): Promise<WrapRecord | null> {
+    const result = await this.invoke("get_wrap", [
+      this.u64(invoiceId),
+      this.addr(originalInvestor),
+    ]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as WrapRecord;
+  }
+
+  async getShareBalance(
+    invoiceId: bigint,
+    originalInvestor: string,
+    holder: string
+  ): Promise<bigint> {
+    const result = await this.invoke("get_share_balance", [
+      this.u64(invoiceId),
+      this.addr(originalInvestor),
+      this.addr(holder),
+    ]);
+    return scValToNative(result) as bigint;
+  }
+}
+
+// ── SecondaryMarketClient ─────────────────────────────────────────────────────
+
+export class SecondaryMarketClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  async initialize(
+    admin: Keypair,
+    financingPool: string,
+    treasury: string,
+    protocolFeeBps: number
+  ): Promise<void> {
+    await this.invoke(
+      "initialize",
+      [
+        this.addr(admin.publicKey()),
+        this.addr(financingPool),
+        this.addr(treasury),
+        this.u32(protocolFeeBps),
+      ],
+      admin
+    );
+  }
+
+  async pause(admin: Keypair): Promise<void> {
+    await this.invoke("pause", [], admin);
+  }
+
+  async unpause(admin: Keypair): Promise<void> {
+    await this.invoke("unpause", [], admin);
+  }
+
+  async updateProtocolFeeBps(admin: Keypair, feeBps: number): Promise<void> {
+    await this.invoke("update_protocol_fee_bps", [this.u32(feeBps)], admin);
+  }
+
+  async listPosition(
+    seller: Keypair,
+    invoiceId: bigint,
+    price: bigint
+  ): Promise<void> {
+    await this.invoke(
+      "list_position",
+      [this.addr(seller.publicKey()), this.u64(invoiceId), this.i128(price)],
+      seller
+    );
+  }
+
+  async buyPosition(
+    buyer: Keypair,
+    invoiceId: bigint,
+    seller: string
+  ): Promise<void> {
+    await this.invoke(
+      "buy_position",
+      [this.addr(buyer.publicKey()), this.u64(invoiceId), this.addr(seller)],
+      buyer
+    );
+  }
+
+  async cancelListing(seller: Keypair, invoiceId: bigint): Promise<void> {
+    await this.invoke(
+      "cancel_listing",
+      [this.addr(seller.publicKey()), this.u64(invoiceId)],
+      seller
+    );
+  }
+}
+
+// ── GovernanceVotingClient ────────────────────────────────────────────────────
+
+export class GovernanceVotingClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  async initialize(admin: Keypair, accessControl: string): Promise<void> {
+    await this.invoke(
+      "initialize",
+      [this.addr(admin.publicKey()), this.addr(accessControl)],
+      admin
+    );
+  }
+
+  async setVotingWeight(
+    admin: Keypair,
+    address: string,
+    weight: bigint
+  ): Promise<void> {
+    await this.invoke(
+      "set_voting_weight",
+      [this.addr(admin.publicKey()), this.addr(address), this.i128(weight)],
+      admin
+    );
+  }
+
+  async getVotingWeight(address: string): Promise<bigint> {
+    const result = await this.invoke("get_voting_weight", [this.addr(address)]);
+    return scValToNative(result) as bigint;
+  }
+
+  async delegate(delegator: Keypair, delegate: string): Promise<void> {
+    await this.invoke(
+      "delegate",
+      [this.addr(delegator.publicKey()), this.addr(delegate)],
+      delegator
+    );
+  }
+
+  async revokeDelegation(delegator: Keypair): Promise<void> {
+    await this.invoke(
+      "revoke_delegation",
+      [this.addr(delegator.publicKey())],
+      delegator
+    );
+  }
+
+  async getDelegate(delegator: string): Promise<string | null> {
+    const result = await this.invoke("get_delegate", [this.addr(delegator)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as string;
+  }
+
+  async createProposal(
+    proposer: Keypair,
+    title: string,
+    description: string,
+    proposalType: ProposalType,
+    votingMode: VotingMode,
+    durationSeconds?: bigint
+  ): Promise<bigint> {
+    const durationScVal = durationSeconds
+      ? this.u64(durationSeconds)
+      : nativeToScVal(null, { type: "null" });
+
+    const result = await this.invoke(
+      "create_proposal",
+      [
+        this.addr(proposer.publicKey()),
+        this.str(title),
+        this.str(description),
+        this.sym(proposalType),
+        this.sym(votingMode),
+        durationScVal,
+      ],
+      proposer
+    );
+    return scValToNative(result) as bigint;
+  }
+
+  async vote(
+    voter: Keypair,
+    proposalId: bigint,
+    choice: GovernanceChoice,
+    voiceCredits?: bigint
+  ): Promise<void> {
+    const voiceCreditsScVal = voiceCredits
+      ? this.i128(voiceCredits)
+      : nativeToScVal(null, { type: "null" });
+
+    await this.invoke(
+      "vote",
+      [
+        this.addr(voter.publicKey()),
+        this.u64(proposalId),
+        this.sym(choice),
+        voiceCreditsScVal,
+      ],
+      voter
+    );
+  }
+
+  async getProposal(proposalId: bigint): Promise<GovernanceProposal | null> {
+    const result = await this.invoke("get_proposal", [this.u64(proposalId)]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as GovernanceProposal;
+  }
+
+  async getVoteRecord(
+    proposalId: bigint,
+    voter: string
+  ): Promise<GovernanceVoteRecord | null> {
+    const result = await this.invoke("get_vote_record", [
+      this.u64(proposalId),
+      this.addr(voter),
+    ]);
+    const native = scValToNative(result);
+    if (!native) return null;
+    return native as GovernanceVoteRecord;
+  }
+
+  async executeProposal(executor: Keypair, proposalId: bigint): Promise<void> {
+    await this.invoke(
+      "execute_proposal",
+      [this.addr(executor.publicKey()), this.u64(proposalId)],
+      executor
+    );
+  }
+}
+
