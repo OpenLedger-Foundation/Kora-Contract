@@ -12,7 +12,7 @@ groups:
           description: The aggregated health endpoint has been unreachable for at least two minutes.
 
       - alert: KoraServiceUnavailable
-        expr: up{job=~"kora-(keeper|indexer)"} == 0
+        expr: up{job=~"kora-(keeper|indexer|risk-pipeline|governance-sync)"} == 0
         for: 3m
         labels:
           severity: warning
@@ -72,3 +72,57 @@ groups:
         annotations:
           summary: Kora treasury sweep observed
           description: Verify the sweep amount and authorized transaction; expected sweeps do not page on-call.
+
+  - name: kora-risk-pipeline
+    rules:
+      - alert: KoraRiskPipelineJobFailures
+        expr: increase(kora_risk_pipeline_job_failures_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora risk pipeline job failures detected
+          description: Risk pipeline has encountered scoring evaluation job failures in the last five minutes.
+
+      - alert: KoraRiskPipelineStaleScores
+        expr: kora_risk_pipeline_stale_scores > 0
+        for: 5m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Stale risk scores detected
+          description: '{{ $value }} SME risk profile scores exceed staleness threshold and have not been refreshed.'
+
+      - alert: KoraRiskPipelineHeartbeatMissing
+        expr: (time() - kora_risk_pipeline_heartbeat_timestamp_seconds) > 300
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora risk pipeline heartbeat missing
+          description: No heartbeat observed from risk pipeline service for more than 5 minutes.
+
+  - name: kora-governance-sync
+    rules:
+      - alert: KoraGovernanceSyncRpcErrors
+        expr: increase(kora_governance_sync_rpc_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora governance sync Soroban RPC errors observed
+          description: Governance sync service encountered Soroban RPC query failures when syncing on-chain proposals.
+
+      - alert: KoraGovernanceSyncHeartbeatMissing
+        expr: (time() - kora_governance_sync_heartbeat_timestamp_seconds) > 300
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora governance sync heartbeat missing
+          description: No heartbeat observed from governance sync service for more than 5 minutes.

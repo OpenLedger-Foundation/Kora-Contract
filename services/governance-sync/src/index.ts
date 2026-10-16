@@ -11,10 +11,17 @@
  * - Read-only tally display (no forum -> chain actions)
  */
 
+import http from 'http';
 import { SorobanRpc, Contract, Address } from '@stellar/stellar-sdk';
 import axios, { AxiosInstance } from 'axios';
 import pino from 'pino';
 import Database from 'better-sqlite3';
+import {
+  governanceSyncMetrics,
+  startMetricsServer,
+  createMetricsServer,
+  GovernanceSyncMetrics,
+} from './metrics';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -286,6 +293,7 @@ class GovernanceMonitor {
   private db: SyncDatabase;
   private forum: ForumClient;
   private lastProcessedProposalId: number = -1;
+  private metricsServer?: http.Server;
 
   constructor(config: Config) {
     this.config = config;
@@ -294,14 +302,33 @@ class GovernanceMonitor {
     this.forum = new ForumClient(config);
   }
 
-  async start(): void {
+  async start(): Promise<void> {
+    if (process.env.METRICS_ENABLED !== 'false') {
+      try {
+        const port = parseInt(process.env.METRICS_PORT || '8082', 10);
+        this.metricsServer = startMetricsServer(port);
+        logger.info({ port }, 'Started governance-sync metrics server on /metrics and /health');
+      } catch (err) {
+        logger.warn({ error: err }, 'Could not start metrics server');
+      }
+    }
     logger.info('Starting governance-forum sync service...');
 
     // Main polling loop
     while (true) {
       try {
         await this.syncProposals();
-      } catch (error) {
+      } catch (error: any) {
+        if (
+          error?.isRpcError ||
+          error?.code === 'RPC_ERROR' ||
+          error?.message?.includes('RPC') ||
+          error?.name?.includes('Rpc')
+        ) {
+          governanceSyncMetrics.recordRpcError();
+        } else {
+          governanceSyncMetrics.recordSyncError();
+        }
         logger.error({ error }, 'Error in sync loop');
       }
 
@@ -310,13 +337,9 @@ class GovernanceMonitor {
   }
 
   private async syncProposals(): Promise<void> {
-    // In a production implementation, this would:
-    // 1. Query the governance contract for new proposals
-    // 2. Check if they've been synced to the forum
-    // 3. Create threads for new proposals
-    // 4. Update existing threads with fresh vote tallies
-
     logger.info('Checking for new proposals...');
+    governanceSyncMetrics.recordHeartbeat();
+    governanceSyncMetrics.recordPoll();
 
     // Placeholder: actual implementation would call the contract
     // const nextProposalId = await this.getNextProposalId();
@@ -326,16 +349,22 @@ class GovernanceMonitor {
   }
 
   private async syncProposal(proposalId: number): Promise<void> {
-    const existing = this.db.getSyncRecord(proposalId);
+    try {
+      const existing = this.db.getSyncRecord(proposalId);
 
-    if (existing) {
-      // Update existing thread
-      logger.debug({ proposal_id: proposalId }, 'Updating existing thread');
-      await this.updateProposalThread(proposalId, existing.forum_thread_id);
-    } else {
-      // Create new thread
-      logger.info({ proposal_id: proposalId }, 'Creating new forum thread');
-      await this.createProposalThread(proposalId);
+      if (existing) {
+        // Update existing thread
+        logger.debug({ proposal_id: proposalId }, 'Updating existing thread');
+        await this.updateProposalThread(proposalId, existing.forum_thread_id);
+      } else {
+        // Create new thread
+        logger.info({ proposal_id: proposalId }, 'Creating new forum thread');
+        await this.createProposalThread(proposalId);
+      }
+      governanceSyncMetrics.recordProposalSync('synced');
+    } catch (error) {
+      governanceSyncMetrics.recordProposalSync('failed');
+      throw error;
     }
   }
 
@@ -398,6 +427,10 @@ class GovernanceMonitor {
   }
 
   close(): void {
+    if (this.metricsServer) {
+      this.metricsServer.close();
+      this.metricsServer = undefined;
+    }
     this.db.close();
   }
 }
@@ -442,4 +475,12 @@ if (require.main === module) {
   });
 }
 
-export { GovernanceMonitor, ForumClient, SyncDatabase };
+export {
+  GovernanceMonitor,
+  ForumClient,
+  SyncDatabase,
+  governanceSyncMetrics,
+  startMetricsServer,
+  createMetricsServer,
+  GovernanceSyncMetrics,
+};

@@ -48,6 +48,56 @@
       "targets": [{ "expr": "kora_indexer_lag_seconds", "legendFormat": "ledger lag", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "desc" } }
+    },
+    {
+      "id": 5,
+      "title": "Risk pipeline score evaluations & failures",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "increase(kora_risk_pipeline_executions_total[1h])", "legendFormat": "evaluation {{status}}", "refId": "A" },
+        { "expr": "increase(kora_risk_pipeline_job_failures_total[1h])", "legendFormat": "job failures", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 6,
+      "title": "Risk pipeline stale scores",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "kora_risk_pipeline_stale_scores", "legendFormat": "stale profiles", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": 0 }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "area", "justifyMode": "auto" }
+    },
+    {
+      "id": 7,
+      "title": "Governance sync proposals & RPC errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "increase(kora_governance_sync_proposals_total[1h])", "legendFormat": "proposals {{status}}", "refId": "A" },
+        { "expr": "increase(kora_governance_sync_rpc_errors_total[1h])", "legendFormat": "rpc errors", "refId": "B" },
+        { "expr": "increase(kora_governance_sync_errors_total[1h])", "legendFormat": "sync errors", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 8,
+      "title": "Service heartbeat latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "time() - kora_risk_pipeline_heartbeat_timestamp_seconds", "legendFormat": "risk-pipeline heartbeat age", "refId": "A" },
+        { "expr": "time() - kora_governance_sync_heartbeat_timestamp_seconds", "legendFormat": "governance-sync heartbeat age", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "desc" } }
     }
   ]
 }

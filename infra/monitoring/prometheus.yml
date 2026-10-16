@@ -25,3 +25,13 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["indexer:9090"]
+
+  - job_name: kora-risk-pipeline
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["risk-pipeline:8081"]
+
+  - job_name: kora-governance-sync
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["governance-sync:8082"]

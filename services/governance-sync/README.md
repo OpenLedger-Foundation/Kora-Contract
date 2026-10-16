@@ -122,14 +122,35 @@ Request format:
 - **Contract read failure**: Log warning, continue polling
 - **Database errors**: Fatal, service exits
 
-## Monitoring
+## Monitoring & Operational Telemetry
 
-Key metrics to monitor:
+The governance sync service exposes Prometheus metrics and health status on port `8082` (configurable via `METRICS_PORT` and `METRICS_HOST`).
 
-- Proposals synced vs. on-chain total
-- Forum API error rate
-- Sync lag (time between proposal creation and thread creation)
-- Database size growth
+### Endpoints
+
+- `GET /metrics`: Prometheus text exposition format (version 0.0.4).
+- `GET /health`: JSON service liveness and uptime status (`{"status":"ok","service":"governance-sync","uptime":...}`).
+
+### Metrics Catalog
+
+| Metric | Type | Description |
+|---|---|---|
+| `kora_governance_sync_rpc_errors_total` | Counter | Total number of Soroban RPC query errors. |
+| `kora_governance_sync_errors_total` | Counter | Total governance sync loop failures. |
+| `kora_governance_sync_proposals_total{status="synced\|failed"}` | Counter | Total proposals processed by sync status. |
+| `kora_governance_sync_last_poll_timestamp_seconds` | Gauge | Unix timestamp of the most recent contract poll. |
+| `kora_governance_sync_heartbeat_timestamp_seconds` | Gauge | Unix timestamp of the most recent service heartbeat. |
+
+### Alerts & Incident Response Runbook
+
+Alert definitions in `infra/monitoring/alerts.yml`:
+- **`KoraGovernanceSyncRpcErrors`** (Sev-3 Warning): Triggers if Soroban RPC failures occur over a 5-minute window (`increase(kora_governance_sync_rpc_errors_total[5m]) > 0` for 2m).
+  - *Triage*: Verify Stellar testnet RPC health (`SOROBAN_RPC_URL`), network connectivity, and rate-limiting responses.
+- **`KoraGovernanceSyncHeartbeatMissing`** (Sev-3 Warning): Triggers if service heartbeat stops for >5 minutes.
+  - *Triage*: Check container logs, SQLite database lock states, and restart the service if hung.
+- **`KoraServiceUnavailable`** (Sev-3 Warning): Triggers when `up{job="kora-governance-sync"} == 0` for 3m.
+
+For escalation protocol and severity classifications, consult [`docs/INCIDENT_RESPONSE.md`](../../docs/INCIDENT_RESPONSE.md).
 
 ## Testing
 

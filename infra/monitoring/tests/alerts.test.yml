@@ -39,3 +39,54 @@ tests:
             exp_annotations:
               summary: Kora invoice default event observed
               description: A default event was observed. Defaults can be expected protocol events; investigate context before escalation.
+
+  - name: risk pipeline job failures trigger warning after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_risk_pipeline_job_failures_total{job="kora-risk-pipeline"}'
+        values: "0 1 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KoraRiskPipelineJobFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-3
+              job: kora-risk-pipeline
+            exp_annotations:
+              summary: Kora risk pipeline job failures detected
+              description: Risk pipeline has encountered scoring evaluation job failures in the last five minutes.
+
+  - name: stale risk scores trigger warning after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_risk_pipeline_stale_scores{job="kora-risk-pipeline"}'
+        values: "0 5 5 5 5 5 5 5"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: KoraRiskPipelineStaleScores
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-3
+              job: kora-risk-pipeline
+            exp_annotations:
+              summary: Stale risk scores detected
+              description: '5 SME risk profile scores exceed staleness threshold and have not been refreshed.'
+
+  - name: governance sync rpc errors trigger warning after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_governance_sync_rpc_errors_total{job="kora-governance-sync"}'
+        values: "0 1 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KoraGovernanceSyncRpcErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-3
+              job: kora-governance-sync
+            exp_annotations:
+              summary: Kora governance sync Soroban RPC errors observed
+              description: Governance sync service encountered Soroban RPC query failures when syncing on-chain proposals.
