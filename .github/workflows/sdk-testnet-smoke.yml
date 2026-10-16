@@ -1,0 +1,55 @@
+name: SDK Testnet Smoke
+
+# =============================================================================
+# Kora Protocol — SDK Testnet Smoke Suite (Issue #935)
+#
+# Runs real integration smoke tests against live Stellar Soroban Testnet
+# using deployed contract IDs from the deployment manifest (deployments/testnet.json).
+#
+# Triggers:
+#   - Scheduled: Daily at 04:00 UTC
+#   - Manual: workflow_dispatch with optional custom RPC URL or manifest path
+# =============================================================================
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # Daily 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      rpc_url:
+        description: "Soroban RPC Endpoint"
+        required: false
+        default: "https://soroban-testnet.stellar.org"
+      manifest_path:
+        description: "Relative path to deployment manifest JSON"
+        required: false
+        default: "deployments/testnet.json"
+
+jobs:
+  smoke-test:
+    name: Testnet Smoke (${{ github.event_name }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: "sdk/package-lock.json"
+
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci
+
+      - name: Run Testnet Smoke Integration Suite
+        working-directory: sdk
+        env:
+          RUN_TESTNET_SMOKE: "true"
+          TESTNET_RPC_URL: ${{ github.event.inputs.rpc_url || secrets.TESTNET_RPC_URL || 'https://soroban-testnet.stellar.org' }}
+          TESTNET_SECRET_KEY: ${{ secrets.TESTNET_SECRET_KEY }}
+          DEPLOYMENT_MANIFEST_PATH: ${{ github.event.inputs.manifest_path || 'deployments/testnet.json' }}
+        run: npm run test:integration

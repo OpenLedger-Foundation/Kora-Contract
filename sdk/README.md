@@ -209,3 +209,29 @@ the configured SDK test command. Their actual unit suites run through the
 Rust CI package matrix. Adding a TypeScript binding and executable SDK
 integration suite remains separate work; this onboarding change does not
 claim that sketch as contract coverage.
+
+## Testnet Smoke Integration Suite
+
+The SDK includes a live testnet smoke suite in [`tests/local.integration.test.ts`](tests/local.integration.test.ts) that exercises real deployed Soroban contracts via the deployment manifest (`deployments/testnet.json`).
+
+### Running the smoke suite
+
+```bash
+npm run test:integration
+```
+
+### Environment variables & configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `RUN_TESTNET_SMOKE` | Force-enable live RPC smoke execution (`"true"`) | `"false"` |
+| `TESTNET_RPC_URL` | Stellar Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
+| `TESTNET_SECRET_KEY` | Stellar account secret key for signing / funding | _(optional)_ |
+| `DEPLOYMENT_MANIFEST_PATH` | Path to the deployed contract manifest JSON | `deployments/testnet.json` |
+
+### Offline & CI safety guards
+
+When testnet credentials or the deployment manifest are not present, the live RPC tests skip gracefully with an informative log message without failing unauthenticated or offline builds.
+
+A scheduled/manual CI workflow is configured in [`.github/workflows/sdk-testnet-smoke.yml`](../.github/workflows/sdk-testnet-smoke.yml) to run daily against live testnet deployments.
+

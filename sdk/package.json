@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "test": "jest --coverage",
+    "test:integration": "jest tests/local.integration.test.ts --runInBand",
     "release:npm": "npm publish --access public",
     "docs:api": "typedoc"
   },
@@ -26,7 +27,8 @@
     "preset": "ts-jest",
     "testEnvironment": "node",
     "testMatch": [
-      "**/tests/transaction-recovery.test.ts"
+      "**/tests/transaction-recovery.test.ts",
+      "**/tests/local.integration.test.ts"
     ],
     "collectCoverageFrom": [
       "src/transactionRecovery.ts"
