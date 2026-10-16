@@ -1,4 +1,5 @@
 import { ConcentrationCapCheck, FeeBreakdown, ListingFundingState, YieldPreview } from '../types/funding';
+import { getKoraClient, isKoraConfigured, withRetryAndBackoff } from './koraClient';
 
 export class FundingService {
   private readonly DEFAULT_PLATFORM_FEE_PCT = 0.5; // 0.5% fee
@@ -96,6 +97,70 @@ export class FundingService {
       annualYieldPercentage: 14.5,
       isFullyFunded: false,
     };
+  }
+
+  /**
+   * Fetches listing funding state from on-chain smart contracts via KoraClient SDK.
+   * Handles rate limiting (429) & network latency via exponential backoff retries.
+   * If live contract environment variables are not set, falls back to offline mock state.
+   */
+  public async fetchListingState(
+    listingId: number | bigint,
+    options?: { strictLiveOnly?: boolean }
+  ): Promise<ListingFundingState> {
+    const kora = getKoraClient();
+
+    if (!kora) {
+      if (options?.strictLiveOnly || isKoraConfigured()) {
+        throw new Error(
+          'Kora smart contract client is not configured. Please configure NEXT_PUBLIC_* contract environment variables.'
+        );
+      }
+      return this.getListingState(Number(listingId));
+    }
+
+    return withRetryAndBackoff(async () => {
+      const idBigInt = BigInt(listingId);
+      const [listing, pool] = await Promise.all([
+        kora.marketplace.getListing(idBigInt),
+        kora.financingPool.getPool(idBigInt).catch(() => null),
+      ]);
+
+      if (!listing) {
+        throw new Error(`Listing #${listingId} not found on-chain.`);
+      }
+
+      // Convert Soroban 7-decimal stroop values to standard USD numbers
+      const askingPriceUsd = Number(listing.askingPrice) / 10_000_000;
+      const faceValueUsd = Number(listing.faceValue) / 10_000_000;
+      const currentFundingUsd = Number(listing.fundedAmount) / 10_000_000;
+      const targetFundingUsd = askingPriceUsd > 0 ? askingPriceUsd : faceValueUsd;
+      const remainingFundingUsd = Math.max(0, targetFundingUsd - currentFundingUsd);
+      const isFullyFunded = currentFundingUsd >= targetFundingUsd || (pool ? pool.isClosed : false);
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const deadlineSec = Number(listing.fundingDeadline);
+      const tenorDays =
+        deadlineSec > nowSec ? Math.max(1, Math.round((deadlineSec - nowSec) / 86400)) : 60;
+
+      const discount =
+        faceValueUsd > askingPriceUsd ? (faceValueUsd - askingPriceUsd) / askingPriceUsd : 0.05;
+      const annualYieldPercentage = Math.round(discount * (365 / tenorDays) * 1000) / 10;
+
+      return {
+        listingId: Number(listing.invoiceId),
+        invoiceId: `INV-${listing.invoiceId.toString()}`,
+        debtorName: `Debtor #${listing.seller ? listing.seller.substring(0, 8) : 'Unknown'}...`,
+        targetFundingUsd: Math.round(targetFundingUsd),
+        currentFundingUsd: Math.round(currentFundingUsd),
+        remainingFundingUsd: Math.round(remainingFundingUsd),
+        minContributionUsd: 100,
+        maxConcentrationCapUsd: Math.round(targetFundingUsd * 0.5),
+        tenorDays,
+        annualYieldPercentage: annualYieldPercentage > 0 ? annualYieldPercentage : 14.5,
+        isFullyFunded,
+      };
+    });
   }
 }
 

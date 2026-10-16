@@ -88,9 +88,19 @@ transaction, or move funds. They are not a live-wallet integration certification
 - **Components**: `WaveDashboard`, `WaveIssueList`, `ContributorLeaderboard`, `WaveStatsOverview`, `waveService`.
 - **Documentation**: See `README_WAVE.md` for detailed guide.
 
+### 7. SDK Integration & Resilient Gateway Layer (`#938`)
+- **Direct Smart Contract Wiring**: Connects `fundingService` and `riskService` directly to `@kora-protocol/sdk` (`KoraClient`, `MarketplaceClient`, `FinancingPoolClient`, `RiskRegistryClient`, `InvoiceNftClient`).
+- **Resilient RPC & Gateway Ingestion**: Includes `withRetryAndBackoff` with exponential jitter to absorb HTTP 429 ("Too Many Requests") rate limits, network latency, and transient RPC timeout spikes.
+- **Asynchronous UI Loading & Error Recovery**:
+  - `MultiStepFundingFlow`: Dynamically queries on-chain pool target and funded amounts, providing accessible loading indicators and retry capabilities.
+  - `RiskScoreVisualization`: Fetches verified SME profile records from `RiskRegistry` and off-chain scoring oracles with live error feedback.
+- **Zero Mock Data in Production Mode**: When Soroban contract IDs or gateway endpoints are configured in `.env`, production calls execute directly against smart contracts; falls back gracefully to offline fixtures for local development when unconfigured.
+- **Environment Configuration**: Documented in `.env.example` with support for testnet/mainnet RPC passphrases, gateway URLs, and all 7 Soroban contract addresses (`NEXT_PUBLIC_INVOICE_NFT_CONTRACT_ID`, `NEXT_PUBLIC_MARKETPLACE_CONTRACT_ID`, etc.).
+
 ## Verification & Testing
 Run unit tests and verification via:
 ```bash
 cd apps/web
+npm run build
 node tests/runTests.js
 ```

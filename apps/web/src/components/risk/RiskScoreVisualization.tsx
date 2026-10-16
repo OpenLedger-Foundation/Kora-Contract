@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { RiskBreakdown } from '../../types/risk';
 import { riskService } from '../../services/riskService';
 
@@ -6,17 +6,45 @@ interface RiskScoreVisualizationProps {
   breakdown?: RiskBreakdown;
   invoiceId?: string;
   isUnderReview?: boolean;
+  smeAddress?: string;
 }
 
 export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
   breakdown: initialBreakdown,
   invoiceId = 'INV-2026-101',
   isUnderReview = false,
+  smeAddress,
 }) => {
-  const [breakdown] = useState<RiskBreakdown>(
+  const [breakdown, setBreakdown] = useState<RiskBreakdown>(() =>
     initialBreakdown || riskService.getRiskBreakdown(invoiceId, { isUnderReview })
   );
   const [expanded, setExpanded] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const reloadRisk = useCallback(async () => {
+    if (initialBreakdown) {
+      setBreakdown(initialBreakdown);
+      return;
+    }
+    setIsLoading(true);
+    setFetchError(null);
+    try {
+      const data = await riskService.fetchRiskBreakdown(invoiceId, {
+        isUnderReview,
+        smeAddress,
+      });
+      setBreakdown(data);
+    } catch (err: any) {
+      setFetchError(err?.message || 'Failed to fetch live risk score from gateway/registry.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [initialBreakdown, invoiceId, isUnderReview, smeAddress]);
+
+  useEffect(() => {
+    reloadRisk();
+  }, [reloadRisk]);
 
   const meta = riskService.getRiskTierMetadata(breakdown.tier);
 
@@ -54,6 +82,33 @@ export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Network / Gateway Loading & Error States */}
+      {isLoading && (
+        <div
+          className="mb-4 p-3 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl text-xs flex items-center justify-between animate-pulse"
+          role="status"
+          aria-live="polite"
+        >
+          <span>⏳ Fetching verified risk profile from on-chain RiskRegistry...</span>
+        </div>
+      )}
+
+      {fetchError && (
+        <div
+          className="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-center justify-between"
+          role="alert"
+        >
+          <span>⚠️ {fetchError}</span>
+          <button
+            type="button"
+            onClick={reloadRisk}
+            className="ml-2 px-2 py-1 bg-amber-200 hover:bg-amber-300 rounded text-amber-900 font-semibold text-xs"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Under Review Notice Banner if applicable */}
       {breakdown.status === 'UNDER_REVIEW' && (

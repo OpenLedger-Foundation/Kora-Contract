@@ -3,10 +3,12 @@
  * Fetches and processes Wave contributor data from GitHub and on-chain treasury
  */
 
-import type {
-  WaveIssue,
+import {
   WaveIssueStatus,
   PayoutStatus,
+} from '../types/wave';
+import type {
+  WaveIssue,
   Contributor,
   GrantDisbursement,
   WaveStats,

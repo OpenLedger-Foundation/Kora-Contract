@@ -6,6 +6,12 @@ const { DiversificationService, diversificationService } = require('../dist/serv
 const { RiskService, riskService } = require('../dist/services/riskService');
 const { FundingService, fundingService } = require('../dist/services/fundingService');
 const { AdminService, adminService } = require('../dist/services/adminService');
+const {
+  isKoraConfigured,
+  getKoraAddresses,
+  withRetryAndBackoff,
+  resetKoraClient,
+} = require('../dist/services/koraClient');
 
 console.log('=== Running @kora/web Test Suite ===\n');
 
@@ -165,6 +171,79 @@ console.log('\nRunning Transaction Simulation Tests (#785)...');
   const feeParam = updatedState.parameters.find((p) => p.key === 'FEE_TIERS');
   assert.strictEqual(feeParam.currentValue, '0.35%', 'Fee tier parameter should be updated to 0.35%');
   console.log('✓ Admin Console & Governance Tests passed.');
+
+  // 9. SDK Integration & Resilient RPC / Gateway Test Suite (#938)
+  console.log('\nRunning SDK Wiring & Resilient RPC / Gateway Tests (#938)...');
+
+  // 9.1 Environment configuration checks
+  assert.strictEqual(typeof isKoraConfigured, 'function', 'isKoraConfigured should be a function');
+  assert.strictEqual(typeof getKoraAddresses, 'function', 'getKoraAddresses should be a function');
+  assert.strictEqual(typeof withRetryAndBackoff, 'function', 'withRetryAndBackoff should be a function');
+
+  const initialConfigured = isKoraConfigured();
+  assert.strictEqual(initialConfigured, false, 'Should be unconfigured in baseline test environment without env vars');
+  assert.strictEqual(getKoraAddresses(), null, 'Addresses should be null when unconfigured');
+
+  // 9.2 Resilient backoff & 429 rate-limiting handling
+  let transientAttempts = 0;
+  const retryResult = await withRetryAndBackoff(async () => {
+    transientAttempts++;
+    if (transientAttempts < 3) {
+      const err = new Error('Gateway rate limit exceeded: HTTP 429');
+      err.status = 429;
+      throw err;
+    }
+    return 'recovered_ok';
+  }, { maxRetries: 4, baseDelayMs: 20 });
+
+  assert.strictEqual(retryResult, 'recovered_ok', 'Should recover from 429 rate limit after backoff retries');
+  assert.strictEqual(transientAttempts, 3, 'Should have taken 3 attempts before succeeding');
+
+  let failedAttempts = 0;
+  let didThrow = false;
+  try {
+    await withRetryAndBackoff(async () => {
+      failedAttempts++;
+      throw new Error('Permanent network disconnection');
+    }, { maxRetries: 2, baseDelayMs: 10 });
+  } catch (err) {
+    didThrow = true;
+  }
+  assert.strictEqual(didThrow, true, 'Permanent error should throw after max retries exceeded');
+  assert.strictEqual(failedAttempts, 3, 'Should attempt 1 initial + 2 retries = 3 total attempts');
+
+  // 9.3 Funding Service live vs offline mock path
+  const listingFallback = await fService.fetchListingState(101);
+  assert.strictEqual(listingFallback.listingId, 101, 'Offline fallback should return listingId 101');
+  assert.strictEqual(listingFallback.targetFundingUsd, 50000, 'Target funding should match mock');
+  assert.strictEqual(listingFallback.isFullyFunded, false, 'Listing should not be fully funded');
+
+  let strictFundingThrew = false;
+  try {
+    await fService.fetchListingState(101, { strictLiveOnly: true });
+  } catch (err) {
+    strictFundingThrew = true;
+    assert(err.message.includes('not configured'), 'Error should describe missing configuration');
+  }
+  assert.strictEqual(strictFundingThrew, true, 'strictLiveOnly should reject when smart contract env vars are missing');
+
+  // 9.4 Risk Service live vs offline mock path
+  const riskFallback = await rService.fetchRiskBreakdown('INV-2026-101');
+  assert.strictEqual(riskFallback.invoiceId, 'INV-2026-101', 'Invoice ID should match');
+  assert.strictEqual(riskFallback.compositeScore, 28, 'Composite score should match default');
+  assert.strictEqual(riskFallback.tier, 'LOW', 'Risk tier should be LOW');
+  assert.strictEqual(riskFallback.factors.length, 4, 'Should have 4 risk factors');
+
+  let strictRiskThrew = false;
+  try {
+    await rService.fetchRiskBreakdown('INV-2026-101', { strictLiveOnly: true });
+  } catch (err) {
+    strictRiskThrew = true;
+    assert(err.message.includes('not configured'), 'Error should describe missing configuration');
+  }
+  assert.strictEqual(strictRiskThrew, true, 'strictLiveOnly should reject when live gateway/registry is missing');
+
+  console.log('✓ SDK Wiring & Resilient RPC / Gateway Tests passed.');
 
   console.log('\n=== All @kora/web Tests Completed Successfully! (100% Coverage) ===');
 })();

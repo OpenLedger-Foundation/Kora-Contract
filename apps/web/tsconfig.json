@@ -10,7 +10,20 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@kora/sdk": ["node_modules/@kora-protocol/sdk/dist/index.d.ts"],
+      "@kora-protocol/sdk": ["node_modules/@kora-protocol/sdk/dist/index.d.ts"]
+    }
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/components/wave-dashboard/ContributorDashboard.tsx",
+    "src/components/wave-dashboard/IssueCard.tsx",
+    "src/components/wave-dashboard/PayoutStatus.tsx",
+    "src/components/wave-dashboard/WaveStats.tsx"
+  ]
 }

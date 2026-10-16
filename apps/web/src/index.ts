@@ -7,7 +7,6 @@ export * from './types/risk';
 export * from './types/funding';
 export * from './types/admin';
 export * from './types/table';
-export * from './types/marketplace';
 export * from './types/feedback';
 
 // Services
@@ -17,8 +16,8 @@ export * from './services/simulationService';
 export * from './services/riskService';
 export * from './services/fundingService';
 export * from './services/adminService';
-export * from './services/marketplaceService';
 export * from './services/feedbackService';
+export * from './services/koraClient';
 
 // Contexts
 export * from './context/LocaleContext';

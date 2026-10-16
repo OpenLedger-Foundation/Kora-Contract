@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ConcentrationCapCheck, FundingStep, ListingFundingState, YieldPreview } from '../../types/funding';
 import { fundingService } from '../../services/fundingService';
 import { useTransactionSimulation } from '../../context/SimulationContext';
@@ -15,13 +15,32 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
   investorDebtorExposureUsd = 2000,
 }) => {
   const { runSimulation } = useTransactionSimulation();
-  const [listing] = useState<ListingFundingState>(fundingService.getListingState(listingId));
+  const [listing, setListing] = useState<ListingFundingState>(() => fundingService.getListingState(listingId));
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const [step, setStep] = useState<FundingStep>('AMOUNT_SELECTION');
   const [amountUsd, setAmountUsd] = useState<number>(1000);
   const [capCheck, setCapCheck] = useState<ConcentrationCapCheck | null>(null);
   const [yieldPreview, setYieldPreview] = useState<YieldPreview | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const reloadListing = useCallback(async () => {
+    setIsLoading(true);
+    setFetchError(null);
+    try {
+      const state = await fundingService.fetchListingState(listingId);
+      setListing(state);
+    } catch (err: any) {
+      setFetchError(err?.message || 'Failed to load listing details from on-chain RPC.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [listingId]);
+
+  useEffect(() => {
+    reloadListing();
+  }, [reloadListing]);
 
   // Handle amount change & live cap checking
   const handleAmountChange = (newAmount: number) => {
@@ -119,6 +138,33 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Network / RPC Loading & Error States */}
+      {isLoading && (
+        <div
+          className="mb-4 p-3 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-xl text-xs flex items-center justify-between animate-pulse"
+          role="status"
+          aria-live="polite"
+        >
+          <span>⏳ Syncing on-chain pool status from Soroban RPC...</span>
+        </div>
+      )}
+
+      {fetchError && (
+        <div
+          className="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-center justify-between"
+          role="alert"
+        >
+          <span>⚠️ {fetchError}</span>
+          <button
+            type="button"
+            onClick={reloadListing}
+            className="ml-2 px-2 py-1 bg-amber-200 hover:bg-amber-300 rounded text-amber-900 font-semibold text-xs"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Listing Status Overview */}
       <div className="mb-6 p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-1">

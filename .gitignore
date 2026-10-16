@@ -3,6 +3,7 @@ target/
 *.wasm
 .env
 .env.*
+!.env.example
 
 # Test snapshots
 test_snapshots/
