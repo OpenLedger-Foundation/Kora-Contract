@@ -179,6 +179,9 @@ jobs:
       - name: cargo run -p kora-xtask --bin check-error-variants
         run: cargo run -p kora-xtask --bin check-error-variants
 
+      - name: test xtask spec extractor & golden tests
+        run: cargo test -p kora-xtask
+
   # ── Unit & integration tests ──────────────────────────────────────────────
   test:
     name: cargo test

@@ -99,6 +99,23 @@ by the #912/#911 onboarding change; verification was restricted to static review
   CI fails the build otherwise (see [`CONTRIBUTING.md` § Style
   Guide](../CONTRIBUTING.md#style-guide)).
 
+- **Contract Spec & ABI Extraction (`kora-xtask contract-spec` / `spec`)**:
+  When modifying public contract entrypoints or types, extract and inspect the contract specification
+  using the real WASM XDR extractor (issue #937):
+
+  ```bash
+  # Inspect specification in machine-readable JSON format
+  cargo run -p kora-xtask -- spec target/wasm32-unknown-unknown/release/invoice_nft.wasm
+
+  # Generate sorted interface text for compatibility checking
+  cargo run -p kora-xtask -- spec target/wasm32-unknown-unknown/release/invoice_nft.wasm --format interface --out specs/pr/invoice_nft.txt
+
+  # Or via the dedicated binary:
+  cargo run -p kora-xtask --bin contract-spec -- target/wasm32-unknown-unknown/release/invoice_nft.wasm --format interface
+  ```
+
+  This ensures TypeScript SDK bindings and interface compatibility gates remain in sync with on-chain WASMs.
+
 ---
 
 ## 2. Making Your First Contribution

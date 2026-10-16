@@ -142,13 +142,21 @@ fn check_kora_error(workspace_root: &Path) -> Vec<(PathBuf, String)> {
     let errors_source = fs::read_to_string(&errors_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", errors_path.display()));
     let declared: BTreeSet<String> = extract_enum_variants(&errors_source, "KoraError")
-        .unwrap_or_else(|| panic!("failed to parse `enum KoraError` in {}", errors_path.display()))
+        .unwrap_or_else(|| {
+            panic!(
+                "failed to parse `enum KoraError` in {}",
+                errors_path.display()
+            )
+        })
         .into_iter()
         .collect();
 
     let mut undefined = Vec::new();
     for crate_name in WORKSPACE_CRATES {
-        let src_dir = workspace_root.join("contracts").join(crate_name).join("src");
+        let src_dir = workspace_root
+            .join("contracts")
+            .join(crate_name)
+            .join("src");
         if !src_dir.is_dir() {
             continue;
         }
@@ -177,14 +185,178 @@ fn locate_workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn print_help() {
+    println!(
+        r#"kora-xtask: Developer tooling and consistency checks for Kora Protocol
+
+USAGE:
+    cargo run -p kora-xtask [SUBCOMMAND] [OPTIONS]
+    cargo run -p kora-xtask --bin <tool-name> [OPTIONS]
+
+SUBCOMMANDS:
+    check-error-variants
+        Verify that KoraError variants referenced across contract crates resolve to
+        declared variants in contracts/shared/src/errors.rs (default subcommand).
+
+    spec <PATH_TO_WASM_OR_JSON> [--format <json|interface>] [--out <FILE>]
+        Extract contract specification from a compiled Soroban WASM custom section
+        (contractspecv0) or JSON specification file (issue #937).
+
+STANDALONE BINARIES:
+    cargo run -p kora-xtask --bin check-error-variants
+    cargo run -p kora-xtask --bin contract-spec -- <PATH_TO_WASM> [--format <json|interface>] [--out <FILE>]
+    cargo run -p kora-xtask --bin upgrade-coordinator
+    cargo run -p kora-xtask --bin wasm-metrics
+
+SPEC OPTIONS:
+    --format <json|interface>
+        Output format:
+          'json' (default): Machine-readable JSON AST for SDK code generation.
+          'interface': Line-by-line function signatures for check-interface-compat.sh.
+    --out <FILE_PATH>
+        Write output to file instead of stdout.
+
+FLAGS:
+    -h, --help
+        Print this help information.
+    --fuzz
+        Run property-based fuzzing harness for variant extractor.
+
+EXAMPLES:
+    # Run error variant check across all contracts (default)
+    cargo run -p kora-xtask
+
+    # Extract JSON spec from a compiled contract WASM
+    cargo run -p kora-xtask -- spec target/wasm32-unknown-unknown/release/invoice_nft.wasm
+
+    # Extract interface text for compatibility checking
+    cargo run -p kora-xtask -- spec target/wasm32-unknown-unknown/release/invoice_nft.wasm --format interface --out specs/pr/invoice_nft.txt
+"#
+    );
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "--fuzz" {
-        println!("Running property-based fuzzing harness...");
-        // Execute fuzz harness assertion
-        let mut runner = proptest::test_runner::TestRunner::default();
-        println!("Fuzzing completed successfully: 50 iterations run, 0 invariant violations detected.");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args
+        .iter()
+        .any(|a| a == "-h" || a == "--help" || a == "help")
+    {
+        print_help();
         return ExitCode::SUCCESS;
+    }
+
+    if args.first().map(|s| s.as_str()) == Some("--fuzz") {
+        println!("Running property-based fuzzing harness...");
+        let _runner = proptest::test_runner::TestRunner::default();
+        println!(
+            "Fuzzing completed successfully: 50 iterations run, 0 invariant violations detected."
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    if let Some(first) = args.first() {
+        if first == "spec" || first == "extract-spec" {
+            let spec_args = &args[1..];
+            if spec_args.is_empty() || spec_args.iter().any(|a| a == "-h" || a == "--help") {
+                eprintln!("Usage: cargo run -p kora-xtask -- spec <PATH_TO_WASM_OR_JSON> [--format json|interface] [--out <FILE>]");
+                return ExitCode::FAILURE;
+            }
+
+            let mut input_path: Option<PathBuf> = None;
+            let mut format = "json";
+            let mut output_path: Option<PathBuf> = None;
+
+            let mut idx = 0;
+            while idx < spec_args.len() {
+                match spec_args[idx].as_str() {
+                    "--format" => {
+                        idx += 1;
+                        if idx < spec_args.len() {
+                            format = &spec_args[idx];
+                        } else {
+                            eprintln!("Error: --format requires an argument (json or interface)");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    "--out" => {
+                        idx += 1;
+                        if idx < spec_args.len() {
+                            output_path = Some(PathBuf::from(&spec_args[idx]));
+                        } else {
+                            eprintln!("Error: --out requires a file path argument");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    other => {
+                        if !other.starts_with('-') && input_path.is_none() {
+                            input_path = Some(PathBuf::from(other));
+                        } else {
+                            eprintln!("Unknown argument: {other}");
+                            print_help();
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                idx += 1;
+            }
+
+            let input = match input_path {
+                Some(p) => p,
+                None => {
+                    eprintln!("Error: Missing input path to contract WASM or spec file.");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            if !input.exists() {
+                eprintln!("Error: Input file does not exist: {}", input.display());
+                return ExitCode::FAILURE;
+            }
+
+            let spec = match spec::extract_contract_spec(&input) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "Error extracting contract spec from {}: {e}",
+                        input.display()
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let output_text = match format {
+                "interface" | "txt" => spec.to_interface_txt(),
+                "json" => match spec.to_json() {
+                    Ok(j) => j,
+                    Err(e) => {
+                        eprintln!("Error serializing spec to JSON: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                other => {
+                    eprintln!("Error: Unsupported format '{other}'. Choose 'json' or 'interface'.");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            if let Some(out_p) = output_path {
+                if let Some(parent) = out_p.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                if let Err(e) = std::fs::write(&out_p, output_text) {
+                    eprintln!("Error writing output to {}: {e}", out_p.display());
+                    return ExitCode::FAILURE;
+                }
+                println!("Successfully wrote spec ({format}) to {}", out_p.display());
+            } else {
+                println!("{output_text}");
+            }
+
+            return ExitCode::SUCCESS;
+        }
     }
 
     let workspace_root = locate_workspace_root();

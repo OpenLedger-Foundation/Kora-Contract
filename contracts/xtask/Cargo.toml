@@ -3,10 +3,18 @@ name = "kora-xtask"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "check-error-variants"
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "check-error-variants"
 path = "src/main.rs"
+
+[[bin]]
+name = "contract-spec"
+path = "src/bin/contract_spec.rs"
 
 [[bin]]
 name = "upgrade-coordinator"
@@ -23,3 +31,6 @@ sha2 = "0.10"
 syn = { version = "2", features = ["full", "visit"] }
 quote = "1"
 proptest = "1"
+stellar-xdr = { version = "21.2.0", default-features = false, features = ["curr", "alloc"] }
+soroban-spec = "21.7.7"
+
