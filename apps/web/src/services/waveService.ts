@@ -13,25 +13,48 @@ import type {
 } from '../types/wave';
 
 const GITHUB_API_BASE = 'https://api.github.com';
-const GITHUB_REPO = process.env.GITHUB_REPO || 'kora-finance/contracts';
+export const GITHUB_REPO = process.env.GITHUB_REPO || 'OpenLedger-Foundation/Kora-Contract';
 const INDEXER_API_BASE = process.env.INDEXER_API_BASE || 'https://api.kora.finance';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 export class WaveService {
+  private etag: string | null = null;
+  private cachedIssues: WaveIssue[] | null = null;
+
+  /**
+   * Build GitHub issues URL
+   */
+  getIssuesUrl(): string {
+    return `${GITHUB_API_BASE}/repos/${GITHUB_REPO}/issues?labels=wave,contributor-reward&state=all&per_page=100`;
+  }
+
+  private githubHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+    if (GITHUB_TOKEN) headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+    if (this.etag) headers['If-None-Match'] = this.etag;
+    return headers;
+  }
+
   /**
    * Fetch all Wave issues from GitHub
    */
   async fetchWaveIssues(): Promise<WaveIssue[]> {
     try {
-      const response = await fetch(
-        `${GITHUB_API_BASE}/repos/${GITHUB_REPO}/issues?labels=wave,contributor-reward&state=all&per_page=100`
-      );
+      const response = await fetch(this.getIssuesUrl(), { headers: this.githubHeaders() });
+
+      if (response.status === 304 && this.cachedIssues) {
+        return this.cachedIssues;
+      }
 
       if (!response.ok) {
         throw new Error(`GitHub API error: ${response.statusText}`);
       }
 
+      this.etag = response.headers.get('etag');
       const issues = await response.json();
-      return issues.map((issue: any) => this.parseGitHubIssue(issue));
+      const parsed = issues.map((issue: any) => this.parseGitHubIssue(issue));
+      this.cachedIssues = parsed;
+      return parsed;
     } catch (error) {
       console.error('Failed to fetch Wave issues:', error);
       return [];
@@ -178,8 +201,30 @@ export class WaveService {
   }
 
   /**
-   * Cross-reference GitHub issues with on-chain disbursements
+   * Fetch treasury payout totals from indexer endpoint
    */
+  async fetchTreasuryPayouts(): Promise<{ totalDisbursed: number; totalPending: number }> {
+    try {
+      const response = await fetch(`${INDEXER_API_BASE}/api/v1/treasury/payouts?type=wave-contributor`, {
+        headers: GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {},
+      });
+
+      if (!response.ok) {
+        throw new Error(`Indexer API error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return {
+        totalDisbursed: data.total_disbursed ?? data.totalDisbursed ?? 0,
+        totalPending: data.total_pending ?? data.totalPending ?? 0,
+      };
+    } catch (error) {
+      console.error('Failed to fetch treasury payouts:', error);
+      const disbursements = await this.fetchGrantDisbursements();
+      const totalDisbursed = disbursements.reduce((sum, d) => sum + Number(d.amount ?? 0), 0);
+      return { totalDisbursed, totalPending: 0 };
+    }
+  }
   async fetchWaveIssuesWithDisbursements(): Promise<WaveIssue[]> {
     const [issues, disbursements] = await Promise.all([
       this.fetchWaveIssues(),

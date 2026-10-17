@@ -133,3 +133,8 @@ Before the mint step the wizard:
 
 See `docs/debtor-attestation.md` for the full metadata pipeline.
 
+
+## Environment variables
+- GITHUB_REPO (optional): GitHub repo in owner/name form. Defaults to OpenLedger-Foundation/Kora-Contract.
+- GITHUB_TOKEN (optional): GitHub personal access token for higher rate limits.
+- INDEXER_API_BASE (optional): Indexer API base URL.
