@@ -1,17 +1,19 @@
 /**
  * Governance-Forum Bridge Service
- * 
- * Syncs on-chain governance proposals with an off-chain discussion forum.
- * Creates forum threads for new proposals and updates them with vote tallies.
- * 
+ *
+ * Syncs on-chain governance proposals from the `governance_voting` contract with
+ * an off-chain discussion forum. Creates forum threads for new proposals and
+ * updates them with live vote tallies.
+ *
  * Architecture:
- * - Monitors governance contract events via Soroban RPC
+ * - Reads proposals from the governance_voting contract via Soroban RPC
+ *   (simulateTransaction + typed SCVal decoding)
  * - Idempotent sync keyed by proposal ID to avoid duplicate threads
- * - Retry with exponential backoff on forum API failures
+ * - Retry with bounded exponential backoff on RPC / forum failures
  * - Read-only tally display (no forum -> chain actions)
  */
 
-import { SorobanRpc, Contract, Address } from '@stellar/stellar-sdk';
+import { SorobanRpc, Contract, Address, Networks, BASE_FEE, TransactionBuilder, scValToNative, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import axios, { AxiosInstance } from 'axios';
 import pino from 'pino';
 import Database from 'better-sqlite3';
@@ -35,6 +37,7 @@ interface Config {
   pollIntervalMs: number;
   maxRetries: number;
   retryBackoffMs: number;
+  maxNewProposalsPerCycle: number;
   dbPath: string;
 }
 
@@ -67,8 +70,33 @@ function loadConfig(): Config {
     pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || '60000', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '5', 10),
     retryBackoffMs: parseInt(process.env.RETRY_BACKOFF_MS || '5000', 10),
+    maxNewProposalsPerCycle: parseInt(process.env.MAX_NEW_PROPOSALS_PER_CYCLE || '50', 10),
     dbPath: process.env.DB_PATH || './governance-sync.db',
   };
+}
+
+// ── Error taxonomy ────────────────────────────────────────────────────────────
+
+export enum GovernanceErrorCode {
+  PROPOSAL_NOT_FOUND = 'PROPOSAL_NOT_FOUND',
+  RPC_ERROR = 'RPC_ERROR',
+  DECODING_ERROR = 'DECODING_ERROR',
+  CONTRACT_ERROR = 'CONTRACT_ERROR',
+  CONFIG_ERROR = 'CONFIG_ERROR',
+}
+
+export class GovernanceSyncError extends Error {
+  readonly code: GovernanceErrorCode;
+  readonly retryable: boolean;
+  readonly cause?: unknown;
+
+  constructor(code: GovernanceErrorCode, message: string, options?: { cause?: unknown; retryable?: boolean }) {
+    super(message);
+    this.name = 'GovernanceSyncError';
+    this.code = code;
+    this.retryable = options?.retryable ?? false;
+    this.cause = options?.cause;
+  }
 }
 
 // ── Database Schema ───────────────────────────────────────────────────────────
@@ -97,7 +125,7 @@ class SyncDatabase {
         synced_at INTEGER NOT NULL,
         last_update INTEGER NOT NULL
       );
-      
+
       CREATE INDEX IF NOT EXISTS idx_forum_thread_id ON sync_records(forum_thread_id);
     `);
   }
@@ -106,6 +134,10 @@ class SyncDatabase {
     return this.db
       .prepare('SELECT * FROM sync_records WHERE proposal_id = ?')
       .get(proposalId) as SyncRecord | undefined;
+  }
+
+  getAllSyncRecords(): SyncRecord[] {
+    return this.db.prepare('SELECT * FROM sync_records').all() as SyncRecord[];
   }
 
   saveSyncRecord(record: SyncRecord): void {
@@ -127,7 +159,7 @@ class SyncDatabase {
 
 // ── Proposal Data Structures ──────────────────────────────────────────────────
 
-interface Proposal {
+export interface Proposal {
   id: number;
   proposer: string;
   title: string;
@@ -141,6 +173,105 @@ interface Proposal {
   expires_at: number;
   executed: boolean;
   quorum_required: number;
+}
+
+// On-chain enum discriminants match the declaration order in
+// contracts/governance_voting/src/lib.rs (VotingMode, ProposalType).
+const VOTING_MODE_BY_DISCRIMINANT: Record<number, string> = {
+  0: 'Standard',
+  1: 'Quadratic',
+};
+
+const PROPOSAL_TYPE_BY_DISCRIMINANT: Record<number, string> = {
+  0: 'Financial',
+  1: 'Sentiment',
+  2: 'Upgrade',
+  3: 'ParameterChange',
+};
+
+function toNumber(value: unknown, field: string): number {
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'number') return value;
+  throw new GovernanceSyncError(
+    GovernanceErrorCode.DECODING_ERROR,
+    `Expected numeric field "${field}", got ${typeof value}`
+  );
+}
+
+// Decodes the SCVal returned by `get_proposal` (Option<Proposal>) into the
+// bridge's Proposal model. None (proposal absent) -> null.
+function decodeProposal(scval: xdr.ScVal): Proposal | null {
+  const native = scValToNative(scval);
+  if (native === null || native === undefined) return null;
+  if (!Array.isArray(native)) {
+    throw new GovernanceSyncError(
+      GovernanceErrorCode.DECODING_ERROR,
+      `Expected Option<Proposal> SCVal vec, got ${typeof native}`
+    );
+  }
+  // Option<Proposal>: None -> [], Some -> [ <Proposal fields vec> ] or the
+  // fields vec directly depending on SDK versioning; accept both shapes.
+  if (native.length === 0) return null;
+  const candidate = native.length === 1 && Array.isArray(native[0]) ? native[0] : native;
+  if (!Array.isArray(candidate) || candidate.length < 13) {
+    throw new GovernanceSyncError(
+      GovernanceErrorCode.DECODING_ERROR,
+      `Unrecognized Proposal payload shape: ${JSON.stringify(native).slice(0, 200)}`
+    );
+  }
+  const [
+    id, proposer, title, description, proposalTypeDisc, votingModeDisc,
+    votesFor, votesAgainst, votesAbstain, createdAt, expiresAt, executed, quorumRequired,
+  ] = candidate;
+
+  return {
+    id: toNumber(id, 'id'),
+    proposer: String(proposer),
+    title: String(title),
+    description: String(description),
+    proposal_type: PROPOSAL_TYPE_BY_DISCRIMINANT[toNumber(proposalTypeDisc, 'proposal_type')] ?? `Unknown(${toNumber(proposalTypeDisc, 'proposal_type')})`,
+    voting_mode: VOTING_MODE_BY_DISCRIMINANT[toNumber(votingModeDisc, 'voting_mode')] ?? `Unknown(${toNumber(votingModeDisc, 'voting_mode')})`,
+    votes_for: toNumber(votesFor, 'votes_for'),
+    votes_against: toNumber(votesAgainst, 'votes_against'),
+    votes_abstain: toNumber(votesAbstain, 'votes_abstain'),
+    created_at: toNumber(createdAt, 'created_at'),
+    expires_at: toNumber(expiresAt, 'expires_at'),
+    executed: Boolean(executed),
+    quorum_required: toNumber(quorumRequired, 'quorum_required'),
+  };
+}
+
+// ── Retry helper ──────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  {
+    maxRetries,
+    backoffMs,
+    isRetryable,
+  }: { maxRetries: number; backoffMs: number; isRetryable?: (error: unknown) => boolean }
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const retryable = isRetryable ? isRetryable(error) : true;
+      if (retryable && attempt < maxRetries - 1) {
+        const delay = backoffMs * Math.pow(2, attempt);
+        logger.warn({ attempt, delay }, 'RPC request failed, retrying...');
+        await sleep(delay);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
 }
 
 // ── Forum Client ──────────────────────────────────────────────────────────────
@@ -246,6 +377,7 @@ ${proposal.description}
       ? ((totalVotes / proposal.quorum_required) * 100).toFixed(1)
       : '0.0';
 
+    // Map on-chain status to forum payload status.
     let status = '🗳️ Voting in progress';
     if (proposal.executed) {
       status = '✅ Executed';
@@ -299,6 +431,60 @@ ${proposal.description}
   }
 }
 
+// ── Governance Voting Reader (Soroban RPC) ────────────────────────────────────
+
+/**
+ * Read-only access to proposal state on the governance_voting contract.
+ * Implemented over Soroban RPC simulation; mockable in tests.
+ */
+export interface ProposalReader {
+  getProposal(id: number): Promise<Proposal | null>;
+}
+
+/**
+ * Thin client over the governance_voting contract exposing `get_proposal` via
+ * Soroban RPC simulation. Read-only: no transactions are submitted to network.
+ */
+class GovernanceVotingReader implements ProposalReader {
+  private rpc: SorobanRpc.Server;
+  private contractId: string;
+  private networkPassphrase: string;
+
+  constructor(rpc: SorobanRpc.Server, contractId: string, rpcUrl: string) {
+    this.rpc = rpc;
+    this.contractId = contractId;
+    this.networkPassphrase = rpcUrl.includes('testnet') ? Networks.TESTNET : Networks.PUBLIC;
+  }
+
+  async getProposal(proposalId: number): Promise<Proposal | null> {
+    const contract = new Contract(this.contractId);
+    const account = await this.rpc.getAccount(this.contractId);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(contract.call('get_proposal', nativeToScVal(BigInt(proposalId), { type: 'u64' })))
+      .setTimeout(30)
+      .build();
+
+    const sim = await this.rpc.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new GovernanceSyncError(
+        GovernanceErrorCode.CONTRACT_ERROR,
+        `contract simulation failed for proposal ${proposalId}: ${String(sim.error)}`,
+        { retryable: false }
+      );
+    }
+
+    const result = sim as SorobanRpc.Api.SimulateTransactionSuccessResponse;
+    if (!result.result) {
+      throw new GovernanceSyncError(GovernanceErrorCode.RPC_ERROR, 'No simulation result', { retryable: true });
+    }
+
+    return decodeProposal(result.result.retval);
+  }
+}
+
 // ── Governance Monitor ────────────────────────────────────────────────────────
 
 class GovernanceMonitor {
@@ -306,13 +492,15 @@ class GovernanceMonitor {
   private config: Config;
   private db: SyncDatabase;
   private forum: ForumClient;
+  private reader: GovernanceVotingReader;
   private lastProcessedProposalId: number = -1;
 
-  constructor(config: Config) {
+  constructor(config: Config, reader?: ProposalReader) {
     this.config = config;
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
     this.db = new SyncDatabase(config.dbPath);
     this.forum = new ForumClient(config);
+    this.reader = reader ?? new GovernanceVotingReader(this.rpc, config.governanceContractId, config.rpcUrl);
   }
 
   async start(): void {
@@ -331,87 +519,88 @@ class GovernanceMonitor {
   }
 
   private async syncProposals(): Promise<void> {
-    // In a production implementation, this would:
-    // 1. Query the governance contract for new proposals
-    // 2. Check if they've been synced to the forum
-    // 3. Create threads for new proposals
-    // 4. Update existing threads with fresh vote tallies
+    logger.info('Syncing proposals...');
 
-    logger.info('Checking for new proposals...');
+    // 1. Refresh tallies for already-synced proposals (idempotent updates).
+    const records = this.db.getAllSyncRecords();
+    for (const record of records) {
+      try {
+        await this.syncProposal(record.proposal_id);
+      } catch (error) {
+        logger.error({ error, proposal_id: record.proposal_id }, 'Failed to refresh proposal thread');
+      }
+    }
 
-    // Placeholder: actual implementation would call the contract
-    // const nextProposalId = await this.getNextProposalId();
-    // for (let id = this.lastProcessedProposalId + 1; id < nextProposalId; id++) {
-    //   await this.syncProposal(id);
-    // }
-  }
+    // 2. Scan for new proposals sequentially from lastProcessedProposalId + 1.
+    // Proposal IDs are contiguous from 0, so the first not-found marks the end.
+    let id = this.lastProcessedProposalId + 1;
+    let checked = 0;
+    while (checked < this.config.maxNewProposalsPerCycle) {
+      try {
+        const proposal = await this.syncProposal(id);
+        if (!proposal) break; // no more proposals on-chain
+        this.lastProcessedProposalId = id;
+      } catch (error) {
+        logger.error({ error, proposal_id: id }, 'Failed to sync proposal, stopping scan');
+        break;
+      }
+      id++;
+      checked++;
+    }
 
-  private async syncProposal(proposalId: number): Promise<void> {
-    const existing = this.db.getSyncRecord(proposalId);
-
-    if (existing) {
-      // Update existing thread
-      logger.debug({ proposal_id: proposalId }, 'Updating existing thread');
-      await this.updateProposalThread(proposalId, existing.forum_thread_id);
-    } else {
-      // Create new thread
-      logger.info({ proposal_id: proposalId }, 'Creating new forum thread');
-      await this.createProposalThread(proposalId);
+    if (checked === this.config.maxNewProposalsPerCycle) {
+      logger.info({ lastProcessed: this.lastProcessedProposalId }, 'New-proposal batch limit reached, continuing next cycle');
     }
   }
 
-  private async createProposalThread(proposalId: number): Promise<void> {
-    // Fetch proposal from contract
-    const proposal = await this.fetchProposal(proposalId);
+  /**
+   * Create or update the forum thread for a single proposal id.
+   * Returns the on-chain proposal, or null when it no longer exists on-chain.
+   */
+  private async syncProposal(proposalId: number): Promise<Proposal | null> {
+    const existing = this.db.getSyncRecord(proposalId);
+
+    const proposal = await withRetry(
+      () => this.reader.getProposal(proposalId),
+      {
+        maxRetries: this.config.maxRetries,
+        backoffMs: this.config.retryBackoffMs,
+        isRetryable: (error) => error instanceof GovernanceSyncError && error.retryable,
+      }
+    );
 
     if (!proposal) {
       logger.warn({ proposal_id: proposalId }, 'Proposal not found on-chain');
-      return;
+      return null;
     }
 
-    // Create forum thread (idempotent)
-    const threadId = await this.forum.createThread(proposal);
+    if (existing) {
+      // Update existing thread with fresh tallies
+      await this.forum.updateThread(existing.forum_thread_id, proposal);
+      const current = this.db.getSyncRecord(proposalId)!;
+      this.db.saveSyncRecord({
+        ...current,
+        last_update: Math.floor(Date.now() / 1000),
+      });
+      logger.debug({ proposal_id: proposalId }, 'Refreshed existing thread');
+    } else {
+      // Create new thread (idempotent)
+      const threadId = await this.forum.createThread(proposal);
+      const now = Math.floor(Date.now() / 1000);
+      this.db.saveSyncRecord({
+        proposal_id: proposalId,
+        forum_thread_id: threadId,
+        synced_at: now,
+        last_update: now,
+      });
 
-    // Save sync record
-    const now = Math.floor(Date.now() / 1000);
-    this.db.saveSyncRecord({
-      proposal_id: proposalId,
-      forum_thread_id: threadId,
-      synced_at: now,
-      last_update: now,
-    });
-
-    logger.info(
-      { proposal_id: proposalId, thread_id: threadId },
-      'Successfully synced proposal to forum'
-    );
-  }
-
-  private async updateProposalThread(proposalId: number, threadId: string): Promise<void> {
-    const proposal = await this.fetchProposal(proposalId);
-
-    if (!proposal) {
-      return;
+      logger.info(
+        { proposal_id: proposalId, thread_id: threadId },
+        'Successfully synced proposal to forum'
+      );
     }
 
-    // Update thread with fresh tallies
-    await this.forum.updateThread(threadId, proposal);
-
-    // Update sync record
-    const existing = this.db.getSyncRecord(proposalId)!;
-    this.db.saveSyncRecord({
-      ...existing,
-      last_update: Math.floor(Date.now() / 1000),
-    });
-  }
-
-  private async fetchProposal(proposalId: number): Promise<Proposal | null> {
-    // Placeholder: actual implementation would invoke the contract
-    // const result = await this.rpc.simulateTransaction(...);
-    // return parseProposal(result);
-    
-    logger.debug({ proposal_id: proposalId }, 'Fetching proposal from contract');
-    return null;
+    return proposal;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -430,6 +619,14 @@ async function main() {
 
   if (!config.governanceContractId) {
     logger.error('Set GOVERNANCE_CONTRACT_ID or KORA_DEPLOYMENT_MANIFEST');
+    process.exit(1);
+  }
+
+  // Fail fast at startup on an invalid contract address.
+  try {
+    new Address(config.governanceContractId);
+  } catch {
+    logger.error({ governance_contract_id: config.governanceContractId }, 'GOVERNANCE_CONTRACT_ID is not a valid Stellar address');
     process.exit(1);
   }
 
@@ -463,4 +660,4 @@ if (require.main === module) {
   });
 }
 
-export { GovernanceMonitor, ForumClient, SyncDatabase };
+export { GovernanceMonitor, ForumClient, SyncDatabase, GovernanceErrorCode, GovernanceSyncError, decodeProposal };

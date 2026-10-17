@@ -64,7 +64,10 @@ FORUM_API_KEY=your_api_key_here
 # Polling interval (milliseconds)
 POLL_INTERVAL_MS=60000
 
-# Retry configuration
+# Max new proposals scanned per sync cycle (bounds the on-chain scan)
+MAX_NEW_PROPOSALS_PER_CYCLE=50
+
+# Retry configuration (applies to RPC reads and forum API calls)
 MAX_RETRIES=5
 RETRY_BACKOFF_MS=5000
 
@@ -144,10 +147,23 @@ Request format:
 
 ## Error Handling
 
+- **RPC read failure** (network, simulation error): Retried with bounded exponential
+  backoff (`MAX_RETRIES`, `RETRY_BACKOFF_MS`). Non-retryable contract errors are logged
+  and the proposal is skipped for that cycle.
+- **Proposal absent/cancelled on-chain** (`get_proposal` returns `None`): Logged as a
+  warning, no thread created or updated.
 - **Forum API 429/5xx**: Retry with exponential backoff
 - **Forum API 4xx**: Log error, skip proposal (non-retryable)
-- **Contract read failure**: Log warning, continue polling
 - **Database errors**: Fatal, service exits
+
+**Startup validation:** `GOVERNANCE_CONTRACT_ID` (or `contracts.governance_voting.address`
+from `KORA_DEPLOYMENT_MANIFEST`) must be set and be a valid Stellar address; otherwise
+the service fails fast at startup.
+
+**Scan bounds:** Each sync cycle refreshes tallies for already-synced proposals, then
+scans up to `MAX_NEW_PROPOSALS_PER_CYCLE` new proposal IDs sequentially. Proposal IDs are
+contiguous from 0, so the first on-chain `NotFound` marks the end of the known set and
+scanning resumes at the next cycle.
 
 ## Monitoring
 
