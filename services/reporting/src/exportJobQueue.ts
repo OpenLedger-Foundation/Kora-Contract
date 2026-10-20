@@ -145,6 +145,12 @@ export class ExportJobQueue {
     return rows.map(rowToJob);
   }
 
+  /** Delete a job record (used by the retention sweeper). */
+  deleteJob(jobId: string): void {
+    this.db.prepare(`DELETE FROM export_jobs WHERE job_id = ?`).run(jobId);
+    logger.info({ jobId }, "Export job deleted by retention sweeper");
+  }
+
   close(): void {
     this.db.close();
   }

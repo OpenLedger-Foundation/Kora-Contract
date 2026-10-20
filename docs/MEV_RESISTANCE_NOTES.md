@@ -289,6 +289,30 @@ All identified scenarios have been validated through:
 
 **Coverage:** Existing test suite provides >90% coverage of identified sensitive flows (verified via `cargo tarpaulin` in CI).
 
+## Appendix: Priority-Window Funding Fairness (#976)
+
+`contracts/tests/issue_priority_window_funding.rs` exercises funding with
+multiple accredited investors and explicit ledger-clock advances. The
+regression suite records the contract's actual policy:
+
+- The priority phase is inclusive: whitelisted investors may fund while
+  `ledger.timestamp() <= window_end`; non-whitelisted investors are rejected
+  at the exact boundary.
+- After `window_end`, access opens to any accredited investor. The listing's
+  independent `funding_deadline` still rejects all contributions after it.
+- A `window_end` of zero is already expired at current ledger timestamps and
+  does not restrict an accredited investor.
+- Allocations are first-successful-execution-first-served, not pro rata. The
+  ordered listing-investor view must match the order of successful contributions.
+- `PriorityWindow` grants access but does not itself reserve or distribute
+  allocation. `MaxInvestorShareBps`, when configured, bounds each investor's
+  contribution; the regression attempts a last-ledger contribution exceeding
+  that cap and verifies rejection without changing balances or allocation.
+
+These tests use a bounded number of investors and sequential ledger advances,
+complementing rather than duplicating the high-volume workload in
+`issue_680_load_stress_concurrent_funding.rs`.
+
 ---
 
 *Analysis completed: 2026-09-28*  

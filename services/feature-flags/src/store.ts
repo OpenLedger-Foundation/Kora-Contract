@@ -107,6 +107,10 @@ export class FlagStore {
     logger.info({ flag: name }, "Flag deleted");
   }
 
+  close(): void {
+    this.db.close();
+  }
+
   // ── Read ──────────────────────────────────────────────────────────────────
 
   getByName(name: FeatureName): FeatureFlag | null {

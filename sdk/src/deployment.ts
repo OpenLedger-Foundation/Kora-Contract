@@ -17,7 +17,10 @@ export interface DeploymentManifest {
  * Maps a `KoraAddresses` field name to the snake_case contract key used in
  * the deployment manifest's `contracts` map.
  */
-const MANIFEST_CONTRACT_KEYS: Record<keyof KoraAddresses, string> = {
+const REQUIRED_MANIFEST_CONTRACT_KEYS: Record<
+  "invoiceNft" | "marketplace" | "financingPool" | "treasury" | "riskRegistry" | "accessControl" | "priceOracle",
+  string
+> = {
   invoiceNft: "invoice_nft",
   marketplace: "marketplace",
   financingPool: "financing_pool",
@@ -25,6 +28,16 @@ const MANIFEST_CONTRACT_KEYS: Record<keyof KoraAddresses, string> = {
   riskRegistry: "risk_registry",
   accessControl: "access_control",
   priceOracle: "price_oracle",
+};
+
+const OPTIONAL_MANIFEST_CONTRACT_KEYS: Record<
+  "disputeEscrow" | "fractionalizer" | "secondaryMarket" | "governanceVoting",
+  string
+> = {
+  disputeEscrow: "dispute_escrow",
+  fractionalizer: "fractionalizer",
+  secondaryMarket: "secondary_market",
+  governanceVoting: "governance_voting",
 };
 
 /**
@@ -40,8 +53,8 @@ export function manifestToAddresses(manifest: DeploymentManifest): KoraAddresses
   const missing: string[] = [];
   const addresses = {} as KoraAddresses;
 
-  for (const field of Object.keys(MANIFEST_CONTRACT_KEYS) as (keyof KoraAddresses)[]) {
-    const manifestKey = MANIFEST_CONTRACT_KEYS[field];
+  for (const field of Object.keys(REQUIRED_MANIFEST_CONTRACT_KEYS) as (keyof typeof REQUIRED_MANIFEST_CONTRACT_KEYS)[]) {
+    const manifestKey = REQUIRED_MANIFEST_CONTRACT_KEYS[field];
     const entry = manifest.contracts?.[manifestKey];
     if (!entry || !entry.address) {
       missing.push(manifestKey);
@@ -55,6 +68,14 @@ export function manifestToAddresses(manifest: DeploymentManifest): KoraAddresses
       `Deployment manifest is missing required contract(s): ${missing.join(", ")}. ` +
         `Re-run scripts/deploy.sh or update the manifest before constructing KoraAddresses.`
     );
+  }
+
+  for (const field of Object.keys(OPTIONAL_MANIFEST_CONTRACT_KEYS) as (keyof typeof OPTIONAL_MANIFEST_CONTRACT_KEYS)[]) {
+    const manifestKey = OPTIONAL_MANIFEST_CONTRACT_KEYS[field];
+    const entry = manifest.contracts?.[manifestKey];
+    if (entry && entry.address) {
+      addresses[field] = entry.address;
+    }
   }
 
   return addresses;

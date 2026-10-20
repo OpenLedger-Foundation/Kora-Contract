@@ -170,6 +170,10 @@ export class BaseClient {
     return nativeToScVal(b, { type: "bytes" });
   }
 
+  protected bool(b: boolean): xdr.ScVal {
+    return xdr.ScVal.scvBool(b);
+  }
+
   protected native(val: xdr.ScVal): unknown {
     return scValToNative(val);
   }

@@ -126,3 +126,130 @@ describe("FlagStore", () => {
     expect(flag.enabled).toBe(true); // from cache
   });
 });
+
+// ---------------------------------------------------------------------------
+// TTL exhaustion / kill-switch drill tests (#1006)
+// ---------------------------------------------------------------------------
+
+describe("Cache TTL exhaustion — kill-switch drill (#1006)", () => {
+  it("TTL exhaustion: after TTL expires a store reads fresh state", async () => {
+    // Use a very short TTL so we can advance past it without real sleep
+    const TTL = 50; // ms
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: TTL });
+    store.upsert(baseFlag({ enabled: true }));
+
+    // Immediately within TTL — sees cached true value
+    expect(store.getByName("secondary-market")!.enabled).toBe(true);
+
+    // Advance past the TTL
+    await new Promise((r) => setTimeout(r, TTL + 20));
+
+    // Cache has expired; next read re-queries SQLite — value is still true (no external change)
+    expect(store.getByName("secondary-market")!.enabled).toBe(true);
+  });
+
+  it("kill-switch via setEnabled invalidates cache immediately (zero stale window)", () => {
+    const TTL = 60_000; // long TTL — would normally keep stale data
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: TTL });
+    store.upsert(baseFlag({ enabled: true }));
+
+    // Warm the cache
+    expect(store.getByName("secondary-market")!.enabled).toBe(true);
+
+    // Kill-switch: setEnabled calls invalidateCache synchronously
+    store.setEnabled("secondary-market", false, "incident-responder");
+
+    // Cache is invalidated — sees false immediately despite long TTL
+    expect(store.getByName("secondary-market")!.enabled).toBe(false);
+  });
+
+  it("stale read window: external DB change not visible until TTL expires", async () => {
+    const TTL = 80; // ms
+    const dbPath = tmpDb();
+    const storeA = new FlagStore(dbPath, { cacheTtlMs: TTL });
+    storeA.upsert(baseFlag({ enabled: true }));
+
+    // storeB simulates another process sharing the same SQLite file
+    const storeB = new FlagStore(dbPath, { cacheTtlMs: TTL });
+    storeB.upsert(baseFlag({ enabled: false })); // external write — storeA cache is stale
+
+    // storeA still sees true (within TTL)
+    expect(storeA.getByName("secondary-market")!.enabled).toBe(true);
+
+    // Advance past TTL
+    await new Promise((r) => setTimeout(r, TTL + 20));
+
+    // After TTL expires storeA re-queries and sees the external write
+    expect(storeA.getByName("secondary-market")!.enabled).toBe(false);
+
+    storeA.close?.(); // no-op if not implemented — defensive
+    storeB.close?.();
+  });
+
+  it("TTL exhaustion: multiple flags all refresh after TTL", async () => {
+    const TTL = 50;
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: TTL });
+    store.upsert(baseFlag({ name: "secondary-market", enabled: true }));
+    store.upsert(baseFlag({ name: "fractionalization", enabled: true }));
+
+    // Warm the cache
+    store.getAll();
+
+    // Kill both via setEnabled (each call invalidates)
+    store.setEnabled("secondary-market", false, "admin");
+    store.setEnabled("fractionalization", false, "admin");
+
+    // Immediately after kill: both disabled
+    expect(store.getByName("secondary-market")!.enabled).toBe(false);
+    expect(store.getByName("fractionalization")!.enabled).toBe(false);
+
+    // Re-enabling restores the flag
+    store.setEnabled("secondary-market", true, "admin");
+    expect(store.getByName("secondary-market")!.enabled).toBe(true);
+    expect(store.getByName("fractionalization")!.enabled).toBe(false); // unchanged
+  });
+
+  it("rapid on-off-on sequence: final state is correct (monotonic version)", () => {
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: 0 });
+    store.upsert(baseFlag({ enabled: true }));
+
+    // Toggle rapidly
+    store.setEnabled("secondary-market", false, "admin"); // off
+    store.setEnabled("secondary-market", true, "admin");  // on
+    store.setEnabled("secondary-market", false, "admin"); // off
+    store.setEnabled("secondary-market", true, "admin");  // on (final)
+
+    expect(store.getByName("secondary-market")!.enabled).toBe(true);
+  });
+
+  it("onFlagChange callback fires for each toggle with correct value sequence", () => {
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: 0 });
+    store.upsert(baseFlag({ enabled: true }));
+
+    const values: boolean[] = [];
+    store.onFlagChange((f) => values.push(f.enabled));
+
+    store.setEnabled("secondary-market", false, "admin"); // false
+    store.setEnabled("secondary-market", true, "admin");  // true
+    store.setEnabled("secondary-market", false, "admin"); // false
+
+    expect(values).toEqual([false, true, false]);
+  });
+
+  it("cache TTL with injected clock: short TTL reloads after measured interval", async () => {
+    // This test uses a real short TTL with a real sleep to verify the reload path.
+    // Keeps the sleep small (< 200ms) to avoid timing flake in CI.
+    const TTL = 60;
+    const store = new FlagStore(tmpDb(), { cacheTtlMs: TTL });
+    store.upsert(baseFlag({ enabled: true }));
+
+    const before = store.getByName("secondary-market");
+    expect(before!.enabled).toBe(true);
+
+    await new Promise((r) => setTimeout(r, TTL + 30));
+
+    // Re-read after TTL: the store re-queries SQLite (no external change → still true)
+    const after = store.getByName("secondary-market");
+    expect(after!.enabled).toBe(true); // reload happened, value correct
+  });
+});

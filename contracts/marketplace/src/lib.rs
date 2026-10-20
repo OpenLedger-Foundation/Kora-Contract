@@ -12,6 +12,9 @@ use kora_shared::{
     },
 };
 use kora_parameter_registry::ParameterRegistryContractClient;
+use kora_debtor_attestation::{
+    DebtorAttestationContractClient, AttestationStatus,
+};
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 // ~30 days in ledgers at ~5 s/ledger
@@ -93,9 +96,11 @@ pub enum DataKey {
     DependencyUpdateProposal(u32),
     /// Referrer split fraction (bps, 0–10 000). (#446)
     ReferrerSplitBps,
+    /// Address of the deployed debtor_attestation contract (#960).
+    DebtorAttestation,
 }
 
-/// The five cross-contract dependency addresses marketplace relies on. (#445)
+/// Cross-contract dependency addresses marketplace relies on. (#445)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DependencyField {
@@ -105,6 +110,8 @@ pub enum DependencyField {
     AccessControl,
     RiskRegistry,
     ParameterRegistry,
+    /// The debtor attestation contract (#960).
+    DebtorAttestation,
 }
 
 // ── Multisig-gated admin actions ─────────────────────────────────────────────
@@ -602,6 +609,17 @@ impl MarketplaceContract {
         // === #743: Circuit Breaker gate ===
         Self::require_circuit_breaker_not_tripped(&env, &invoice.debtor_hash, &invoice.risk_tier)?;
 
+        // === #960: Debtor Attestation gate ===
+        // For high-risk (C-tier) invoices, a valid, non-expired debtor attestation
+        // that binds to the invoice face value is required before listing.
+        // Lower-risk tiers proceed without attestation (optional).
+        Self::require_debtor_attestation_if_needed(
+            &env,
+            invoice_id,
+            face_value,
+            &invoice.risk_tier,
+        )?;
+
         // Enforce the protocol-wide per-token exposure cap (#447) before mutating
         // NFT/listing state, so a rejected listing leaves no partial side effects.
         Self::add_token_exposure(&env, &token, asking_price)?;
@@ -665,6 +683,41 @@ impl MarketplaceContract {
             .instance()
             .get(&DataKey::TokenExposureCurrent(token))
             .unwrap_or(0)
+    }
+
+    // ── Debtor Attestation (#960) ─────────────────────────────────────────────
+
+    /// Set (or update) the address of the deployed `debtor_attestation` contract.
+    ///
+    /// Admin only.  The attestation contract is consulted by `list_invoice` to
+    /// enforce that high-risk invoices carry a valid debtor confirmation before
+    /// transitioning to the `Listed` state.
+    ///
+    /// Passing `None` clears the attestation requirement (opt-out for staging
+    /// environments), effectively making attestation optional for all tiers.
+    pub fn set_debtor_attestation(
+        env: Env,
+        admin: Address,
+        attestation: Option<Address>,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        match attestation {
+            Some(addr) => {
+                env.storage().instance().set(&DataKey::DebtorAttestation, &addr);
+                events::debtor_attestation_configured(&env, &admin, Some(&addr));
+            }
+            None => {
+                env.storage().instance().remove(&DataKey::DebtorAttestation);
+                events::debtor_attestation_configured(&env, &admin, None);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the configured debtor_attestation contract address, if any.
+    pub fn get_debtor_attestation(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::DebtorAttestation)
     }
 
     /// Investor funds a share of an invoice.
@@ -936,6 +989,20 @@ impl MarketplaceContract {
         let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
         let prev_fee: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
         let fee_after = safe_add(prev_fee, fee)?;
+
+        // Track investor in ListingInvestors if this is their first contribution
+        if prev_contrib == 0 {
+            let investors_key = DataKey::ListingInvestors(invoice_id);
+            let mut investors: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&investors_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            investors.push_back(investor.clone());
+            env.storage().persistent().set(&investors_key, &investors);
+            Self::bump_persistent(env, &investors_key);
+        }
+
         Self::add_debtor_exposure(env, &invoice.debtor_hash, invoice_id, listing_amount)?;
 
         let pay_token_client = token::Client::new(env, &pay_token);
@@ -991,8 +1058,10 @@ impl MarketplaceContract {
     }
 
     /// Cancel a listing. Caller must be seller or admin.
-    /// Works for listings with no investor funding (funded_amount == 0).
-    /// For partially-funded listings prefer `request_cancellation` + `admin_confirm_cancellation`.
+    /// If the listing has no investor funding (funded_amount == 0), cancels immediately.
+    /// If the listing has partial investor funding, refunds all investors pro-rata
+    /// by transferring net contributions from the financing pool and clawing back
+    /// fee contributions from the treasury, then decrements exposure counters.
     pub fn cancel_listing(env: Env, caller: Address, invoice_id: u64) -> Result<(), KoraError> {
         caller.require_auth();
 
@@ -1011,6 +1080,89 @@ impl MarketplaceContract {
             return Err(KoraError::Unauthorized);
         }
 
+        // If listing has partial funding, refund all investors before cancelling
+        if listing.funded_amount > 0 {
+            // Get all investors who contributed to this listing
+            let investors: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ListingInvestors(invoice_id))
+                .unwrap_or_else(|| Vec::new(&env));
+
+            let token_client = token::Client::new(&env, &listing.token);
+            let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
+            let invoice = nft_client.get_invoice(&invoice_id);
+
+            // Refund each investor
+            for investor in investors.iter() {
+                let contrib_key = DataKey::Contribution(invoice_id, investor.clone());
+                let net_contributed: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&contrib_key)
+                    .unwrap_or(0);
+
+                if net_contributed <= 0 {
+                    continue;
+                }
+
+                let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
+                let fee_contributed: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
+
+                // CEI: mark refund as claimed before external calls to prevent reentrancy
+                let refund_key = DataKey::RefundClaimed(invoice_id, investor.clone());
+                env.storage().persistent().set(&refund_key, &true);
+
+                // Remove debtor exposure for the gross amount (net + fee)
+                let gross_contributed = safe_add(net_contributed, fee_contributed)?;
+                Self::remove_debtor_exposure(
+                    &env,
+                    &invoice.debtor_hash,
+                    invoice_id,
+                    gross_contributed,
+                )?;
+
+                // Decrement token exposure by the gross refunded amount
+                let exp_key = DataKey::TokenExposureCurrent(listing.token.clone());
+                let exp_current: i128 = env.storage().instance().get(&exp_key).unwrap_or(0);
+                let exp_new = safe_sub(exp_current, gross_contributed)?;
+                env.storage().instance().set(&exp_key, &exp_new);
+
+                // Transfer net contribution back from financing pool to investor
+                token_client.transfer(&config.financing_pool, &investor, &net_contributed);
+
+                // Claw back the investor's proportional fee share from the treasury
+                if fee_contributed > 0 {
+                    let treasury_client =
+                        kora_treasury::TreasuryContractClient::new(&env, &config.treasury);
+                    treasury_client.refund_fee(
+                        &env.current_contract_address(),
+                        &listing.token,
+                        &fee_contributed,
+                        &investor,
+                    );
+                    env.storage().persistent().remove(&fee_key);
+                    events::fee_reversed(
+                        &env,
+                        &env.current_contract_address(),
+                        invoice_id,
+                        &investor,
+                        fee_contributed,
+                        &listing.token,
+                    );
+                }
+
+                // Clear contribution record
+                env.storage().persistent().remove(&contrib_key);
+
+                events::refund_claimed(&env, invoice_id, &investor, net_contributed);
+            }
+
+            // Clear the investors list
+            env.storage().persistent().remove(&DataKey::ListingInvestors(invoice_id));
+        }
+
+        // Mark listing as inactive
         listing.is_active = false;
         // Listing is no longer outstanding marketplace exposure (#447).
         Self::remove_token_exposure(&env, &listing.token, listing.asking_price);
@@ -1514,6 +1666,55 @@ impl MarketplaceContract {
         Ok(())
     }
 
+    /// Enforce the debtor attestation gate (#960).
+    ///
+    /// Consults the configured `debtor_attestation` contract when it is set.
+    /// - **C-tier (high-risk) invoices**: attestation is **required**.  The
+    ///   call is rejected with `DebtorNotAttested` when no valid, non-expired
+    ///   confirmation exists, and with `AttestationAmountMismatch` when the
+    ///   confirmed amount does not match the invoice face value.
+    /// - **All other tiers**: attestation is optional; the gate is a no-op.
+    /// - **No attestation contract configured**: the gate is bypassed entirely,
+    ///   allowing staging environments to operate without the contract.
+    fn require_debtor_attestation_if_needed(
+        env: &Env,
+        invoice_id: u64,
+        face_value: i128,
+        tier: &RiskTier,
+    ) -> Result<(), KoraError> {
+        // Only enforce for the highest-risk tier.
+        if *tier != RiskTier::C {
+            return Ok(());
+        }
+        // If no attestation contract is wired, skip (opt-in per deployment).
+        let attestation_addr: Address = match env
+            .storage()
+            .instance()
+            .get(&DataKey::DebtorAttestation)
+        {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+        let client = DebtorAttestationContractClient::new(env, &attestation_addr);
+        // is_confirmed verifies status == Confirmed, amount matches, and not expired.
+        let confirmed = client.is_confirmed(&invoice_id, &face_value);
+        if !confirmed {
+            // Distinguish: does any attestation record exist at all?
+            let status = client.attestation_status(&invoice_id);
+            match status {
+                AttestationStatus::Confirmed => {
+                    // Confirmed but amount mismatch (is_confirmed returned false for that reason).
+                    return Err(KoraError::AttestationAmountMismatch);
+                }
+                _ => {
+                    return Err(KoraError::DebtorNotAttested);
+                }
+            }
+        }
+        events::debtor_attestation_verified(env, invoice_id);
+        Ok(())
+    }
+
     /// Enforce the tiered priority-allocation window for `listing_id` (#576).
     /// If a window is active (ledger time <= window_end) the caller must be on
     /// its whitelist; once the window has expired funding is open to everyone.
@@ -2003,6 +2204,16 @@ impl MarketplaceContract {
             DependencyField::ParameterRegistry => {
                 core::mem::replace(&mut config.parameter_registry, new_address.clone())
             }
+            // DebtorAttestation is stored in its own DataKey, not in MarketplaceConfig.
+            DependencyField::DebtorAttestation => {
+                let old: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::DebtorAttestation)
+                    .ok_or(KoraError::NotInitialized)?;
+                env.storage().instance().set(&DataKey::DebtorAttestation, &new_address);
+                old
+            }
         };
         env.storage().instance().set(&DataKey::Config, &config);
 
@@ -2153,6 +2364,7 @@ impl MarketplaceContract {
             DependencyField::AccessControl => 3,
             DependencyField::RiskRegistry => 4,
             DependencyField::ParameterRegistry => 5,
+            DependencyField::DebtorAttestation => 6,
         }
     }
 

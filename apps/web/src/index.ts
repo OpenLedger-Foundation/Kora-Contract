@@ -25,6 +25,7 @@ export * from './context/LocaleContext';
 export * from './context/CurrencyContext';
 export * from './context/NotificationContext';
 export * from './context/SimulationContext';
+export * from './context/FeatureFlagContext';
 
 // Components
 export * from './components/layout/Header';
@@ -51,6 +52,7 @@ export * from './components/flows/RepaymentFlow';
 export * from './components/risk/RiskScoreVisualization';
 export * from './components/admin/AdminConsole';
 export * from './components/common/DataTable';
+export * from './components/common/KillSwitchGate';
 export * from './components/feedback/CommunityFeedbackLoop';
 
 // Wallet connection

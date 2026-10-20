@@ -60,6 +60,18 @@ case "$DEPLOY_DISPUTE_ESCROW" in
   *) echo "ERROR: DEPLOY_DISPUTE_ESCROW must be true or false." >&2; exit 1 ;;
 esac
 
+# ── Vesting configuration ──────────────────────────────────────────────────────
+# VESTING_ADMIN: Admin address for vesting contract (default: deployer/admin)
+VESTING_ADMIN="${VESTING_ADMIN:-$ADMIN}"
+# VESTING_TOKEN: Token contract address for vesting (required, e.g., USDC token contract)
+VESTING_TOKEN="${VESTING_TOKEN:-}"
+# VESTING_GRANTS: JSON array of grant configurations, e.g.:
+# '[{"beneficiary":"G...","total_amount":"10000000000","start_time":1704067200,"cliff_duration":15778800,"vesting_duration":31557600}]'
+VESTING_GRANTS="${VESTING_GRANTS:-}"
+
+# ── Governance voting configuration ────────────────────────────────────────────
+GOVERNANCE_VOTING_ADMIN="${GOVERNANCE_VOTING_ADMIN:-$ADMIN}"
+
 # ── Network config ────────────────────────────────────────────────────────────
 
 case "$NETWORK" in
@@ -165,6 +177,10 @@ echo "  risk_registry  : $RISK_REGISTRY_ID"
 TREASURY_ID=$(deploy_contract "treasury" "$WASM_DIR/kora_treasury.wasm")
 echo "  treasury       : $TREASURY_ID"
 
+# Deploy vesting contract after treasury
+VESTING_ID=$(deploy_contract "vesting" "$WASM_DIR/kora_vesting.wasm")
+echo "  vesting        : $VESTING_ID"
+
 DISPUTE_RESOLUTION_ID=$(deploy_contract "dispute_resolution" "$WASM_DIR/kora_dispute_resolution.wasm")
 echo "  dispute_resolution: $DISPUTE_RESOLUTION_ID"
 
@@ -182,6 +198,9 @@ echo "  marketplace    : $MARKETPLACE_ID"
 
 PRICE_ORACLE_ID=$(deploy_contract "price_oracle" "$WASM_DIR/kora_price_oracle.wasm")
 echo "  price_oracle   : $PRICE_ORACLE_ID"
+
+GOVERNANCE_VOTING_ID=$(deploy_contract "governance_voting" "$WASM_DIR/kora_governance_voting.wasm")
+echo "  governance_voting: $GOVERNANCE_VOTING_ID"
 
 if [ "$DEPLOY_DISPUTE_ESCROW" = "true" ]; then
   DISPUTE_ESCROW_ID=$(deploy_contract "dispute_escrow" "$WASM_DIR/kora_dispute_escrow.wasm")
@@ -201,6 +220,104 @@ invoke "$TREASURY_ID" initialize \
   --admin "$ADMIN" \
   --fee_bps "$TREASURY_FEE_BPS"
 echo "  treasury initialized (fee: ${TREASURY_FEE_BPS} bps)"
+
+# Initialize vesting contract
+if [ -z "$VESTING_TOKEN" ]; then
+  echo "ERROR: VESTING_TOKEN environment variable must be set (token contract address for vesting)." >&2
+  exit 1
+fi
+invoke "$VESTING_ID" initialize \
+  --admin "$VESTING_ADMIN" \
+  --token "$VESTING_TOKEN"
+echo "  vesting initialized (admin: $VESTING_ADMIN, token: $VESTING_TOKEN)"
+
+# Create vesting grants if configured
+if [ -n "$VESTING_GRANTS" ]; then
+  echo "  Creating vesting grants..."
+  # Parse JSON grants and create each one
+  echo "$VESTING_GRANTS" | jq -c '.[]' | while IFS= read -r grant; do
+    beneficiary=$(echo "$grant" | jq -r '.beneficiary')
+    total_amount=$(echo "$grant" | jq -r '.total_amount')
+    start_time=$(echo "$grant" | jq -r '.start_time')
+    cliff_duration=$(echo "$grant" | jq -r '.cliff_duration')
+    vesting_duration=$(echo "$grant" | jq -r '.vesting_duration')
+    
+    invoke "$VESTING_ID" create_grant \
+      --admin "$VESTING_ADMIN" \
+      --beneficiary "$beneficiary" \
+      --total_amount "$total_amount" \
+      --start_time "$start_time" \
+      --cliff_duration "$cliff_duration" \
+      --vesting_duration "$vesting_duration"
+    echo "    Grant created for $beneficiary: $total_amount tokens"
+  done
+fi
+
+# Transfer token custody to vesting contract
+if [ -n "$VESTING_GRANTS" ]; then
+  echo "  Transferring token custody to vesting contract..."
+  # Calculate total allocation from grants
+  TOTAL_ALLOCATION=$(echo "$VESTING_GRANTS" | jq '[.[] | .total_amount | tonumber] | add')
+  if [ -z "$TOTAL_ALLOCATION" ] || [ "$TOTAL_ALLOCATION" = "null" ] || [ "$TOTAL_ALLOCATION" = "0" ]; then
+    echo "ERROR: Total vesting allocation is zero or invalid." >&2
+    exit 1
+  fi
+  echo "    Total allocation: $TOTAL_ALLOCATION tokens"
+  
+  # Determine source account for transfer (default to deployer/admin)
+  VESTING_SOURCE="${VESTING_SOURCE:-$SOURCE}"
+  
+  # Verify source has sufficient balance
+  SOURCE_BALANCE=$(stellar contract invoke \
+    --id "$VESTING_TOKEN" \
+    --source "$SOURCE" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    -- balance --id "$VESTING_SOURCE" 2>/dev/null || echo "0")
+  
+  if [ "$SOURCE_BALANCE" -lt "$TOTAL_ALLOCATION" ]; then
+    echo "ERROR: Insufficient balance in source account ($VESTING_SOURCE)." >&2
+    echo "       Required: $TOTAL_ALLOCATION, Available: $SOURCE_BALANCE" >&2
+    exit 1
+  fi
+  
+  # Verify token decimals match expected (vesting contract uses raw amounts)
+  TOKEN_DECIMALS=$(stellar contract invoke \
+    --id "$VESTING_TOKEN" \
+    --source "$SOURCE" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    -- decimals 2>/dev/null || echo "0")
+  
+  if [ "$TOKEN_DECIMALS" = "0" ]; then
+    echo "WARNING: Could not verify token decimals. Proceeding with transfer." >&2
+  else
+    echo "    Token decimals: $TOKEN_DECIMALS"
+  fi
+  
+  # Transfer tokens to vesting contract
+  echo "    Transferring $TOTAL_ALLOCATION from $VESTING_SOURCE to $VESTING_ID..."
+  invoke "$VESTING_TOKEN" "transfer" \
+    --from "$VESTING_SOURCE" \
+    --to "$VESTING_ID" \
+    --amount "$TOTAL_ALLOCATION"
+  echo "    Token transfer complete."
+  
+  # Verify on-chain balance
+  VESTING_BALANCE=$(stellar contract invoke \
+    --id "$VESTING_TOKEN" \
+    --source "$SOURCE" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
+    -- balance --id "$VESTING_ID" 2>/dev/null || echo "0")
+  
+  if [ "$VESTING_BALANCE" -lt "$TOTAL_ALLOCATION" ]; then
+    echo "ERROR: Vesting contract balance mismatch after transfer." >&2
+    echo "       Expected at least: $TOTAL_ALLOCATION, Actual: $VESTING_BALANCE" >&2
+    exit 1
+  fi
+  echo "    Verified vesting contract balance: $VESTING_BALANCE"
+fi
 
 invoke "$DISPUTE_RESOLUTION_ID" initialize \
   --admin "$ADMIN" \
@@ -251,6 +368,18 @@ invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
   --value "$MARKETPLACE_REFERRER_BPS"
 echo "  parameter_registry seeded with initial fee values"
 
+# Initialize governance_voting contract
+invoke "$GOVERNANCE_VOTING_ID" initialize \
+  --admin "$GOVERNANCE_VOTING_ADMIN" \
+  --access_control "$ACCESS_CONTROL_ID"
+echo "  governance_voting initialized (admin: $GOVERNANCE_VOTING_ADMIN)"
+
+# Set vesting contract in governance_voting for voting weight computation
+invoke "$GOVERNANCE_VOTING_ID" set_vesting \
+  --admin "$GOVERNANCE_VOTING_ADMIN" \
+  --vesting_address "$VESTING_ID"
+echo "  governance_voting vesting pointer set to $VESTING_ID"
+
 if [ "$DEPLOY_DISPUTE_ESCROW" = "true" ]; then
   invoke "$DISPUTE_ESCROW_ID" initialize --admin "$ADMIN" --pool "$POOL_ID"
   echo "  dispute_escrow initialized; pool escrow hooks must be wired before use"
@@ -288,6 +417,7 @@ POOL_HASH=$(sha256sum "$WASM_DIR/kora_financing_pool.wasm" | awk '{print $1}')
 MARKETPLACE_HASH=$(sha256sum "$WASM_DIR/kora_marketplace.wasm" | awk '{print $1}')
 RISK_HASH=$(sha256sum "$WASM_DIR/kora_risk_registry.wasm" | awk '{print $1}')
 PRICE_ORACLE_HASH=$(sha256sum "$WASM_DIR/kora_price_oracle.wasm" | awk '{print $1}')
+VESTING_HASH=$(sha256sum "$WASM_DIR/kora_vesting.wasm" | awk '{print $1}')
 GOVERNANCE_VOTING_HASH=$(sha256sum "$WASM_DIR/kora_governance_voting.wasm" | awk '{print $1}')
 DEBTOR_ATTESTATION_HASH=$(sha256sum "$WASM_DIR/kora_debtor_attestation.wasm" | awk '{print $1}')
 ESCROW_MANIFEST_ENTRY=""
@@ -345,6 +475,10 @@ cat > "$TEMP_MANIFEST" <<EOF
     "price_oracle": {
       "address": "$PRICE_ORACLE_ID",
       "wasm_hash": "$PRICE_ORACLE_HASH"
+    },
+    "vesting": {
+      "address": "$VESTING_ID",
+      "wasm_hash": "$VESTING_HASH"
     },
     "governance_voting": {
       "address": "$GOVERNANCE_VOTING_ID",

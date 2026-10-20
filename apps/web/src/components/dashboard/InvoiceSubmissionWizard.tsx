@@ -7,6 +7,9 @@
  * - #1002: SHA-256 metadata_hash commitment surfaced on the review step; the
  *   mint button is blocked whenever the computed hash differs from the hash
  *   the user confirmed.
+ * - #1005: feature-flag kill-switch wraps the entire wizard; when the
+ *   'fractionalization' flag is off the wizard is replaced by the graceful
+ *   disable message without requiring a redeploy.
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
@@ -23,6 +26,7 @@ import {
   MetadataHashUnsupportedError,
   PinProgressMessage,
 } from '../../services/invoiceWizardService';
+import { KillSwitchGate } from '../common/KillSwitchGate';
 
 const ACCEPTED_DOCUMENT_TYPES = '.pdf,.json,.png,.jpg,.jpeg';
 
@@ -287,6 +291,7 @@ export const InvoiceSubmissionWizard: React.FC = () => {
   const roundedProgress = Math.min(100, Math.round(document.progress ?? 0));
 
   return (
+    <KillSwitchGate flagName="fractionalization">
     <div className="bg-white rounded-xl shadow-lg p-6 max-w-2xl mx-auto border border-gray-100">
       <h2 className="text-2xl font-bold text-gray-900 mb-4">SME Invoice Submission Wizard</h2>
 
@@ -546,5 +551,6 @@ export const InvoiceSubmissionWizard: React.FC = () => {
         </div>
       )}
     </div>
+    </KillSwitchGate>
   );
 };

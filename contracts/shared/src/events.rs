@@ -276,6 +276,32 @@ pub fn listing_expired(env: &Env, invoice_id: u64, seller: &Address) {
     );
 }
 
+// ── Debtor Attestation Events (#960) ─────────────────────────────────────────
+
+/// Emitted by marketplace when `list_invoice` successfully passes the debtor
+/// attestation gate for a high-risk (C-tier) invoice.
+///
+/// Schema: (invoice_id, timestamp)
+pub fn debtor_attestation_verified(env: &Env, invoice_id: u64) {
+    emit(
+        env,
+        symbol_short!("DA_VERI"),
+        (invoice_id, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted by marketplace when admin sets or clears the debtor_attestation
+/// contract address via `set_debtor_attestation`.
+///
+/// Schema: (actor=admin, attestation_address_or_none, timestamp)
+pub fn debtor_attestation_configured(env: &Env, admin: &Address, addr: Option<&Address>) {
+    emit(
+        env,
+        symbol_short!("DA_CFG"),
+        (admin.clone(), addr.cloned(), env.ledger().timestamp()),
+    );
+}
+
 // ── Fee Events ────────────────────────────────────────────────────────────────
 
 /// Schema: (actor=investor, invoice_id, fee_amount, token, timestamp)

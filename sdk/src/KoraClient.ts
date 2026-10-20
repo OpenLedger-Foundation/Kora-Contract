@@ -1,11 +1,15 @@
 import { NetworkConfig, TESTNET } from "./base";
 import {
   AccessControlClient,
+  DisputeEscrowClient,
   FinancingPoolClient,
+  FractionalizerClient,
+  GovernanceVotingClient,
   InvoiceNftClient,
   MarketplaceClient,
   PriceOracleClient,
   RiskRegistryClient,
+  SecondaryMarketClient,
   TreasuryClient,
 } from "./clients";
 
@@ -17,10 +21,14 @@ export interface KoraAddresses {
   riskRegistry: string;
   accessControl: string;
   priceOracle: string;
+  disputeEscrow?: string;
+  fractionalizer?: string;
+  secondaryMarket?: string;
+  governanceVoting?: string;
 }
 
 /**
- * Unified facade over all 7 Kora Protocol contracts.
+ * Unified facade over Kora Protocol contracts.
  *
  * @example
  * ```ts
@@ -41,6 +49,10 @@ export class KoraClient {
   readonly riskRegistry: RiskRegistryClient;
   readonly accessControl: AccessControlClient;
   readonly priceOracle: PriceOracleClient;
+  readonly disputeEscrow?: DisputeEscrowClient;
+  readonly fractionalizer?: FractionalizerClient;
+  readonly secondaryMarket?: SecondaryMarketClient;
+  readonly governanceVoting?: GovernanceVotingClient;
 
   constructor(addresses: KoraAddresses, network: NetworkConfig = TESTNET) {
     this.invoiceNft    = new InvoiceNftClient(addresses.invoiceNft, network);
@@ -50,6 +62,18 @@ export class KoraClient {
     this.riskRegistry  = new RiskRegistryClient(addresses.riskRegistry, network);
     this.accessControl = new AccessControlClient(addresses.accessControl, network);
     this.priceOracle   = new PriceOracleClient(addresses.priceOracle, network);
+    if (addresses.disputeEscrow) {
+      this.disputeEscrow = new DisputeEscrowClient(addresses.disputeEscrow, network);
+    }
+    if (addresses.fractionalizer) {
+      this.fractionalizer = new FractionalizerClient(addresses.fractionalizer, network);
+    }
+    if (addresses.secondaryMarket) {
+      this.secondaryMarket = new SecondaryMarketClient(addresses.secondaryMarket, network);
+    }
+    if (addresses.governanceVoting) {
+      this.governanceVoting = new GovernanceVotingClient(addresses.governanceVoting, network);
+    }
   }
 
   async batchGetInvoices(invoiceIds: bigint[]) {

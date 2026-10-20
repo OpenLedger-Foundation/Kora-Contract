@@ -50,6 +50,30 @@ Every flag enable/disable/update is sent to the `audit-log` service. Audit failu
 | `PUT` | `/admin/flags/:name/disable` | Kill-switch: instantly disable for all users |
 | `POST` | `/admin/flags` | Create or update a flag definition |
 
+## Protocol Flow Kill Switches (#1005)
+
+The following flags gate protocol flows in `apps/web`. Disabling a flag hides the primary CTA and shows a graceful INCIDENT_RESPONSE-linked message without requiring a web redeploy.
+
+| Flag name | Gated flow |
+|---|---|
+| `secondary-market` | `FundingFlow`, `MarketplaceBrowsingFlow` |
+| `partial-repayment` | `RepaymentFlow` |
+| `fractionalization` | `InvoiceSubmissionFlow`, `InvoiceSubmissionWizard` |
+| `multi-asset-pool` | `MultiStepFundingFlow` |
+
+### Web client cache and SSE refresh interval (#1005)
+
+The `FeatureFlagProvider` in `apps/web` fetches the snapshot once at session start and refreshes it every **30 seconds** in the background. Kill-switch events delivered via SSE apply **immediately** (no polling delay). The maximum stale window is therefore bounded by the SSE reconnect delay (5 seconds on error) rather than the refresh interval.
+
+### Maximum stale window SLA (#1006)
+
+| Scenario | Max stale window |
+|---|---|
+| SSE connected | < 1 second (event pushed synchronously on `store.setEnabled`) |
+| SSE reconnecting (after error) | ≤ 5 seconds (SSE_RECONNECT_DELAY_MS) |
+| Snapshot polling only (SSE disabled) | ≤ 30 seconds (SNAPSHOT_REFRESH_INTERVAL_MS) |
+| Feature-flags service `cacheTtlMs` | 5 seconds (default) — irrelevant for in-process writes |
+
 ## Usage
 
 ```typescript

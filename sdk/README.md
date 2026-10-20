@@ -209,18 +209,13 @@ await PublicApiClient.revokeKey(key); // effective immediately
 
 > Out of scope: billing/monetization of API access.
 
-## Governance contract bindings
+## Extended Contract Clients
 
-`KoraClient.accessControl` exposes the existing access-control parameter
-governance methods. It does not expose the separate governance, voting, or
-parameter-registry contracts. Their generated Rust clients and deployment
-inputs are documented in [governance](../contracts/governance/README.md),
-[voting](../contracts/governance_voting/README.md), and
-[parameter registry](../contracts/parameter_registry/README.md).
+In addition to the core 7 contracts, the SDK provides typed clients for extended protocol contracts:
 
-`tests/governance.test.ts` is currently a Vitest sketch outside the SDK's
-Jest `testMatch`; it neither exercises these three contracts nor runs in
-the configured SDK test command. Their actual unit suites run through the
-Rust CI package matrix. Adding a TypeScript binding and executable SDK
-integration suite remains separate work; this onboarding change does not
-claim that sketch as contract coverage.
+- **`DisputeEscrowClient`** (`contracts/dispute_escrow`): Manage invoice repayment disputes, adjudications, and timelocks.
+- **`FractionalizerClient`** (`contracts/fractionalizer`): Wrap financing-pool positions into fungible fixed-supply shares, transfer shares, settle pool payouts, and redeem shares.
+- **`SecondaryMarketClient`** (`contracts/secondary_market`): List investor positions for secondary sale, purchase listed positions, and manage secondary trading fees.
+- **`GovernanceVotingClient`** (`contracts/governance_voting`): Create and vote on governance proposals (Standard and Quadratic voting), manage vote delegation, configure vesting weight sources, and execute proposals.
+
+These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.

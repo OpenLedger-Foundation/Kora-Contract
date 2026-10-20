@@ -152,6 +152,12 @@ pub enum KoraError {
 
     // Parameter/migration validation
     InvalidParameterValue = 165,
+
+    // debtor attestation gate (#960)
+    /// Listing blocked: the debtor has not provided a valid, non-expired attestation.
+    DebtorNotAttested = 166,
+    /// Listing blocked: the attested amount does not match the invoice face value.
+    AttestationAmountMismatch = 167,
 }
 
 /// Common validation/arithmetic errors shared by every contract's

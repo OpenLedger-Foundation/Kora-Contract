@@ -1,5 +1,5 @@
 [package]
-name = "debtor_attestation"
+name = "kora-debtor-attestation"
 version = "0.1.0"
 edition = "2021"
 description = "Debtor-side confirmation contract for invoice authenticity"
@@ -14,3 +14,9 @@ soroban-sdk = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-sdk = { workspace = true }
+kora-shared = { path = "../shared" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+kora-shared = { path = "../shared" }

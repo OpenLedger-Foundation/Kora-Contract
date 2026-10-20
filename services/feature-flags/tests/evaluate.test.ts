@@ -210,3 +210,157 @@ describe("computeRolloutBucket", () => {
     expect(b1).toBe(b2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Kill-switch drill with TTL (#1006) — service-level tests
+// ---------------------------------------------------------------------------
+
+import { FlagStore } from "../src/store";
+import { FeatureFlagService } from "../src/service";
+import * as os from "os";
+import * as path from "path";
+
+function tmpDb2(): string {
+  return path.join(os.tmpdir(), `kora-eval-test-${Date.now()}-${Math.random()}.db`);
+}
+
+function seedStore(store: FlagStore, enabled: boolean): void {
+  store.upsert({
+    name: "secondary-market",
+    description: "test",
+    enabled,
+    rules: [{ type: "percentage", rolloutBps: 10000 }],
+    updatedBy: "test",
+  });
+}
+
+describe("Kill-switch drill: TTL exhaustion (#1006)", () => {
+  it("isEnabled returns false immediately after service.disable() — no TTL wait needed", async () => {
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: 60_000 }); // long TTL
+    seedStore(store, true);
+    const svc = new FeatureFlagService(store);
+
+    expect(svc.isEnabled("secondary-market", "user-1")).toBe(true);
+
+    // Kill-switch fires — setEnabled invalidates cache synchronously
+    await svc.disable("secondary-market", "admin");
+
+    // Immediately visible — no TTL wait
+    expect(svc.isEnabled("secondary-market", "user-1")).toBe(false);
+  });
+
+  it("kill-switch event changedAt timestamp is accurate (not stale)", async () => {
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: 0 });
+    seedStore(store, true);
+    const svc = new FeatureFlagService(store);
+
+    const events: import("../src/types").FlagChangeEvent[] = [];
+    svc.onKillSwitch((e) => events.push(e));
+
+    const beforeDisable = new Date();
+    await svc.disable("secondary-market", "admin");
+    const afterDisable = new Date();
+
+    expect(events).toHaveLength(1);
+    const changedAt = new Date(events[0]!.changedAt);
+    // changedAt must be between beforeDisable and afterDisable (+1s tolerance)
+    expect(changedAt.getTime()).toBeGreaterThanOrEqual(beforeDisable.getTime() - 1000);
+    expect(changedAt.getTime()).toBeLessThanOrEqual(afterDisable.getTime() + 1000);
+  });
+
+  it("SSE listeners receive kill-switch immediately (< 1 synchronous call)", async () => {
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: 0 });
+    seedStore(store, true);
+    const svc = new FeatureFlagService(store);
+
+    let receivedAt: number | undefined;
+    const disableCalledAt = Date.now();
+    svc.onKillSwitch(() => {
+      receivedAt = Date.now();
+    });
+
+    await svc.disable("secondary-market", "admin");
+
+    expect(receivedAt).toBeDefined();
+    // Listener is called synchronously within the same tick
+    expect(receivedAt! - disableCalledAt).toBeLessThan(100);
+  });
+
+  it("after kill toggle: evaluateAll snapshot sees false within bounded time", async () => {
+    const TTL = 50;
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: TTL });
+    seedStore(store, true);
+    const svc = new FeatureFlagService(store);
+
+    // Session snapshot before kill
+    const snapBefore = svc.resolveForUser("user-1");
+    expect(snapBefore["secondary-market"]).toBe(true);
+
+    // Kill-switch
+    await svc.disable("secondary-market", "admin");
+
+    // Snapshot reflects kill immediately (cache invalidated by setEnabled)
+    const snapAfter = svc.resolveForUser("user-1");
+    expect(snapAfter["secondary-market"]).toBe(false);
+  });
+
+  it("re-enable after kill: evaluateAll returns true again", async () => {
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: 0 });
+    seedStore(store, true);
+    const svc = new FeatureFlagService(store);
+
+    await svc.disable("secondary-market", "admin");
+    expect(svc.isEnabled("secondary-market", "user-1")).toBe(false);
+
+    await svc.enable("secondary-market", "admin");
+    expect(svc.isEnabled("secondary-market", "user-1")).toBe(true);
+  });
+
+  it("HTTP cache headers: SSE stream response must not be cached", () => {
+    // Verify the http.ts SSE handler sets Cache-Control: no-cache (documented requirement)
+    // This is a documentation/contract test — the actual header is set in handleFlagsStream.
+    const { handleFlagsStream } = require("../src/http");
+    const headers: Record<string, string> = {};
+    const mockReq = {
+      userId: "user-1",
+      on: () => {},
+    } as unknown as import("http").IncomingMessage;
+    const mockRes = {
+      writeHead: (_status: number, hdrs: Record<string, string>) => {
+        Object.assign(headers, hdrs);
+      },
+      write: () => {},
+    } as unknown as import("http").ServerResponse;
+
+    const mockSvc = {
+      resolveForUser: () => ({}),
+      onKillSwitch: () => () => {},
+    } as unknown as import("../src/service").FeatureFlagService;
+
+    handleFlagsStream(mockSvc, mockReq, mockRes);
+
+    // Cache-Control must be no-cache to prevent CDN/proxy caching of the SSE stream
+    expect(headers["Cache-Control"]).toBe("no-cache");
+  });
+
+  it("multiple flags killed simultaneously: all refresh on same invalidation", async () => {
+    const store = new FlagStore(tmpDb2(), { cacheTtlMs: 60_000 });
+    store.upsert({ name: "secondary-market", description: "", enabled: true, rules: [{ type: "percentage", rolloutBps: 10000 }], updatedBy: "t" });
+    store.upsert({ name: "fractionalization", description: "", enabled: true, rules: [{ type: "percentage", rolloutBps: 10000 }], updatedBy: "t" });
+    store.upsert({ name: "partial-repayment", description: "", enabled: true, rules: [{ type: "percentage", rolloutBps: 10000 }], updatedBy: "t" });
+
+    const svc = new FeatureFlagService(store);
+
+    expect(svc.isEnabled("secondary-market", "u")).toBe(true);
+    expect(svc.isEnabled("fractionalization", "u")).toBe(true);
+    expect(svc.isEnabled("partial-repayment", "u")).toBe(true);
+
+    await svc.disable("secondary-market", "admin");
+    await svc.disable("fractionalization", "admin");
+    await svc.disable("partial-repayment", "admin");
+
+    expect(svc.isEnabled("secondary-market", "u")).toBe(false);
+    expect(svc.isEnabled("fractionalization", "u")).toBe(false);
+    expect(svc.isEnabled("partial-repayment", "u")).toBe(false);
+  });
+});

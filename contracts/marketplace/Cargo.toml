@@ -16,6 +16,7 @@ kora-treasury = { path = "../treasury" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-parameter-registry = { path = "../parameter_registry" }
+kora-debtor-attestation = { path = "../debtor_attestation" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -26,3 +27,4 @@ kora-financing-pool = { path = "../financing_pool" }
 kora-treasury = { path = "../treasury" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-price-oracle = { path = "../price_oracle" }
+kora-debtor-attestation = { path = "../debtor_attestation" }

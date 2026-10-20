@@ -26,7 +26,9 @@
     "preset": "ts-jest",
     "testEnvironment": "node",
     "testMatch": [
-      "**/tests/transaction-recovery.test.ts"
+      "**/tests/transaction-recovery.test.ts",
+      "**/tests/governance.test.ts",
+      "**/tests/clients.test.ts"
     ],
     "collectCoverageFrom": [
       "src/transactionRecovery.ts"

@@ -269,4 +269,143 @@ mod tests {
 
         assert_eq!(original, restored);
     }
+
+    #[test]
+    fn test_new_contract_specs() {
+        let dispute_spec = ContractSpec {
+            name: "dispute_escrow".to_string(),
+            version: "0.1.0".to_string(),
+            functions: vec![
+                FunctionSpec {
+                    name: "open_dispute".to_string(),
+                    is_readonly: false,
+                    parameters: vec![
+                        ParameterSpec {
+                            name: "challenger".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "payer".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "invoice_id".to_string(),
+                            param_type: "u64".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "amount".to_string(),
+                            param_type: "i128".to_string(),
+                        },
+                    ],
+                    return_type: None,
+                },
+            ],
+            types: vec![],
+        };
+        assert!(validate_spec(&dispute_spec).is_ok());
+
+        let frac_spec = ContractSpec {
+            name: "fractionalizer".to_string(),
+            version: "0.1.0".to_string(),
+            functions: vec![
+                FunctionSpec {
+                    name: "wrap".to_string(),
+                    is_readonly: false,
+                    parameters: vec![
+                        ParameterSpec {
+                            name: "investor".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "invoice_id".to_string(),
+                            param_type: "u64".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "total_shares".to_string(),
+                            param_type: "u64".to_string(),
+                        },
+                    ],
+                    return_type: None,
+                },
+            ],
+            types: vec![],
+        };
+        assert!(validate_spec(&frac_spec).is_ok());
+
+        let sec_spec = ContractSpec {
+            name: "secondary_market".to_string(),
+            version: "0.1.0".to_string(),
+            functions: vec![
+                FunctionSpec {
+                    name: "list_position".to_string(),
+                    is_readonly: false,
+                    parameters: vec![
+                        ParameterSpec {
+                            name: "seller".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "invoice_id".to_string(),
+                            param_type: "u64".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "token".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "price".to_string(),
+                            param_type: "i128".to_string(),
+                        },
+                    ],
+                    return_type: None,
+                },
+            ],
+            types: vec![],
+        };
+        assert!(validate_spec(&sec_spec).is_ok());
+
+        let gov_spec = ContractSpec {
+            name: "governance_voting".to_string(),
+            version: "0.1.0".to_string(),
+            functions: vec![
+                FunctionSpec {
+                    name: "create_proposal".to_string(),
+                    is_readonly: false,
+                    parameters: vec![
+                        ParameterSpec {
+                            name: "proposer".to_string(),
+                            param_type: "Address".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "title".to_string(),
+                            param_type: "String".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "description".to_string(),
+                            param_type: "String".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "proposal_type".to_string(),
+                            param_type: "ProposalType".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "voting_mode".to_string(),
+                            param_type: "VotingMode".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "quorum_required".to_string(),
+                            param_type: "i128".to_string(),
+                        },
+                        ParameterSpec {
+                            name: "duration".to_string(),
+                            param_type: "u64".to_string(),
+                        },
+                    ],
+                    return_type: Some("u64".to_string()),
+                },
+            ],
+            types: vec![],
+        };
+        assert!(validate_spec(&gov_spec).is_ok());
+    }
 }

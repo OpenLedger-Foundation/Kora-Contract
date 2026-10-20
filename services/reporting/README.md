@@ -68,6 +68,14 @@ HTTP request (scope, format, date range)
 |---|---|---|
 | `REPORTING_DB_PATH` | `./reporting-jobs.db` | Export job queue DB |
 | `REPORTING_OUTPUT_DIR` | `./exports` | Directory for generated files |
+| `INDEXER_URL` | `http://localhost:8787` | Indexer service base URL (#1003) |
+| `REPORTING_USE_FIXTURES` | `false` | Use static fixture data source in dev/CI (#1003) |
+| `REPORTING_PORT` | `3040` | HTTP server port (#1004) |
+| `REPORTING_HOST` | `127.0.0.1` | HTTP server bind address (#1004) |
+| `REPORTING_API_KEYS` | _(none)_ | Comma-separated valid API keys (#1004) |
+| `REPORTING_ADMIN_KEYS` | _(none)_ | Comma-separated admin API keys (#1004) |
+| `REPORTING_RETENTION_TTL_S` | `604800` | Job retention in seconds (default 7 days) (#1004) |
+| `REPORTING_RETENTION_CHECK_MS` | `60000` | Retention sweep interval in ms (#1004) |
 
 ---
 

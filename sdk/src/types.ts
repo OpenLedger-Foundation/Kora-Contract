@@ -72,3 +72,77 @@ export interface MarketplaceConfig {
   accessControl: string;
   feeBps: number;
 }
+
+// ── Governance Enums ──────────────────────────────────────────────────────────
+
+export type VotingMode = "Standard" | "Quadratic";
+export type ProposalType = "Financial" | "Sentiment" | "Upgrade" | "ParameterChange";
+export type VoteChoice = "For" | "Against" | "Abstain";
+
+// ── Dispute Escrow Structs ────────────────────────────────────────────────────
+
+export interface EscrowDispute {
+  invoiceId: bigint;
+  challenger: string;
+  payer: string;
+  token: string;
+  amount: bigint;
+  openedAt: bigint;
+  resolved: boolean;
+  paidToPool: boolean;
+}
+
+// ── Fractionalizer Structs ────────────────────────────────────────────────────
+
+export interface WrapRecord {
+  invoiceId: bigint;
+  originalInvestor: string;
+  totalShares: bigint;
+  outstandingShares: bigint;
+  contributed: bigint;
+  token: string;
+  totalPayout: bigint;
+  settled: boolean;
+}
+
+// ── Secondary Market Structs ──────────────────────────────────────────────────
+
+export interface PositionSaleOffer {
+  seller: string;
+  invoiceId: bigint;
+  token: string;
+  price: bigint;
+}
+
+// ── Governance Structs ────────────────────────────────────────────────────────
+
+export interface Proposal {
+  id: bigint;
+  proposer: string;
+  title: string;
+  description: string;
+  proposalType: ProposalType;
+  votingMode: VotingMode;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  votesAbstain: bigint;
+  createdAt: bigint;
+  expiresAt: bigint;
+  executed: boolean;
+  quorumRequired: bigint;
+}
+
+export interface VoteRecord {
+  voter: string;
+  choice: VoteChoice;
+  weight: bigint;
+  voiceCreditsSpent: bigint;
+  votedAt: bigint;
+}
+
+export interface DelegationRecord {
+  delegator: string;
+  delegate: string;
+  delegatedAt: bigint;
+}
+

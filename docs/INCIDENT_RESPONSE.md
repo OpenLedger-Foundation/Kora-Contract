@@ -390,6 +390,48 @@ All fast-track governance usage is permanently logged on-chain via events.
 
 ---
 
+### Kill-Switch Cache TTL Drill (#1006)
+
+**Purpose:** Verify that disabling a protocol flow flag reaches all web clients within the SLA stale window.
+
+**Pre-requisites:** Feature-flags service running, at least one web client session connected with SSE stream.
+
+**Steps:**
+
+1. Confirm all protocol flags are enabled:
+   ```
+   curl -H "X-Admin-Actor: drill@kora.finance" PUT /admin/flags/secondary-market/enable
+   ```
+
+2. Open a browser session and verify funding flow is visible (kill-switch off).
+
+3. Start the drill timer.
+
+4. Toggle the kill-switch off:
+   ```
+   curl -H "X-Admin-Actor: drill@kora.finance" PUT /admin/flags/secondary-market/disable
+   ```
+
+5. Observe the web client: the funding CTA must disappear within the **maximum stale window**:
+   - SSE connected: **< 1 second**
+   - SSE reconnecting: **≤ 5 seconds**
+   - Snapshot polling only: **≤ 30 seconds**
+
+6. Confirm server-side enforcement: any POST to the backing API for a disabled feature must return `503 Feature disabled`.
+
+7. Re-enable the flag and verify the CTA returns:
+   ```
+   curl -H "X-Admin-Actor: drill@kora.finance" PUT /admin/flags/secondary-market/enable
+   ```
+
+8. Document results in `docs/drill-results/YYYY-MM-DD-kill-switch-drill.md`.
+
+**Automated drill tests:** The Jest tests in `services/feature-flags/tests/evaluate.test.ts` (describe block "Kill-switch drill: TTL exhaustion #1006") run the equivalent timing assertions in CI without requiring a live environment. These pass without timing flake because they use injected short TTL values (50–80ms) rather than the 5s production default.
+
+**CDN bypass:** If an intermediate CDN caches the `/flags` snapshot response, serve it with `Cache-Control: no-store` or use the SSE stream which explicitly sets `Cache-Control: no-cache`. CDN-cached snapshots are not subject to the SLA above; coordinate a cache purge with the CDN operator as part of any drill where CDN caching is active.
+
+---
+
 ## Appendices
 
 ### A. Multi-sig Signer Availability Matrix

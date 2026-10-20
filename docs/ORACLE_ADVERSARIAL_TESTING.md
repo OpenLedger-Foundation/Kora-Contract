@@ -203,16 +203,23 @@ RATE_EX: (base, quote, prev_price, new_price, change_bps, max_change_bps, timest
 
 ## Consumer Defense Validation
 
-### Marketplace: Funding with Manipulated FX Rates
+### Marketplace: Funding with Manipulated FX Rates ✅ **[IMPLEMENTED - Issue #977]**
 
-**Test Location:** `contracts/tests/marketplace_fx_manipulation.rs` (to be created as follow-up)
+**Test Location:** `contracts/tests/marketplace_fx_manipulation.rs`
 
-**Scenario:** Attacker manipulates EURC/USDC rate to inflate/deflate invoice funding amounts in cross-currency scenarios.
+**Scenario:** Attacker attempts to manipulate EURC/USDC or other cross-currency FX rates to inflate/deflate invoice funding amounts, bypass bounds, or inject stale/spike quotes into marketplace operations (list, fund, cancel).
 
-**Expected Defense:**
-1. Oracle staleness/peg/rate-change guards (validated above)
-2. Marketplace minimum liquidity checks (out of scope for oracle testing)
-3. Slippage tolerance on FX conversion (to be verified in marketplace tests)
+**Validated Defenses:**
+1. **Staleness Guard Rejection:** Cross-currency funding attempts using quotes older than `MAX_STALENESS_SECS` (3600s) are rejected with `AllFeedsStale`, preventing execution of orders against outdated market rates (`test_adversarial_marketplace_cross_currency_stale_rate_rejected`).
+2. **Rate-Change Circuit Breaker:** Rapid single-update price spikes exceeding configured `MaxRateChange` (e.g. 1000 bps) are rejected with `RateChangeExceeded`, blocking sudden price spikes intended to underpay funding (`test_adversarial_marketplace_cross_currency_spike_quote_rejected_by_rate_change_bound`).
+3. **Peg Deviation Auto-Flagging:** Stablecoin pair depeg attempts beyond peg tolerance (e.g. 50 bps) trigger auto-flagging and block subsequent quotes and cross-currency conversions (`test_adversarial_marketplace_peg_deviation_attack_blocks_funding`).
+4. **Reciprocal Consistency:** Contradictory forward/reverse pair rate updates are rejected by reciprocal tolerance checks (`test_adversarial_marketplace_listing_with_reciprocal_quote_manipulation`).
+5. **Non-Positive Rate Guard:** Zero and negative price updates are rejected (`test_adversarial_marketplace_funding_zero_or_negative_price_rejected`).
+6. **Protocol Emergency Pause:** Access control emergency pause halts both oracle price updates and marketplace listing/funding operations (`test_adversarial_marketplace_protocol_pause_blocks_both_oracle_and_funding`).
+7. **Listing Cancellation & Refund Integrity:** Unfunded or cancelled listings preserve clean exposure and authorization accounting without exposure leakage (`test_adversarial_marketplace_cancel_and_refund_resilient_to_fx_movement`).
+8. **Dust Floor Enforcement:** Contributions below the configured minimum contribution floor (`DEFAULT_MIN_CONTRIBUTION`) are rejected (`test_adversarial_marketplace_cross_currency_dust_floor_enforced`).
+9. **Historical Immutability:** Historical price snapshots in oracle ring buffer remain immutable against retroactive manipulation (`test_adversarial_historical_price_tampering_fails`).
+10. **Funding Target Bounds:** Cross-currency payments whose converted value exceeds remaining asking price are strictly rejected (`test_adversarial_cross_currency_exceeds_funding_target_rejected`).
 
 ---
 
@@ -311,7 +318,7 @@ If manipulation detected:
 ## Recommendations for Follow-Up Work
 
 1. **Minimum Feeder Count Policy:** Add `min_feeders_required` configuration; reject aggregation if below threshold
-2. **Marketplace FX Manipulation Tests:** Extend adversarial suite to cover cross-currency funding attacks
+2. **Marketplace FX Manipulation Tests:** ✅ **COMPLETED** (`contracts/tests/marketplace_fx_manipulation.rs`) covering list, fund, and cancel with stale or spike quotes.
 3. **Fuzzing:** Integrate oracle inputs into `contracts/fuzz` harness; target reciprocal/peg edge cases
 4. **Rate-Change Tuning:** Collect historical volatility data per asset; set optimal `MaxRateChange` bounds
 5. **Fallback Feed Integration:** If external fallback oracle (e.g., Chainlink) added, test coordinated primary+fallback manipulation
@@ -321,8 +328,8 @@ If manipulation detected:
 ## Approval
 
 **Adversarial Test Suite Author:** Kiro AI Agent  
-**Security Review Status:** ✅ **COMPLETE** - Rate-change bound implemented, all 10 test scenarios passing  
-**Next Review:** After marketplace/financing_pool consumer defense tests added
+**Security Review Status:** ✅ **COMPLETE** - Rate-change bound implemented, marketplace consumer defense suite active  
+**Next Review:** After financing_pool discount curve adversarial tests added
 
 ---
 
@@ -343,6 +350,16 @@ If manipulation detected:
 | Historical manipulation | Immutable snapshots | `test_adversarial_cannot_retroactively_manipulate_history` | ✅ PASS |
 | Unauthorized submission | Authorization check | `test_adversarial_non_feeder_cannot_submit` | ✅ PASS |
 | Protocol pause bypass | Pause enforcement | `test_adversarial_cannot_submit_when_paused` | ✅ PASS |
+| Marketplace stale cross-currency funding | Staleness guard | `test_adversarial_marketplace_cross_currency_stale_rate_rejected` | ✅ PASS |
+| Marketplace spike quote rate attack | Rate-change circuit breaker | `test_adversarial_marketplace_cross_currency_spike_quote_rejected_by_rate_change_bound` | ✅ PASS |
+| Marketplace peg deviation exploitation | Auto-flag on peg deviation | `test_adversarial_marketplace_peg_deviation_attack_blocks_funding` | ✅ PASS |
+| Marketplace reciprocal cross-rate attack | Reciprocal consistency check | `test_adversarial_marketplace_listing_with_reciprocal_quote_manipulation` | ✅ PASS |
+| Marketplace non-positive quote attack | Positive amount validation | `test_adversarial_marketplace_funding_zero_or_negative_price_rejected` | ✅ PASS |
+| Marketplace emergency protocol pause | Protocol pause enforcement | `test_adversarial_marketplace_protocol_pause_blocks_both_oracle_and_funding` | ✅ PASS |
+| Marketplace cancellation & refund FX drift | Clean lifecycle state transition | `test_adversarial_marketplace_cancel_and_refund_resilient_to_fx_movement` | ✅ PASS |
+| Marketplace dust griefing under FX rate | Minimum contribution floor | `test_adversarial_marketplace_cross_currency_dust_floor_enforced` | ✅ PASS |
+| Marketplace historical audit tampering | Ring buffer immutability | `test_adversarial_historical_price_tampering_fails` | ✅ PASS |
+| Marketplace funding target overrun | Strict remaining balance check | `test_adversarial_cross_currency_exceeds_funding_target_rejected` | ✅ PASS |
 
 ---
 

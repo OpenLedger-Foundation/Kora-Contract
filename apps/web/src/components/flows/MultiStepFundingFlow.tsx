@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ConcentrationCapCheck, FundingStep, ListingFundingState, YieldPreview } from '../../types/funding';
 import { fundingService } from '../../services/fundingService';
 import { useTransactionSimulation } from '../../context/SimulationContext';
+import { KillSwitchGate } from '../common/KillSwitchGate';
 
 interface MultiStepFundingFlowProps {
   listingId?: number;
@@ -95,6 +96,7 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
   };
 
   return (
+    <KillSwitchGate flagName="multi-asset-pool">
     <div
       className="multi-step-funding-flow bg-white border border-gray-200 rounded-2xl p-4 sm:p-6 shadow-sm max-w-xl mx-auto"
       role="region"
@@ -249,5 +251,6 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
         </div>
       )}
     </div>
+    </KillSwitchGate>
   );
 };
