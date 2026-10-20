@@ -205,14 +205,59 @@ stellar contract invoke \
 # Must return: true
 ```
 
-**Verify repayment exemption (SMEs must not be blocked):**
+**Verify expanded pause enforcement checklist across contract families:**
 
 ```bash
-# Attempt a repay against a funded invoice — must succeed even while paused
+# 1. Primary lending gates blocked:
+stellar contract invoke --id "${INVOICE_NFT}" --source "${OPERATOR_SECRET}" -- \
+  mint_invoice ...
+# Expected: fails with KoraError::ProtocolPaused
+
+stellar contract invoke --id "${MARKETPLACE}" --source "${OPERATOR_SECRET}" -- \
+  fund_invoice ...
+# Expected: fails with KoraError::ProtocolPaused
+
+# 2. Secondary market & fractionalizer gates blocked:
+stellar contract invoke --id "${SECONDARY_MARKET}" --source "${OPERATOR_SECRET}" -- \
+  list_position ...
+# Expected: fails with SecondaryMarketError::ProtocolPaused
+
+stellar contract invoke --id "${FRACTIONALIZER}" --source "${OPERATOR_SECRET}" -- \
+  wrap ...
+# Expected: fails with FractionalizerError::ProtocolPaused
+
+# 3. Dispute intake blocked:
+stellar contract invoke --id "${DISPUTE_RESOLUTION}" --source "${OPERATOR_SECRET}" -- \
+  open_dispute ...
+# Expected: fails with DisputeResolutionError::ProtocolPaused
+```
+
+**Verify settlement & governance exemptions (must remain operable):**
+
+```bash
+# A. SME debt settlement exemption:
 stellar contract invoke \
   --id "${FINANCING_POOL}" --source "${SME_SECRET}" -- \
   repay --payer <sme> --invoice_id <id> --token <token> --amount <amount>
-# Expected: transaction succeeds (no ProtocolPaused error)
+# Expected: transaction proceeds to settlement without ProtocolPaused error
+
+# B. Market order cancellation exemption:
+stellar contract invoke \
+  --id "${MARKETPLACE}" --source "${SELLER_SECRET}" -- \
+  cancel_listing --caller <seller> --listing_id <id>
+# Expected: seller successfully retrieves listed invoice
+
+# C. Fractionalizer capital redemption exemption:
+stellar contract invoke \
+  --id "${FRACTIONALIZER}" --source "${INVESTOR_SECRET}" -- \
+  redeem --user <investor> --wrap_id <id> --shares <amount>
+# Expected: pro-rata capital redeemed from settled pool
+
+# D. Governance & recovery immunity:
+stellar contract invoke \
+  --id "${GOVERNANCE}" --source "${SIGNER_SECRET}" -- \
+  vote --voter <signer> --proposal_id <id> --support true
+# Expected: governance and emergency recovery proposals function without pause impediment
 ```
 
 ### Phase 3 — Investigate & remediate
