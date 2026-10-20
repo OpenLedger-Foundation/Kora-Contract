@@ -573,6 +573,32 @@ impl RiskRegistryContract {
         Ok(())
     }
 
+    /// Admin updates the minimum stake required for new verifiers.
+    pub fn set_minimum_stake(env: Env, admin: Address, minimum_stake: i128) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if minimum_stake < 0 {
+            return Err(RiskRegistryError::InvalidAmount);
+        }
+        env.storage().persistent().set(&DataKey::MinimumStake, &minimum_stake);
+        Self::bump_persistent(&env, &DataKey::MinimumStake);
+        Self::append_audit_entry(&env, &admin, AdminActionType::AddVerifier);
+        Ok(())
+    }
+
+    /// Admin updates the slash percentage (basis points) applied on default.
+    pub fn set_slash_percentage(env: Env, admin: Address, slash_percentage_bps: u32) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if slash_percentage_bps > 10_000 {
+            return Err(RiskRegistryError::InvalidAmount);
+        }
+        env.storage().persistent().set(&DataKey::SlashPercentage, &slash_percentage_bps);
+        Self::bump_persistent(&env, &DataKey::SlashPercentage);
+        Self::append_audit_entry(&env, &admin, AdminActionType::AddVerifier);
+        Ok(())
+    }
+
     /// Admin removes a verifier and returns their remaining stake.
     ///
     /// **Parameters:**
