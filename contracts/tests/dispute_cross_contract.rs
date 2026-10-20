@@ -95,7 +95,10 @@ impl TestEnv {
             &0,
             &resolution_id,
         );
-        pool.set_marketplace(&admin, &marketplace);
+        // Issue #909: intentionally NOT calling pool.set_marketplace here. This
+        // harness simulates the marketplace as an EOA address; with a stored
+        // marketplace, release_funds now binds env.invoker() to it and direct
+        // EOA calls (like the ones below) are rejected by design.
         nft.set_authorized_callers(&admin, &marketplace, &pool_id);
         let escrow_id = env.register_contract(None, DisputeEscrowContract);
         let escrow = DisputeEscrowContractClient::new(&env, &escrow_id);

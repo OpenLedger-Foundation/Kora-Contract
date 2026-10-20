@@ -6,14 +6,11 @@ description = "Debtor-side confirmation contract for invoice authenticity"
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cd_lib"]
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-soroban-sdk = { version = "21.0.0", features = ["alloc"] }
-soroban-env = "21.0.0"
-serde = { version = "1.0.200", features = ["derive", "no_std_alloc"] }
-soroban-contracts = "21.0.0"
+soroban-sdk = { workspace = true, features = ["alloc"] }
 
-[depdependencies]
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

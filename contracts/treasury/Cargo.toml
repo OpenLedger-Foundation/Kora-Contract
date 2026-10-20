@@ -12,7 +12,6 @@ kora-shared = { path = "../shared" }
 kora-access-control = { path = "../access_control" }
 kora-parameter-registry = { path = "../parameter_registry" }
 kora-price-oracle = { path = "../price_oracle" }
-kora-parameter-registry = { path = "../parameter_registry" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
