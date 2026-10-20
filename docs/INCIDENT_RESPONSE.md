@@ -461,7 +461,12 @@ governance.create_fast_track_proposal(
 
 ### C. Communication Templates
 
-See `docs/incident-response-templates/` for pre-written messages for common scenarios.
+Pre-written, standardized stakeholder communication templates for common operational and emergency scenarios are maintained in [docs/incident-response-templates/](incident-response-templates/README.md):
+
+- [Sev-1 Emergency Pause](incident-response-templates/sev-1-pause.md): Multi-stage alerts for protocol-wide pauses and critical mitigation updates.
+- [Key Compromise & Revocation](incident-response-templates/key-compromise.md): Administrative, guardian, and verifier key rotation communications.
+- [Indexer & Data Ingestion Lag](incident-response-templates/indexer-lag.md): Frontend display degradation notices clarifying that on-chain contract state is unaffected.
+- [Coordinated Bounty Disclosure](incident-response-templates/bounty-disclosure.md): Post-remediation vulnerability summaries and white-hat researcher attribution.
 
 ---
 
