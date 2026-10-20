@@ -132,6 +132,12 @@ fi
 
 # ── Validate required variables ───────────────────────────────────────────────
 
+if [[ "${DRY_RUN}" == "true" ]]; then
+  ACCESS_CONTROL="${ACCESS_CONTROL:-CDUMMYACCESSCONTROL0000000000000000000000000000000000000000000}"
+  ADMIN_SECRET="${ADMIN_SECRET:-SDUMMYADMINSECRET00000000000000000000000000000000000000000000}"
+  GUARDIAN_SECRET="${GUARDIAN_SECRET:-SDUMMYGUARDIANSECRET00000000000000000000000000000000000000000}"
+  SIGNER_SECRET="${SIGNER_SECRET:-SDUMMYSIGNERSECRET0000000000000000000000000000000000000000000}"
+fi
 : "${ACCESS_CONTROL:?ACCESS_CONTROL contract ID must be set}"
 
 # Determine which secret to use based on mode
@@ -244,6 +250,11 @@ send_notification() {
 # ── Pause verification loop ───────────────────────────────────────────────────
 
 wait_for_pause_confirmation() {
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    info "[DRY-RUN] Simulating pause confirmation verification..."
+    success "[DRY-RUN] Protocol pause verification simulated successfully"
+    return 0
+  fi
     local max_attempts=10
     local attempt=0
     info "Verifying pause took effect..."

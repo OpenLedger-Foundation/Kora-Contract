@@ -26,6 +26,15 @@ that makes the theory executable under pressure.
 
 ## Tooling
 
+### `.github/workflows/emergency-pause-drill.yml`
+
+An automated CI/CD workflow that schedules and validates quarterly pause/unpause exercises.
+
+- **Trigger:** Quarterly scheduled cron (`0 0 1 */3 *`), manual `workflow_dispatch`, and pull requests affecting pause scripts or documentation.
+- **Dry-run validation:** Supports `dry_run: true` to execute `scripts/emergency-pause.sh --dry-run` and verify argument parsing, notification formatting, and shellcheck without broadcasting transactions.
+- **Audit artifact:** Emits a timestamped drill log (`drill-<TIMESTAMP>.log`) and summary metadata (`drill-summary-<TIMESTAMP>.json`) uploaded to GitHub Actions artifacts with 90-day retention.
+- **Smoke test gating:** Runs `cargo test -p kora-tests --test threat_model_tests test_tm_pause` to ensure pause matrix enforcement does not regress.
+
 ### `scripts/emergency-pause.sh`
 
 A single shell script that wraps the `stellar` CLI to pause the protocol with

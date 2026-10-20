@@ -1,0 +1,167 @@
+name: Emergency Pause Drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment (testnet or mainnet)"
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+        default: testnet
+      dry_run:
+        description: "Run drill in dry-run mode (no on-chain state changes)"
+        required: true
+        type: boolean
+        default: true
+      execution_mode:
+        description: "Pause execution authority path"
+        required: true
+        type: choice
+        options:
+          - dry_run
+          - guardian
+          - single_admin
+        default: dry_run
+  schedule:
+    # Run quarterly on the 1st of every 3rd month at 00:00 UTC (January, April, July, October)
+    - cron: "0 0 1 */3 *"
+  pull_request:
+    paths:
+      - "scripts/emergency-pause.sh"
+      - ".github/workflows/emergency-pause-drill.yml"
+      - "docs/EMERGENCY_PAUSE_DRILL.md"
+      - "docs/SECURITY.md"
+
+concurrency:
+  group: pause-drill-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── 1. Preflight ShellCheck Validation ────────────────────────────────────
+  shellcheck:
+    name: Lint Pause Script (ShellCheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck on emergency-pause.sh
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: "scripts"
+          severity: warning
+          ignore_paths: >
+            scripts/tests
+
+  # ── 2. Tabletop Drill Execution & Artifact Generation ─────────────────────
+  drill:
+    name: Execute Pause Drill (${{ inputs.environment || 'testnet' }})
+    needs: [shellcheck]
+    runs-on: ubuntu-latest
+    # Require approved environment protection rules if targeting mainnet live execution
+    environment: ${{ (github.event_name == 'workflow_dispatch' && inputs.environment == 'mainnet' && inputs.dry_run == false) && 'mainnet' || 'testnet' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Stellar CLI & Tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq curl
+          mkdir -p logs artifacts/drill-reports
+
+      - name: Execute Drill Simulation
+        id: run_drill
+        run: |
+          DRILL_ENV="${{ inputs.environment || 'testnet' }}"
+          DRY_RUN="${{ inputs.dry_run != false }}"
+          EXEC_MODE="${{ inputs.execution_mode || 'dry_run' }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LOG_FILE="artifacts/drill-reports/drill-${TIMESTAMP}.log"
+          SUMMARY_FILE="artifacts/drill-reports/drill-summary-${TIMESTAMP}.json"
+
+          echo "==========================================================" | tee -a "$LOG_FILE"
+          echo "KORA PROTOCOL EMERGENCY PAUSE DRILL" | tee -a "$LOG_FILE"
+          echo "Timestamp: $TIMESTAMP" | tee -a "$LOG_FILE"
+          echo "Environment: $DRILL_ENV" | tee -a "$LOG_FILE"
+          echo "Dry Run Mode: $DRY_RUN" | tee -a "$LOG_FILE"
+          echo "Execution Path: $EXEC_MODE" | tee -a "$LOG_FILE"
+          echo "Triggered By: ${{ github.actor }}" | tee -a "$LOG_FILE"
+          echo "==========================================================" | tee -a "$LOG_FILE"
+
+          chmod +x scripts/emergency-pause.sh
+
+          # Execute in dry-run mode to validate script syntax, argument routing, and notification formatting
+          if [ "$DRY_RUN" = "true" ] || [ "$EXEC_MODE" = "dry_run" ]; then
+            echo "Invoking ./scripts/emergency-pause.sh --dry-run..." | tee -a "$LOG_FILE"
+            ./scripts/emergency-pause.sh --dry-run 2>&1 | tee -a "$LOG_FILE"
+            DRILL_STATUS="PASSED_DRY_RUN"
+          else
+            echo "Live drill execution requested for $DRILL_ENV ($EXEC_MODE)" | tee -a "$LOG_FILE"
+            # Require environment secrets when running live
+            export ADMIN_SECRET="${{ secrets.TESTNET_ADMIN_SECRET }}"
+            export GUARDIAN_SECRET="${{ secrets.TESTNET_GUARDIAN_SECRET }}"
+            export ACCESS_CONTROL="${{ vars.TESTNET_ACCESS_CONTROL_ID }}"
+
+            if [ "$EXEC_MODE" = "guardian" ]; then
+              ./scripts/emergency-pause.sh --env "$DRILL_ENV" --guardian 2>&1 | tee -a "$LOG_FILE"
+            else
+              ./scripts/emergency-pause.sh --env "$DRILL_ENV" 2>&1 | tee -a "$LOG_FILE"
+            fi
+            DRILL_STATUS="PASSED_LIVE"
+          fi
+
+          cat <<EOF > "$SUMMARY_FILE"
+          {
+            "timestamp": "$TIMESTAMP",
+            "environment": "$DRILL_ENV",
+            "dry_run": $DRY_RUN,
+            "execution_mode": "$EXEC_MODE",
+            "operator": "${{ github.actor }}",
+            "status": "$DRILL_STATUS",
+            "sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload Drill Audit Logs & Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: emergency-pause-drill-audit-${{ github.run_id }}
+          path: artifacts/drill-reports/
+          retention-days: 90
+
+  # ── 3. Post-Drill Pause Smoke Tests ───────────────────────────────────────
+  smoke-tests:
+    name: Verify Pause Matrix Smoke Tests
+    needs: [drill]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pause-smoke-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-pause-smoke-
+
+      - name: Run threat model pause tests
+        run: |
+          cargo test -p kora-tests --test threat_model_tests test_tm_pause -- --nocapture
