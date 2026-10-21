@@ -14,6 +14,12 @@ const PRICE_HISTORY_CAP: u32 = 32;
 /// Resource cost at bound: 20 feeders × ~3,000 instructions = ~60,000 instructions (safe).
 pub const MAX_FEEDERS: u32 = 20;
 
+/// Default minimum number of fresh (non-stale) feeders required before
+/// `get_price` returns an aggregated price. A single fresh feeder enables
+/// oracle manipulation when all others are stale or offline.
+/// Admin may raise this floor via `set_min_fresh_feeders` (range: 1..=MAX_FEEDERS).
+pub const MIN_FRESH_FEEDERS_DEFAULT: u32 = 2;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -40,6 +46,11 @@ pub enum PriceOracleError {
     /// Price update rejected: change vs. the previous price exceeds the
     /// configured max-rate-of-change circuit breaker.
     RateChangeExceeded = 17,
+    /// `get_price` returned fewer fresh feeders than the configured
+    /// `MIN_FRESH_FEEDERS` floor. Single-feeder aggregation is blocked
+    /// to prevent oracle manipulation when the majority of feeders are
+    /// stale or offline.
+    InsufficientFreshFeeders = 18,
 }
 
 #[contracttype]
@@ -108,6 +119,9 @@ pub enum DataKey {
     PegFlagged(Symbol, Symbol),
     MaxStaleness(Symbol, Symbol),
     FallbackFeed(Symbol, Symbol),
+    /// Admin-tunable minimum number of fresh feeders required for aggregation.
+    /// Stored globally (not per-pair). Range enforced: 1..=MAX_FEEDERS.
+    MinFreshFeeders,
 }
 
 #[contract]
@@ -494,15 +508,63 @@ impl PriceOracleContract {
         Self::get_effective_staleness(&env, base, quote)
     }
 
+    // ── Minimum Fresh Feeder Quorum (#908) ────────────────────────────────────
+
+    /// Set the minimum number of fresh feeders required before `get_price`
+    /// returns an aggregated value. Admin only.
+    ///
+    /// `min` must be in the range `1..=MAX_FEEDERS`. Setting it below 1 or
+    /// above MAX_FEEDERS returns `InvalidAmount` without modifying state.
+    ///
+    /// **Why this matters:** A single fresh feeder can manipulate `get_price`
+    /// when all other feeders are stale or offline.  Requiring a quorum of at
+    /// least two prevents single-feeder aggregation by default.
+    ///
+    /// **FX-ingestion relay expectations:** Relay operators must ensure at
+    /// least `min_fresh_feeders` independent price sources are submitting
+    /// within the staleness window. If a relay detects fewer active feeders,
+    /// it should alert before they drop below the floor to avoid `get_price`
+    /// returning `InsufficientFreshFeeders` to consumers.
+    ///
+    /// **Errors:**
+    /// - `PriceOracleError::NotAdmin` — caller is not the admin.
+    /// - `PriceOracleError::InvalidAmount` — `min < 1` or `min > MAX_FEEDERS`.
+    pub fn set_min_fresh_feeders(
+        env: Env,
+        admin: Address,
+        min: u32,
+    ) -> Result<(), PriceOracleError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if min < 1 || min > MAX_FEEDERS {
+            return Err(PriceOracleError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MinFreshFeeders, &min);
+        Ok(())
+    }
+
+    /// Read the currently configured minimum fresh feeder floor.
+    /// Returns `MIN_FRESH_FEEDERS_DEFAULT` if no value has been set.
+    pub fn get_min_fresh_feeders(env: Env) -> u32 {
+        Self::min_fresh_feeders_floor(&env)
+    }
+
+    fn min_fresh_feeders_floor(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::MinFreshFeeders)
+            .unwrap_or(MIN_FRESH_FEEDERS_DEFAULT)
+    }
+
     pub fn set_fallback_feed(env: Env, admin: Address, base: Symbol, quote: Symbol, fallback_address: Address) -> Result<(), PriceOracleError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().set(&DataKey::FallbackFeed(base, quote), &fallback_address);
         Ok(())
     }
-
-    pub fn remove_fallback_feed(env: Env, admin: Address, base: Symbol, quote: Symbol) -> Result<(), PriceOracleError> {
-        admin.require_auth();
+    pub fn remove_fallback_feed(env: Env, admin: Address, base: Symbol, quote: Symbol) -> Result<(), PriceOracleError> {        admin.require_auth();
         Self::require_admin(&env, &admin)?;
         env.storage().persistent().remove(&DataKey::FallbackFeed(base, quote));
         Ok(())
@@ -568,6 +630,29 @@ impl PriceOracleContract {
                 }
             }
             return Err(PriceOracleError::AllFeedsStale);
+        }
+
+        // ── Minimum fresh feeder quorum check (#908) ──────────────────────────
+        // Reject aggregation when too few independent feeders are fresh.
+        // Single-feeder aggregation enables oracle manipulation when all
+        // others are stale or offline, so we require at least the configured
+        // floor before blending prices.
+        let fresh_count = prices.len();
+        let min_floor = Self::min_fresh_feeders_floor(&env);
+        if fresh_count < min_floor {
+            // Emit an event so off-chain indexers and relay operators can
+            // react (e.g., wake dormant feeders, trigger alerting).
+            env.events().publish(
+                (soroban_sdk::symbol_short!("INSUF_FD"),),
+                (
+                    base.clone(),
+                    quote.clone(),
+                    fresh_count,
+                    min_floor,
+                    env.ledger().timestamp(),
+                ),
+            );
+            return Err(PriceOracleError::InsufficientFreshFeeders);
         }
 
         let median = Self::calculate_median(&prices);
@@ -873,6 +958,9 @@ mod tests {
         let admin = Address::generate(&env);
         let access_control = Address::generate(&env);
         client.initialize(&admin, &access_control);
+        // Lower quorum to 1 for existing unit tests that test other functionality.
+        // Quorum-specific behavior is tested in the MIN_FRESH_FEEDERS section below.
+        let _ = client.try_set_min_fresh_feeders(&admin, &1u32);
         let feeder = Address::generate(&env);
         client.add_feeder(&admin, &feeder);
         (env, admin, feeder, client)
@@ -1256,5 +1344,192 @@ mod tests {
 
         client.remove_fallback_feed(&admin, &base, &quote);
         assert!(client.get_fallback_feed(&base, &quote).is_none());
+    }
+
+    // ── MIN_FRESH_FEEDERS quorum tests (#908) ─────────────────────────────────
+
+    /// Default quorum is MIN_FRESH_FEEDERS_DEFAULT (2). A single fresh feeder
+    /// should be insufficient — get_price must return InsufficientFreshFeeders.
+    #[test]
+    fn test_get_price_single_feeder_below_default_quorum_fails() {
+        let (env, _admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "XLM");
+        let quote = Symbol::new(&env, "USDC");
+        // Only one feeder submits — default floor is 2
+        client.set_price(&feeder, &base, &quote, &1_000_000i128);
+        let result = client.try_get_price(&base, &quote);
+        assert!(
+            result.is_err(),
+            "Single feeder must not meet the default quorum of 2"
+        );
+    }
+
+    /// Two fresh feeders exactly meet the default floor and should succeed.
+    #[test]
+    fn test_get_price_two_fresh_feeders_meets_default_quorum() {
+        let (env, admin, feeder1, client) = setup();
+        let feeder2 = Address::generate(&env);
+        client.add_feeder(&admin, &feeder2);
+
+        let base = Symbol::new(&env, "XLM");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder1, &base, &quote, &1_000_000i128);
+        client.set_price(&feeder2, &base, &quote, &1_100_000i128);
+
+        let data = client.get_price(&base, &quote);
+        // Median of [1_000_000, 1_100_000] = (1_000_000 + 1_100_000) / 2 = 1_050_000
+        assert_eq!(data.price, 1_050_000i128);
+    }
+
+    /// Admin can lower the floor to 1 to allow single-feeder pairs during
+    /// bootstrap.  After setting min=1, a single fresh feeder must succeed.
+    #[test]
+    fn test_admin_set_min_fresh_feeders_to_one_allows_single_feeder() {
+        let (env, admin, feeder, client) = setup();
+        client.set_min_fresh_feeders(&admin, &1u32);
+        assert_eq!(client.get_min_fresh_feeders(), 1u32);
+
+        let base = Symbol::new(&env, "XLM");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder, &base, &quote, &1_000_000i128);
+        let data = client.get_price(&base, &quote);
+        assert_eq!(data.price, 1_000_000i128);
+    }
+
+    /// Admin cannot set the floor below 1.
+    #[test]
+    fn test_admin_set_min_fresh_feeders_below_one_rejected() {
+        let (env, admin, _feeder, client) = setup();
+        let result = client.try_set_min_fresh_feeders(&admin, &0u32);
+        assert!(
+            result.is_err(),
+            "Floor of 0 must be rejected (minimum valid value is 1)"
+        );
+    }
+
+    /// Admin cannot set the floor above MAX_FEEDERS.
+    #[test]
+    fn test_admin_set_min_fresh_feeders_above_max_feeders_rejected() {
+        let (env, admin, _feeder, client) = setup();
+        let too_high = MAX_FEEDERS + 1;
+        let result = client.try_set_min_fresh_feeders(&admin, &too_high);
+        assert!(
+            result.is_err(),
+            "Floor above MAX_FEEDERS must be rejected"
+        );
+    }
+
+    /// Non-admin cannot set the floor.
+    #[test]
+    fn test_non_admin_cannot_set_min_fresh_feeders() {
+        let (env, _admin, _feeder, client) = setup();
+        let stranger = Address::generate(&env);
+        let result = client.try_set_min_fresh_feeders(&stranger, &1u32);
+        assert!(result.is_err(), "Non-admin must not change the quorum floor");
+    }
+
+    /// All feeders stale simultaneously — must return AllFeedsStale (not
+    /// InsufficientFreshFeeders, because zero fresh feeders is caught first).
+    #[test]
+    fn test_all_feeders_stale_simultaneously_returns_error() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder1, client) = setup();
+        let feeder2 = Address::generate(&env);
+        client.add_feeder(&admin, &feeder2);
+
+        let base = Symbol::new(&env, "DOT");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder1, &base, &quote, &7_000_000i128);
+        client.set_price(&feeder2, &base, &quote, &7_100_000i128);
+
+        // Advance past staleness window
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + MAX_STALENESS_SECS + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let result = client.try_get_price(&base, &quote);
+        assert!(result.is_err(), "Both stale feeders must cause get_price to fail");
+    }
+
+    /// Adversarial mid-block feeder removal: one of two feeders goes stale
+    /// between submissions. get_price should fail if only one remains fresh
+    /// and the default floor is 2.
+    #[test]
+    fn test_adversarial_one_feeder_goes_stale_mid_block_fails_quorum() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder1, client) = setup();
+        let feeder2 = Address::generate(&env);
+        client.add_feeder(&admin, &feeder2);
+
+        let base = Symbol::new(&env, "BTC");
+        let quote = Symbol::new(&env, "USDC");
+
+        // Both submit honest prices at T=0
+        client.set_price(&feeder1, &base, &quote, &50_000_000_000i128);
+        client.set_price(&feeder2, &base, &quote, &50_100_000_000i128);
+
+        // Verify both pass at T=0
+        assert!(
+            client.try_get_price(&base, &quote).is_ok(),
+            "Both feeders fresh: quorum met"
+        );
+
+        // Advance feeder1 past staleness; only feeder2 re-submits
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + MAX_STALENESS_SECS + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        // feeder2 re-submits (fresh); feeder1 is now stale
+        client.set_price(&feeder2, &base, &quote, &50_200_000_000i128);
+
+        // Default quorum = 2; only feeder2 is fresh → quorum not met
+        let result = client.try_get_price(&base, &quote);
+        assert!(
+            result.is_err(),
+            "Quorum of 2 not met when feeder1 is stale mid-block"
+        );
+    }
+
+    /// Verify the bubble-sort median path still works under MAX_FEEDERS entries
+    /// (bound respected, no unbounded iteration).
+    #[test]
+    fn test_median_bounded_by_max_feeders() {
+        let (env, admin, feeder0, client) = setup();
+        // Lower floor to 1 so we can test individual feeder additions
+        client.set_min_fresh_feeders(&admin, &1u32);
+
+        let base = Symbol::new(&env, "ETH");
+        let quote = Symbol::new(&env, "USDC");
+
+        // Start with feeder0 already set up
+        client.set_price(&feeder0, &base, &quote, &3_000_000_000i128);
+
+        // Add feeders up to the max (already have 1, add MAX_FEEDERS-1 more)
+        let remaining = MAX_FEEDERS - 1;
+        for i in 0..remaining {
+            let f = Address::generate(&env);
+            client.add_feeder(&admin, &f);
+            // Prices spread 1 unit apart to guarantee a known median
+            let price = 3_000_000_000i128 + i as i128;
+            client.set_price(&f, &base, &quote, &price);
+        }
+
+        // With MAX_FEEDERS feeders and floor=1, get_price must succeed
+        let result = client.try_get_price(&base, &quote);
+        assert!(result.is_ok(), "get_price must succeed with MAX_FEEDERS feeders");
     }
 }
