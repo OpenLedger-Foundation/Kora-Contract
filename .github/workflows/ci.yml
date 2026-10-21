@@ -207,6 +207,38 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  # ── Secondary market contract CI (issue #910) ────────────────────────────
+  secondary-market:
+    name: cargo build/test kora-secondary-market
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-secondary-market-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-secondary-market-
+
+      - name: cargo build -p kora-secondary-market (native)
+        run: cargo build -p kora-secondary-market
+
+      - name: cargo build -p kora-secondary-market (wasm32)
+        run: cargo build -p kora-secondary-market --target wasm32-unknown-unknown --release
+
+      - name: cargo test -p kora-secondary-market
+        run: cargo test -p kora-secondary-market
+
   governance-contract-tests:
     name: test ${{ matrix.package }}
     runs-on: ubuntu-latest

@@ -5,7 +5,7 @@
 .PHONY: build test clean fmt lint check check-access-matrix audit coverage coverage-per-contract deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
 
 WASM_TARGET := wasm32-unknown-unknown
-CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry debtor_attestation
+CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry debtor_attestation secondary_market
 COVERAGE_MIN ?= 95
 
 # Per-contract coverage floors (issue #683).

@@ -74,6 +74,7 @@ matrix jobs in parallel (issues #912 and #911).
 | `contracts/governance_voting` | `kora-governance-voting` | `GovernanceVotingContractClient` |
 | `contracts/parameter_registry` | `kora-parameter-registry` | `ParameterRegistryContractClient` |
 | `contracts/dispute_escrow` | `kora-dispute-escrow` | `DisputeEscrowContractClient` |
+| `contracts/secondary_market` | `kora-secondary-market` | `SecondaryMarketContractClient` |
 
 The governance crates depend on shared types and (for voting and registry)
 access control; they do not depend on each other. Parameter registry is an
@@ -82,6 +83,12 @@ All four release WASM artifacts are covered by the size-budget gate. See each
 contract README for address configuration and use `cargo +stable test -p
 <package>` to isolate its unit tests. No compile or test results are claimed
 by the #912/#911 onboarding change; verification was restricted to static review.
+
+**`secondary_market`** (`contracts/secondary_market`, `kora-secondary-market`) is a
+first-class workspace member as of issue #910. CI builds it natively and for
+`wasm32-unknown-unknown`, runs its unit tests (`cargo test -p kora-secondary-market`),
+and the WASM size-budget gate covers its release artifact. Add it to your local
+build whenever you touch settlement or secondary-market logic.
 
 ### Before you touch code
 
