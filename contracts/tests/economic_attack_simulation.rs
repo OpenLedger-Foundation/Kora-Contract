@@ -60,11 +60,17 @@ mod integration_tests {
         println!("   - Concentration cap bypass via refund");
         println!();
         
-        println!("2. Referral Self-Dealing (4 scenarios)");
+        println!("2. Referral Self-Dealing (8 scenarios)");
         println!("   - Sybil referral extraction");
         println!("   - Rapid cycling timing");
         println!("   - Cross-referral networks");
         println!("   - Allocation exhaustion griefing");
+        println!("   - Self-referral (referrer == sme) rejection");
+        println!("   - Circular referrer graph (two SMEs referring each other)");
+        println!("   - Exhausted reward pool claim returns false");
+        println!("   - Repaid first mint pays exactly once");
+        println!("   - Default before repaid is ineligible");
+        println!("   - Multiple referrer attempts for same SME rejected");
         println!();
         
         println!("3. Insurance Pool Timing (4 scenarios)");
