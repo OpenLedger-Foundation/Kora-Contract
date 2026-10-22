@@ -47,6 +47,21 @@ Use a rolling deployment to refresh a running process after updating a secret.
 Do not log resolved values, include them in diagnostics, or write them to
 health/status endpoints.
 
+## Linting IAM policies
+
+Validate committed policy snippets against the `/kora/ENV/SERVICE` path
+convention before pushing:
+
+```bash
+node infra/secrets/lint-iam-policy.js --policy infra/secrets/iam-policy.example.json
+```
+
+The lint runs in `.github/workflows/security.yml` on pull requests. It only
+allows `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret`,
+requires the `/kora/` prefix, and rejects `*` wildcards beyond the trailing
+`-??????` service-slug placeholder. The negative fixture at
+`infra/secrets/__fixtures__/bad-policy.json` must fail the lint.
+
 ## Local development
 
 Local development does not need AWS or production access. Use disposable,
