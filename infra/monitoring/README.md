@@ -30,8 +30,9 @@ indexer metrics contract used by the dashboard/rules is:
   monotonically increasing counters sourced from finalized indexed events.
 
 This workspace contains the health aggregation library, an HTTP adapter in
-`services/health/http-server.ts`, and the keeper, but no health-service process
-bootstrap or indexer implementation. The hosting application must construct a
+`services/health/http-server.ts`, a runnable bootstrap in
+`services/health/index.ts` (see `services/health/README.md` for env vars),
+and the keeper. The hosting application must construct a
 `HealthAggregator`, pass it to `createHealthHttpServer`, and listen on the
 configured internal port. The health adapter exports `kora_service_health`
 gauges and numeric per-service metrics. Indexer targets and event counters must
