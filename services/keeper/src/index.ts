@@ -8,6 +8,7 @@
  */
 
 import * as http from "http";
+import { Keypair } from "@stellar/stellar-sdk";
 import { JobStore } from "./jobStore";
 import { Dispatcher } from "./dispatcher";
 import { Scheduler } from "./scheduler";
@@ -44,6 +45,14 @@ async function main(): Promise<void> {
 
   if (!config.keeperSecret) {
     logger.error("KEEPER_SECRET env var is required");
+    process.exit(1);
+  }
+  // Fail fast on invalid key material so the keeper never starts in a state
+  // where on-chain submission would silently no-op instead of erroring.
+  try {
+    Keypair.fromSecret(config.keeperSecret);
+  } catch {
+    logger.error("KEEPER_SECRET is not a valid Stellar secret key");
     process.exit(1);
   }
   if (!config.marketplaceContractAddress || !config.activeListingsUrl) {

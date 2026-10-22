@@ -1,0 +1,34 @@
+# Pre-commit hooks for the Kora-Contract workspace.
+#
+# These mirror the CI verification steps (see CONTRIBUTING.md →
+# "Testing & Verification") so formatting, linting, and the fast unit-test
+# subset are enforced before a commit is created.
+#
+# Install with:  pip install pre-commit && pre-commit install
+# Run manually:  pre-commit run --all-files
+#
+# Skip the hooks for an exceptional commit with:  git commit --no-verify
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (format check)
+        entry: cargo fmt --all -- --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (lint)
+        entry: cargo clippy --all --all-targets -- -D warnings
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-test-unit
+        name: cargo test (fast unit subset)
+        entry: cargo test --all --lib
+        language: system
+        files: \.rs$
+        pass_filenames: false
