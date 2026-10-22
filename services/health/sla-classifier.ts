@@ -34,6 +34,28 @@ export function classifyServiceStatus(
 }
 
 /**
+ * Pinning provider check: degraded when all configured providers fail.
+ * Expects metrics `providersReachable` (number) and `providerCount` (number).
+ * Falls back to generic SLA classification when those bits are absent.
+ */
+export function classifyPinningStatus(
+  report: ServiceHealthReport,
+  sla: ServiceSlaConfig
+): ServiceStatus {
+  const reachable = report.metrics["providersReachable"];
+  const total = report.metrics["providerCount"];
+  const failed = report.metrics["failedProviders"];
+  if (typeof reachable === "number" && typeof total === "number" && total > 0) {
+    if (reachable <= 0) return "down";
+    if (reachable < total) return "degraded";
+  }
+  if (typeof failed === "number" && typeof total === "number" && total > 0) {
+    if (failed >= total) return "down";
+  }
+  return classifyServiceStatus(report, sla);
+}
+
+/**
  * Builds a `ServiceAggregateEntry` for a service that could not be reached
  * (timeout or network error).
  */

@@ -8,9 +8,9 @@
  *  - Unreachable service → "down" in report, others still reported
  */
 
-import { HealthAggregator, HealthFetcher, UpstreamService } from "../health-aggregator";
+import { HealthAggregator, HealthFetcher, UpstreamService, DEFAULT_SLAS, buildDefaultServices } from "../health-aggregator";
 import { renderPrometheusMetrics } from "../http-server";
-import { classifyServiceStatus, rollupStatus } from "../sla-classifier";
+import { classifyPinningStatus, classifyServiceStatus, rollupStatus } from "../sla-classifier";
 import { ServiceHealthReport, ServiceSlaConfig } from "../types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,6 +171,7 @@ describe("HealthAggregator — report shape", () => {
 describe("renderPrometheusMetrics", () => {
   it("exports service status gauges and numeric health metrics", () => {
     const output = renderPrometheusMetrics({
+      schemaVersion: "1.1.0",
       overall: "degraded",
       aggregatedAt: "2026-09-27T00:00:00.000Z",
       services: [
@@ -187,5 +188,60 @@ describe("renderPrometheusMetrics", () => {
     expect(output).toContain('kora_service_health{service="api\\"east",status="ok"} 0');
     expect(output).toContain("kora_service_api_east_lagSeconds 3");
     expect(output).not.toContain("detail");
+  });
+});
+
+describe("reporting + ipfs-pinning probes", () => {
+  it("marks reporting down when probe fails (timeout)", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("reporting")) throw new Error("timeout");
+      return okReport({ providersReachable: 2, providerCount: 2 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.services.find((s) => s.name === "reporting")!.status).toBe("down");
+    expect(report.overall).toBe("down");
+  });
+
+  it("marks pinning degraded/down via provider reachability bits", () => {
+    const sla = DEFAULT_SLAS["ipfs-pinning"];
+    expect(classifyPinningStatus(okReport({ providersReachable: 0, providerCount: 2 }), sla)).toBe("down");
+    expect(classifyPinningStatus(okReport({ providersReachable: 1, providerCount: 2 }), sla)).toBe("degraded");
+    expect(classifyPinningStatus(okReport({ providersReachable: 2, providerCount: 2 }), sla)).toBe("ok");
+  });
+
+  it("all-green matrix: reporting + pinning ok => overall ok", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("pinning")) return okReport({ providersReachable: 2, providerCount: 2 });
+      return okReport({ exportQueueDepth: 5 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.overall).toBe("ok");
+  });
+
+  it("partial-degraded matrix: queue backup warns, pinning all-fail downs", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("reporting")) return okReport({ exportQueueDepth: 150 });
+      return okReport({ providersReachable: 0, providerCount: 3 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.services.find((s) => s.name === "reporting")!.status).toBe("degraded");
+    expect(report.services.find((s) => s.name === "ipfs-pinning")!.status).toBe("down");
+    expect(report.overall).toBe("down");
+  });
+
+  it("exposes env-configurable probe URLs", () => {
+    expect(buildDefaultServices().length).toBe(2);
   });
 });

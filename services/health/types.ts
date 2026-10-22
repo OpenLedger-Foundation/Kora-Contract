@@ -55,6 +55,8 @@ export interface ServiceAggregateEntry {
 }
 
 export interface AggregatedHealthReport {
+  /** Aggregated schema version (bump on contract change). */
+  schemaVersion: string;
   /** Overall protocol health — "ok" only when ALL services are "ok". */
   overall: ServiceStatus;
   /** ISO-8601 timestamp of the aggregation run. */
