@@ -9,8 +9,8 @@ A resilient background keeper that watches on-chain deadlines (funding expiry, i
 ## Architecture
 
 ```
-Indexer (deadline data and active listings)
-        │
+Indexer (deadline export: /api/v1/deadlines?horizon_sec=…)
+        │  IndexerDeadlineClient.fetchDeadlines() every DEADLINE_POLL_INTERVAL_MS
         ▼
   Scheduler.enqueueDeadlines()
         │
@@ -82,6 +82,19 @@ production credentials locally. See [the secrets runbook](../../infra/secrets/RE
 | `GET /status` | Job counts by status |
 | `GET /metrics` | Prometheus keeper job gauges |
 | `GET /history` | Last 200 job records |
+
+### Deadline ingestion env vars (#1022)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `INDEXER_URL` | `KEEPER_ACTIVE_LISTINGS_URL` | Indexer deadline export endpoint |
+| `DEADLINE_HORIZON_SEC` | `86400` | Only ingest deadlines within now + horizon (elapsed always ingested) |
+| `DEADLINE_POLL_INTERVAL_MS` | `60000` | Ingestion cadence, separate from the dispatch tick |
+| `KEEPER_INDEXER_API_KEY` | _(empty)_ | Bearer token for the indexer endpoint |
+
+Indexer 503s/timeouts resolve to an empty batch (degraded health, logged
+with jittered backoff) and never corrupt SQLite job state. Unset
+`INDEXER_URL` keeps the manual seed path (`enqueueDeadlines`) for local dev.
 
 ---
 
