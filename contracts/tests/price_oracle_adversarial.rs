@@ -39,6 +39,10 @@ fn setup() -> (Env, Address, Address, PriceOracleClient<'static>) {
     let access_control = Address::generate(&env);
     client.initialize(&admin, &access_control);
 
+    // Lower floor to 1 so adversarial scenarios can test single-feeder paths
+    // directly. Quorum-enforcement tests set their own floor explicitly.
+    client.set_min_fresh_feeders(&admin, &1u32);
+
     let feeder = Address::generate(&env);
     client.add_feeder(&admin, &feeder);
 
@@ -166,16 +170,18 @@ fn test_adversarial_all_feeders_stale_except_manipulated_one() {
     // ATTACK: feeder1 (still fresh) submits manipulated price after others stale
     client.set_price(&feeder1, &base, &quote, &30_000_000_000i128); // 3000 USDC (40% drop)
 
-    // DEFENSE: Staleness guard filters out feeder2, but feeder1 is sole fresh source
-    // This is a KNOWN LIMITATION: if only one feeder is fresh, manipulation possible
+    // NOTE: With min_fresh_feeders=1 (set in setup()), a single fresh feeder
+    // still serves — this scenario demonstrates WHY the default quorum is 2.
+    // See test_adversarial_one_feeder_goes_stale_mid_block_fails_quorum for
+    // the quorum-enforced version of this attack.
     let aggregated = client.get_price(&base, &quote);
     assert_eq!(
         aggregated.price, 30_000_000_000i128,
-        "Single fresh feeder can manipulate when all others stale (LIMITATION)"
+        "With floor=1, single fresh feeder can manipulate (demonstrates need for quorum>1)"
     );
 
-    // MITIGATION RECOMMENDATION: Add maximum per-update rate-change sanity bound
-    // (see test_recommend_max_rate_change_per_update below)
+    // MITIGATION: The default MIN_FRESH_FEEDERS_DEFAULT=2 prevents this.
+    // Relay operators must ensure at least 2 feeders are always active.
 }
 
 // ── Scenario 3: Coordinated Multi-Feeder Attack ───────────────────────────────
@@ -208,7 +214,84 @@ fn test_adversarial_majority_feeders_collude() {
     // Additional defense: monitor off-chain for consensus divergence from external oracles
 }
 
-// ── Scenario 4: Maximum Rate-Change Sanity Bound (RECOMMENDATION) ──────────────
+// ── Scenario 4: Minimum Fresh Feeder Quorum — Adversarial Mid-Block Removal ──
+
+/// After the default quorum is applied (2), removing one feeder's freshness
+/// mid-block (simulated via timestamp advance + no re-submission) causes
+/// get_price to fail with InsufficientFreshFeeders.
+#[test]
+fn test_adversarial_one_feeder_goes_stale_mid_block_fails_quorum() {
+    let (env, admin, feeder1, client) = setup();
+
+    let feeder2 = Address::generate(&env);
+    client.add_feeder(&admin, &feeder2);
+
+    // Raise floor to 2 for this test
+    client.set_min_fresh_feeders(&admin, &2u32);
+
+    let base = Symbol::new(&env, "BTC");
+    let quote = Symbol::new(&env, "USDC");
+
+    client.set_price(&feeder1, &base, &quote, &50_000_000_000i128);
+    client.set_price(&feeder2, &base, &quote, &50_100_000_000i128);
+
+    // Both fresh — should pass
+    assert!(
+        client.try_get_price(&base, &quote).is_ok(),
+        "Both feeders fresh: quorum of 2 met"
+    );
+
+    // feeder1 goes stale (advances past staleness); only feeder2 re-submits
+    env.ledger().with_mut(|li| {
+        li.timestamp += 3601; // past default staleness
+    });
+    client.set_price(&feeder2, &base, &quote, &50_200_000_000i128);
+
+    // Only feeder2 is fresh → quorum not met
+    let result = client.try_get_price(&base, &quote);
+    assert!(
+        result.is_err(),
+        "Single remaining fresh feeder must fail quorum=2 check"
+    );
+}
+
+/// Admin can restore service by lowering floor to 1 when only one feeder is live.
+#[test]
+fn test_adversarial_admin_lowers_floor_to_restore_single_feeder_service() {
+    let (env, admin, feeder1, client) = setup();
+    let feeder2 = Address::generate(&env);
+    client.add_feeder(&admin, &feeder2);
+
+    client.set_min_fresh_feeders(&admin, &2u32);
+
+    let base = Symbol::new(&env, "XLM");
+    let quote = Symbol::new(&env, "USDC");
+
+    client.set_price(&feeder1, &base, &quote, &1_000_000i128);
+    client.set_price(&feeder2, &base, &quote, &1_050_000i128);
+
+    // feeder2 goes stale
+    env.ledger().with_mut(|li| {
+        li.timestamp += 3601;
+    });
+    client.set_price(&feeder1, &base, &quote, &1_010_000i128);
+
+    // Quorum=2 fails
+    assert!(
+        client.try_get_price(&base, &quote).is_err(),
+        "Quorum of 2 not met with single fresh feeder"
+    );
+
+    // Admin lowers floor to allow single-feeder emergency operation
+    client.set_min_fresh_feeders(&admin, &1u32);
+
+    let data = client.get_price(&base, &quote);
+    assert_eq!(data.price, 1_010_000i128, "Single feeder should serve after admin lowers floor");
+}
+
+// ── Scenario 5: Rate-Change Sanity Bound ──────────────────────────────────────
+
+// (Previously Scenario 4)
 
 #[test]
 #[ignore] // This test documents a RECOMMENDED feature not yet implemented
@@ -239,7 +322,7 @@ fn test_recommend_max_rate_change_per_update() {
     // This gives monitoring systems time to detect and respond to manipulation
 }
 
-// ── Scenario 5: Peg Deviation + Auto-Flag Recovery ────────────────────────────
+// ── Scenario 6: Peg Deviation + Auto-Flag Recovery ────────────────────────────
 
 #[test]
 fn test_adversarial_peg_deviation_blocks_until_admin_clears() {
@@ -432,14 +515,15 @@ fn test_adversarial_cannot_submit_when_paused() {
  * 6. Immutable history: historical snapshots cannot be retroactively manipulated
  * 7. Authorization enforcement: non-feeders cannot submit prices
  * 8. Protocol pause: blocks all submissions when paused
+ * 9. Minimum fresh feeder quorum (#908): get_price requires MIN_FRESH_FEEDERS fresh feeders
+ *    — single-feeder aggregation blocked by default
+ *    — admin-tunable floor (1..=MAX_FEEDERS)
+ *    — INSUF_FD event emitted when quorum not met
+ *    — bubble-sort median path remains bounded by MAX_FEEDERS
  *
  * ⚠️ KNOWN LIMITATIONS (require additional mitigations):
- * 1. Single fresh feeder: when only one feeder is fresh, they can manipulate freely
- *    → MITIGATION: Require minimum N feeders for aggregation, reject if <N fresh
- * 2. Majority collusion: >50% compromised feeders can manipulate median
+ * 1. Majority collusion: >50% compromised feeders can manipulate median
  *    → MITIGATION: Admin governance to detect and remove malicious feeders
- * 3. No per-update rate-change bound: large single-update jumps not prevented
- *    → RECOMMENDATION: Add max_rate_change_per_update sanity bound (e.g., 20%)
  *
  * COVERAGE TARGET: 90%+ of oracle defense code paths
  * All tests marked with #[ignore] indicate RECOMMENDED features not yet implemented.

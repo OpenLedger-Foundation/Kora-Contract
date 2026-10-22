@@ -96,6 +96,11 @@ path = "economic_attack_simulation.rs"
 name = "vesting_lifecycle"
 path = "vesting_lifecycle.rs"
 
+# ── Fractionalizer E2E test suite (issue #913) ────────────────────────────────
+[[test]]
+name = "fractionalizer_e2e"
+path = "fractionalizer_e2e.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
@@ -108,3 +113,4 @@ kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
 kora-secondary-market = { path = "../secondary_market" }
+kora-fractionalizer = { path = "../fractionalizer" }

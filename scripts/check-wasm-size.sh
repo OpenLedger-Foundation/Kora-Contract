@@ -20,7 +20,7 @@ if [ ! -f "$BUDGET_FILE" ]; then
   exit 1
 fi
 
-CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry debtor_attestation"
+CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry debtor_attestation secondary_market"
 HAS_OVERAGE=0
 HAS_MISSING=0
 
