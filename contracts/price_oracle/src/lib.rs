@@ -180,10 +180,15 @@ impl PriceOracleContract {
             {
                 // Compute percentage change: |new - old| / old * 10_000
                 let diff = (price - prev_data.price).abs();
+                // Issue #907: saturate instead of truncating the i128→u32 cast.
+                // A >429% move previously wrapped `as u32` and could slip
+                // under the bound; now any value past u32::MAX clamps to it,
+                // which can only fail the comparison, never pass it.
                 let change_bps = diff
                     .checked_mul(10_000)
                     .and_then(|v| v.checked_div(prev_data.price))
-                    .ok_or(PriceOracleError::ArithmeticOverflow)? as u32;
+                    .ok_or(PriceOracleError::ArithmeticOverflow)?;
+                let change_bps: u32 = change_bps.try_into().unwrap_or(u32::MAX);
 
                 if change_bps > max_change_bps {
                     // Emit event so off-chain monitors can detect attempted manipulation
@@ -371,6 +376,64 @@ impl PriceOracleContract {
             .persistent()
             .set(&DataKey::MaxDeviation, &deviation_bps);
         Ok(())
+    }
+
+    /// Set the maximum rate-of-change per update for a currency pair (Issue #907).
+    /// Admin only.
+    ///
+    /// Once configured, `set_price` rejects any single feeder update whose
+    /// absolute change against that feeder's previous price for the pair
+    /// exceeds `max_change_bps` basis points (`RateChangeExceeded` + `RATE_EX`
+    /// event). This is the circuit breaker against fresh-key manipulation:
+    /// a newly registered feeder cannot move the aggregated price by more
+    /// than the bound in one hop.
+    ///
+    /// **Parameters:**
+    /// - `base` / `quote` — the currency pair to bound.
+    /// - `max_change_bps` — bound in basis points (2000 = 20%).
+    ///   `0` freezes the pair: every nonzero update exceeds the bound, so
+    ///   only price-restoring updates (change of 0) pass. This is deliberate
+    ///   freeze semantics, not "disabled" — there is intentionally no way to
+    ///   turn the bound off once set; raise it instead.
+    ///
+    /// **Errors:**
+    /// - `PriceOracleError::NotAdmin` — caller is not the admin.
+    /// - `PriceOracleError::InvalidAmount` — `max_change_bps > 10_000`
+    ///   (an update can never legitimately move more than 100% in one hop;
+    ///   values above that are configuration mistakes that would neuter the
+    ///   guard).
+    pub fn set_max_rate_change_per_update(
+        env: Env,
+        admin: Address,
+        base: Symbol,
+        quote: Symbol,
+        max_change_bps: u32,
+    ) -> Result<(), PriceOracleError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if max_change_bps > 10_000 {
+            return Err(PriceOracleError::InvalidAmount);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxRateChange(base.clone(), quote.clone()), &max_change_bps);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("RATE_CFG"),),
+            (base, quote, max_change_bps, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
+    /// Get the configured max rate-of-change bound for a pair (Issue #907).
+    /// Returns `None` when no bound is configured (guard inactive for the pair).
+    pub fn get_max_rate_change_per_update(
+        env: Env,
+        base: Symbol,
+        quote: Symbol,
+    ) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::MaxRateChange(base, quote))
     }
 
     // ── Peg Configuration (#589) ───────────────────────────────────────────────

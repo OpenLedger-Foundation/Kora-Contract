@@ -54,6 +54,14 @@ pub enum RiskRegistryError {
     VerifierSuspended = 30,
     ReadditionCooldownNotElapsed = 31,
     AccessControlNotConfigured = 32,
+    // ── Reputation Gating (Issue #904) ────────────────────────────────────────
+    /// Caller is a registered verifier but its reputation is below the minimum
+    /// threshold required for the requested action.
+    InsufficientReputation = 33,
+    // ── Protocol Pause Enforcement (Issue #906) ──────────────────────────────
+    /// The authoritative protocol pause (access_control `is_paused`) is active;
+    /// privileged mutations are rejected until the protocol is unpaused.
+    ProtocolPaused = 34,
 }
 
 impl From<CommonError> for RiskRegistryError {
@@ -103,6 +111,19 @@ pub const VERIFIER_READD_COOLDOWN_SECS: u64 = 7 * 24 * 3_600; // 7 days
 /// Minimum seconds between consecutive updates to the same debtor's score by the same verifier.
 /// Prevents rapid manipulation immediately before a funding or default decision.
 pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
+
+/// Minimum reputation (0–100 scale) a verifier must hold to perform sensitive
+/// risk-influencing actions: registering SMEs, updating scores, setting credit
+/// limits, managing sub-accounts, and submitting debtor-score attestations.
+///
+/// Rationale (issue #904): new verifiers start at 100. Each recorded default
+/// costs the verifier-of-record 10 reputation (floored at 0), and each resolved
+/// dispute with a slash also costs 10. A threshold of 50 therefore removes
+/// risk-influence from verifiers whose SMEs have defaulted 5+ times, while a
+/// single successful repayment (+1, capped at 100) gradually restores access
+/// without redeployment. Exactly-at-threshold (reputation == 50) is allowed;
+/// strictly-below is rejected with `InsufficientReputation`.
+pub const MIN_REPUTATION_RISK_ACTIONS: u32 = 50;
 
 // Maximum number of distinct verifiers allowed to attest a single debtor's risk
 // score, bounding the unbounded-Vec DoS surface in get_debtor_score aggregation.
@@ -397,6 +418,7 @@ impl RiskRegistryContract {
     pub fn add_verifier(env: Env, admin: Address, verifier: Address, stake_amount: i128) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         kora_shared::validation::require_not_self(&env, &verifier)?;
 
         // Guard: reject re-registration of an already-active verifier.
@@ -526,6 +548,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         if additional_amount <= 0 {
             return Err(RiskRegistryError::InvalidAmount);
@@ -615,6 +638,7 @@ impl RiskRegistryContract {
     pub fn remove_verifier(env: Env, admin: Address, verifier: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         // Only remove if it actually exists — avoids a no-op silently succeeding
         if !env
             .storage()
@@ -709,6 +733,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         Self::require_verifier_flag(&env, &verifier)?;
         if Self::verifier_status(&env, &verifier) != VerifierStatus::Active {
             return Err(RiskRegistryError::InvalidStatusTransition);
@@ -735,6 +760,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         Self::require_verifier_flag(&env, &verifier)?;
         if Self::verifier_status(&env, &verifier) != VerifierStatus::Suspended {
             return Err(RiskRegistryError::InvalidStatusTransition);
@@ -765,6 +791,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         Self::require_verifier_flag(&env, &verifier)?;
         let status = Self::verifier_status(&env, &verifier);
         if status != VerifierStatus::Active && status != VerifierStatus::Suspended {
@@ -798,6 +825,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         Self::require_verifier_flag(&env, &verifier)?;
         if Self::verifier_status(&env, &verifier) != VerifierStatus::PendingRemoval {
             return Err(RiskRegistryError::NoRemovalRequested);
@@ -830,6 +858,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         Self::require_verifier_flag(&env, &verifier)?;
         if Self::verifier_status(&env, &verifier) != VerifierStatus::PendingRemoval {
             return Err(RiskRegistryError::NoRemovalRequested);
@@ -931,6 +960,8 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         primary.require_auth();
         Self::require_verifier_primary(&env, &primary)?;
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &primary, MIN_REPUTATION_RISK_ACTIONS)?;
 
         // sub_account must not itself be a primary verifier
         if env
@@ -967,6 +998,8 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         primary.require_auth();
         Self::require_verifier_primary(&env, &primary)?;
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &primary, MIN_REPUTATION_RISK_ACTIONS)?;
 
         let stored_primary: Address = env
             .storage()
@@ -1012,6 +1045,9 @@ impl RiskRegistryContract {
         verifier.require_auth();
         // Resolve to primary verifier so sub-accounts attribute registration correctly.
         let primary = Self::resolve_verifier(&env, &verifier)?;
+        // Issues #904/#906: protocol pause and reputation gating (primary-scoped).
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &primary, MIN_REPUTATION_RISK_ACTIONS)?;
         require_valid_risk_score(risk_score)?;
 
         // Guard against silent re-registration that would reset defaults/invoice counts
@@ -1081,6 +1117,9 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         verifier.require_auth();
         let primary = Self::resolve_verifier(&env, &verifier)?;
+        // Issues #904/#906: protocol pause and reputation gating (primary-scoped).
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &primary, MIN_REPUTATION_RISK_ACTIONS)?;
         require_valid_risk_score(new_score)?;
 
         let _guard = ReentrancyGuard::new(&env)?;
@@ -1132,6 +1171,9 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         verifier.require_auth();
         let primary = Self::resolve_verifier(&env, &verifier)?;
+        // Issues #904/#906: protocol pause and reputation gating (primary-scoped).
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &primary, MIN_REPUTATION_RISK_ACTIONS)?;
         Self::require_verifier(&env, &verifier)?;
         require_non_negative_amount(credit_limit)?;
         if credit_limit < 0 {
@@ -1184,6 +1226,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         // new_verifier must be an Active primary verifier (Issue #739:
         // suspended / pending-removal verifiers cannot receive custody).
@@ -1278,6 +1321,7 @@ impl RiskRegistryContract {
     pub fn record_default(env: Env, admin: Address, sme: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         let _guard = ReentrancyGuard::new(&env)?;
 
         let mut profile: SmeProfile = env
@@ -1399,6 +1443,7 @@ impl RiskRegistryContract {
     pub fn record_successful_repayment(env: Env, admin: Address, sme: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         let profile: SmeProfile = env
             .storage()
@@ -1441,6 +1486,9 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         verifier.require_auth();
         Self::require_verifier(&env, &verifier)?;
+        // Issues #904/#906: attestation submission needs reputation + unpaused protocol.
+        Self::require_not_paused(&env)?;
+        Self::require_min_reputation(&env, &verifier, MIN_REPUTATION_RISK_ACTIONS)?;
         // Validate exact 32-byte SHA-256 length before score
         require_exact_length(&debtor_hash, 32)?;
         require_valid_risk_score(score)?;
@@ -1685,6 +1733,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
         env.storage()
             .persistent()
             .set(&DataKey::MinimumDebtorScore, &min_score);
@@ -1866,6 +1915,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         env.storage()
             .persistent()
@@ -1888,6 +1938,8 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         challenger.require_auth();
         Self::require_verifier(&env, &verifier)?; // verify is active
+        // Issue #906: disputes are inbound risk activity; blocked while paused.
+        Self::require_not_paused(&env)?;
 
         let mut bond: Bond = env
             .storage()
@@ -1950,6 +2002,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         let mut dispute: Dispute = env
             .storage()
@@ -2038,6 +2091,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         env.storage().persistent().set(&DataKey::BreakerThresholdBps, &threshold_bps);
         env.storage().persistent().set(&DataKey::BreakerMinSampleSize, &min_sample_size);
@@ -2053,6 +2107,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         env.storage().persistent().remove(&DataKey::PausedForDebtor(debtor_hash.clone()));
         env.events().publish((soroban_sdk::symbol_short!("BRK_CLR"), debtor_hash), ());
@@ -2066,6 +2121,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         env.storage().persistent().remove(&DataKey::PausedForTier(tier.clone()));
         env.events().publish((soroban_sdk::symbol_short!("BRK_CLR"), tier), ());
@@ -2096,6 +2152,51 @@ impl RiskRegistryContract {
             .ok_or(RiskRegistryError::NotInitialized)?;
         if &admin != caller {
             return Err(RiskRegistryError::NotAdmin);
+        }
+        Ok(())
+    }
+
+    /// Issue #906: enforce the authoritative protocol pause on privileged
+    /// mutations. Pause state lives exclusively in the linked `access_control`
+    /// contract (`is_paused`); no duplicate pause flag is stored here. Follows
+    /// the established skip-if-unconfigured pattern (marketplace,
+    /// dispute_resolution): deployments that have not wired
+    /// `set_access_control` are unaffected, so this never invents a second
+    /// pause source.
+    fn require_not_paused(env: &Env) -> Result<(), RiskRegistryError> {
+        if let Some(ac_addr) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::AccessControl)
+        {
+            let ac = kora_access_control::AccessControlContractClient::new(env, &ac_addr);
+            if ac.is_paused() {
+                return Err(RiskRegistryError::ProtocolPaused);
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue #904: gate sensitive verifier actions on the verifier's on-chain
+    /// reputation. Uses the existing `DataKey::VerifierReputation` map (the
+    /// authoritative reputation source; no parallel subsystem is created).
+    /// Fails closed: a verifier with no stored reputation reads as 0.
+    /// Reputation is persistent storage, so increases (e.g. via
+    /// `record_successful_repayment`) restore access immediately, without
+    /// redeployment, and the check reads a single key — no verifier-list
+    /// iteration.
+    fn require_min_reputation(
+        env: &Env,
+        verifier: &Address,
+        threshold: u32,
+    ) -> Result<(), RiskRegistryError> {
+        let reputation: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VerifierReputation(verifier.clone()))
+            .unwrap_or(0);
+        if reputation < threshold {
+            return Err(RiskRegistryError::InsufficientReputation);
         }
         Ok(())
     }
@@ -2350,6 +2451,7 @@ impl RiskRegistryContract {
     ) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
 
         // Validate: boundaries must be in order and within valid range
         if aaa_max >= aa_max || aa_max >= a_max || a_max >= b_max || b_max > 100 {
@@ -2425,6 +2527,23 @@ mod tests {
         soroban_sdk::token::StellarAssetClient::new(env, token).mint(to, &amount);
     }
 
+    /// Issue #906: deploys a real `access_control` contract, links it into the
+    /// registry via `set_access_control`, and pauses the protocol as `admin`.
+    /// Returns the access_control client so tests can unpause or assert state.
+    /// No multisig is configured, so `pause` takes the direct-call path.
+    fn setup_paused(
+        env: &Env,
+        admin: &Address,
+        client: &RiskRegistryContractClient,
+    ) -> kora_access_control::AccessControlContractClient<'static> {
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac = kora_access_control::AccessControlContractClient::new(env, &ac_id);
+        ac.initialize(admin);
+        client.set_access_control(admin, &ac_id);
+        ac.pause(admin);
+        ac
+    }
+
     // ── initialize ────────────────────────────────────────────────────────────
 
     #[test]
@@ -2465,7 +2584,7 @@ mod tests {
 
     #[test]
     fn test_accept_admin_wrong_caller_fails() {
-        let (env, admin, _, client) = setup();
+        let (env, admin, _, _, client) = setup();
         let new_admin = Address::generate(&env);
         let impostor = Address::generate(&env);
         client.propose_admin(&admin, &new_admin).unwrap();
@@ -3676,10 +3795,14 @@ mod tests {
         let reputation = client.get_verifier_reputation(&verifier);
         assert_eq!(reputation, 0); // Slashed below threshold
 
-        // TODO: After implementing reputation gating:
-        // Attempting to register another SME should fail:
-        // let bad_sme2 = Address::generate(&env);
-        // assert!(client.try_register_sme(&verifier, &bad_sme2, &50u32, &true).is_err());
+        // Issue #904: attempting to register another SME must now fail with
+        // InsufficientReputation (reputation 0 < MIN_REPUTATION_RISK_ACTIONS).
+        let bad_sme2 = Address::generate(&env);
+        let err = client
+            .try_register_sme(&verifier, &bad_sme2, &50u32, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
     }
 
     #[test]
@@ -3702,9 +3825,13 @@ mod tests {
         let reputation = client.get_verifier_reputation(&verifier);
         assert_eq!(reputation, 0);
 
-        // TODO: After implementing reputation gating:
-        // Attempting to update the score should fail:
-        // assert!(client.try_update_sme_score(&verifier, &sme, &75u32).is_err());
+        // Issue #904: attempting to update the score must now fail with
+        // InsufficientReputation (reputation 0 < MIN_REPUTATION_RISK_ACTIONS).
+        let err = client
+            .try_update_sme_score(&verifier, &sme, &75u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
     }
 
     #[test]
@@ -3725,8 +3852,13 @@ mod tests {
             client.record_default(&admin, &sme);
         }
 
-        // TODO: After implementing reputation gating:
-        // assert!(client.try_set_credit_limit(&verifier, &sme, &1_000_000i128).is_err());
+        // Issue #904: setting a credit limit must now fail with
+        // InsufficientReputation (reputation 0 < MIN_REPUTATION_RISK_ACTIONS).
+        let err = client
+            .try_set_credit_limit(&verifier, &sme, &1_000_000i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
     }
 
     #[test]
@@ -3780,6 +3912,121 @@ mod tests {
         assert!(client.try_register_sme(&verifier, &sme, &50u32, &true).is_ok());
         assert!(client.try_update_sme_score(&verifier, &sme, &75u32).is_ok());
         assert!(client.try_set_credit_limit(&verifier, &sme, &500_000i128).is_ok());
+    }
+
+    #[test]
+    fn test_reputation_threshold_boundary_exactly_at_min_allowed() {
+        // Issue #904: exactly-at-threshold (reputation == 50) must be allowed;
+        // strictly below (49) must be rejected. 5 defaults → 100 - 50 = 50.
+        let (env, admin, _, staking_token, client) = setup();
+        let verifier = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
+        client.add_verifier(&admin, &verifier, &1_000_000i128);
+        client.register_sme(&verifier, &sme, &50u32, &true);
+
+        for _ in 0..5 {
+            client.record_default(&admin, &sme);
+        }
+        assert_eq!(client.get_verifier_reputation(&verifier), 50);
+
+        // Exactly at MIN_REPUTATION_RISK_ACTIONS: still allowed.
+        let sme2 = Address::generate(&env);
+        assert!(client.try_register_sme(&verifier, &sme2, &50u32, &true).is_ok());
+
+        // One more default → 40, strictly below the threshold: blocked.
+        client.record_default(&admin, &sme);
+        assert_eq!(client.get_verifier_reputation(&verifier), 40);
+        let sme3 = Address::generate(&env);
+        let err = client
+            .try_register_sme(&verifier, &sme3, &50u32, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
+    }
+
+    #[test]
+    fn test_reputation_restored_by_successful_repayment_lifts_gate() {
+        // Issue #904: reputation loss is not a permanent ban. Successful
+        // repayments (admin-recorded) raise reputation back to the threshold
+        // and immediately restore the verifier's gated actions.
+        let (env, admin, _, staking_token, client) = setup();
+        let verifier = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, 1_000_000i128);
+        client.add_verifier(&admin, &verifier, &1_000_000i128);
+        client.register_sme(&verifier, &sme, &50u32, &true);
+
+        // 6 defaults → reputation 40, gated.
+        for _ in 0..6 {
+            client.record_default(&admin, &sme);
+        }
+        assert_eq!(client.get_verifier_reputation(&verifier), 40);
+        let blocked = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_register_sme(&verifier, &blocked, &50u32, &true)
+                .unwrap_err()
+                .unwrap(),
+            RiskRegistryError::InsufficientReputation
+        );
+
+        // 10 successful repayments → 40 + 10 = 50, back at the threshold.
+        for _ in 0..10 {
+            client.record_successful_repayment(&admin, &sme);
+        }
+        assert_eq!(client.get_verifier_reputation(&verifier), 50);
+
+        // Gate is lifted without any redeployment or admin intervention.
+        let allowed = Address::generate(&env);
+        assert!(client.try_register_sme(&verifier, &allowed, &50u32, &true).is_ok());
+    }
+
+    #[test]
+    fn test_reputation_gate_applies_to_sub_accounts_of_slashed_primary() {
+        // Issue #904: a sub-account resolves to its primary for reputation, so
+        // delegating to a fresh address must not bypass the gate on a
+        // slashed primary.
+        let (env, admin, _, staking_token, client) = setup();
+        let primary = Address::generate(&env);
+        let sub = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        mint_stake(&env, &staking_token, &primary, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&primary, 1_000_000i128);
+        client.add_verifier(&admin, &primary, &1_000_000i128);
+        client.add_sub_account(&primary, &sub);
+        client.register_sme(&primary, &sme, &50u32, &true);
+
+        // Slash the primary below the threshold.
+        for _ in 0..6 {
+            client.record_default(&admin, &sme);
+        }
+        assert_eq!(client.get_verifier_reputation(&primary), 40);
+
+        // Sub-account actions resolve to the slashed primary and are blocked.
+        let sme2 = Address::generate(&env);
+        let err = client
+            .try_register_sme(&sub, &sme2, &50u32, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
+        let err = client
+            .try_update_sme_score(&sub, &sme, &75u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
+        // Managing sub-accounts is itself a gated primary action.
+        let extra_sub = Address::generate(&env);
+        let err = client
+            .try_add_sub_account(&primary, &extra_sub)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::InsufficientReputation);
     }
 
     // ── Issue #480: Debtor score cooldown sub-account bypass tests ──────────────
@@ -3935,129 +4182,232 @@ mod tests {
 
     #[test]
     fn test_add_verifier_blocked_when_protocol_paused() {
+        // Issue #906: once access_control has paused the protocol, add_verifier
+        // must fail closed with ProtocolPaused.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that add_verifier should check protocol pause status,
-        // currently it does not (issue #479). Once implemented, verifiers should
-        // not be addable when access_control has paused the protocol.
         let verifier = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
-        let result = client.try_add_verifier(&admin, &verifier, &1_000_000i128);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_add_verifier(&admin, &verifier, &1_000_000i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_remove_verifier_blocked_when_protocol_paused() {
+        // Issue #906: remove_verifier is a privileged mutation and must respect
+        // the authoritative pause in access_control.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that remove_verifier should check protocol pause status.
         let verifier = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_remove_verifier(&admin, &verifier);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_remove_verifier(&admin, &verifier)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_add_sub_account_blocked_when_protocol_paused() {
+        // Issue #906: delegation of sub-accounts is a privileged mutation.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that add_sub_account should check protocol pause status.
         let verifier = Address::generate(&env);
         let sub_account = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_add_sub_account(&verifier, &sub_account);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_add_sub_account(&verifier, &sub_account)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_remove_sub_account_blocked_when_protocol_paused() {
+        // Issue #906: revoking a sub-account delegation is a privileged mutation.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that remove_sub_account should check protocol pause status.
         let verifier = Address::generate(&env);
         let sub_account = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.add_sub_account(&verifier, &sub_account);
-        let result = client.try_remove_sub_account(&verifier, &sub_account);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_remove_sub_account(&verifier, &sub_account)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_register_sme_blocked_when_protocol_paused() {
+        // Issue #906: SME registration is a privileged verifier action.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that register_sme should check protocol pause status.
         let verifier = Address::generate(&env);
         let sme = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_register_sme(&verifier, &sme, &35u32, &true);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_register_sme(&verifier, &sme, &35u32, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_update_sme_score_blocked_when_protocol_paused() {
+        // Issue #906: score updates are a privileged verifier action.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that update_sme_score should check protocol pause status.
         let verifier = Address::generate(&env);
         let sme = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.register_sme(&verifier, &sme, &35u32, &true);
-        let result = client.try_update_sme_score(&verifier, &sme, &45u32);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_update_sme_score(&verifier, &sme, &45u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_set_credit_limit_blocked_when_protocol_paused() {
+        // Issue #906: credit-limit updates are a privileged verifier action.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that set_credit_limit should check protocol pause status.
         let verifier = Address::generate(&env);
         let sme = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
         client.register_sme(&verifier, &sme, &35u32, &true);
-        let result = client.try_set_credit_limit(&verifier, &sme, &1_000_000i128);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_set_credit_limit(&verifier, &sme, &1_000_000i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_record_default_blocked_when_protocol_paused() {
+        // Issue #906: admin default recording is gated too — during an incident
+        // the pause freezes ALL risk-state mutations, not just verifier actions.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that record_default should check protocol pause status.
         let verifier = Address::generate(&env);
-        let debtor_hash = Bytes::from_slice(&env, &[0u8; 32]);
+        let sme = Address::generate(&env);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_record_default(&verifier, &debtor_hash, &1_000_000i128);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        client.register_sme(&verifier, &sme, &35u32, &true);
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_record_default(&admin, &sme)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
     }
 
     #[test]
     fn test_set_debtor_score_blocked_when_protocol_paused() {
+        // Issue #906: debtor score attestations freeze during a pause so a
+        // malicious or compromised feeder cannot move scores mid-incident.
         let (env, admin, _, staking_token, client) = setup();
-        // This test documents that set_debtor_score should check protocol pause status.
         let verifier = Address::generate(&env);
         let debtor_hash = Bytes::from_slice(&env, &[0u8; 32]);
         mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
         soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
         client.add_verifier(&admin, &verifier, &1_000_000i128);
-        let result = client.try_set_debtor_score(&verifier, &debtor_hash, &50u32);
-        // TODO: Once require_not_paused check is added, verify it's blocked when paused.
-        let _ = result;
+        let _ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_set_debtor_score(&verifier, &debtor_hash, &50u32)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
+    }
+
+    #[test]
+    fn test_pause_blocks_then_unpause_restores_mutations() {
+        // Issue #906: the pause must be reversible — after unpause, the exact
+        // mutation that was blocked succeeds without redeployment.
+        let (env, admin, _, staking_token, client) = setup();
+        let verifier = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
+        client.add_verifier(&admin, &verifier, &1_000_000i128);
+        let ac = setup_paused(&env, &admin, &client);
+
+        let err = client
+            .try_register_sme(&verifier, &sme, &50u32, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RiskRegistryError::ProtocolPaused);
+
+        ac.unpause(&admin);
+        assert!(!ac.is_paused());
+        client.register_sme(&verifier, &sme, &50u32, &true);
+        assert_eq!(client.get_sme_profile(&sme).unwrap().risk_score, 50);
+    }
+
+    #[test]
+    fn test_governance_and_recovery_actions_unaffected_by_pause() {
+        // Issue #906: the pause intentionally does NOT block governance or
+        // recovery paths — otherwise an emergency could not be resolved.
+        // transfer_admin (recovery path) must work while paused.
+        let (env, admin, _, staking_token, client) = setup();
+        let verifier = Address::generate(&env);
+        mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
+        client.add_verifier(&admin, &verifier, &1_000_000i128);
+        let ac = setup_paused(&env, &admin, &client);
+
+        // Governance actions remain available while paused.
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_admin(), new_admin);
+
+        // View functions are reads and stay available while paused.
+        assert!(client.is_verifier(&verifier));
+        assert_eq!(client.get_verifier_reputation(&verifier), 100);
+        assert_eq!(client.get_access_control(), Some(ac.address.clone()));
+    }
+
+    #[test]
+    fn test_pause_check_skipped_when_access_control_unconfigured() {
+        // Issue #906: skip-if-unconfigured — deployments that never wired
+        // set_access_control keep working (no second pause source invented).
+        let (env, admin, _, staking_token, client) = setup();
+        let verifier = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint_stake(&env, &staking_token, &verifier, 1_000_000i128);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&verifier, &1_000_000i128);
+        client.add_verifier(&admin, &verifier, &1_000_000i128);
+
+        assert_eq!(client.get_access_control(), None);
+        client.register_sme(&verifier, &sme, &50u32, &true);
+        client.update_sme_score(&verifier, &sme, &60u32);
+        assert_eq!(client.get_sme_profile(&sme).unwrap().risk_score, 60);
     }
 
     // ── Issue #478: Upgrade via access_control's multisig ────────────────────

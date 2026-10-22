@@ -79,9 +79,9 @@ The checker parses the tables below directly from this file on every run — the
 | `get_delegate` | Permissionless | Read-only | |
 | `get_delegators` | Permissionless | Read-only | |
 | `configure_council_terms` | **Admin** | Term length non-zero; grace period | Council rotation terms |
-| `initiate_council_rotation_election` | **Governance** | Multisig signer opens election for expiring seat | |
+| `initiate_council_rotation` | **Governance** | Multisig signer opens election for expiring seat | |
 | `vote_council_rotation` | **Governance** | Multisig signer; rejects repeat voters | |
-| `conclude_council_rotation_election` | **Governance** | Multisig signer; threshold swaps seat | |
+| `conclude_council_rotation` | **Governance** | Multisig signer; threshold swaps seat | |
 | `is_council_seat_term_expired` | Permissionless | Read-only | |
 | `get_council_election` | Permissionless | Read-only | |
 | `is_paused` | Permissionless | Read-only | |
