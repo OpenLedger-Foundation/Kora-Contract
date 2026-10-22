@@ -30,13 +30,35 @@ indexer metrics contract used by the dashboard/rules is:
   monotonically increasing counters sourced from finalized indexed events.
 
 This workspace contains the health aggregation library, an HTTP adapter in
-`services/health/http-server.ts`, and the keeper, but no health-service process
-bootstrap or indexer implementation. The hosting application must construct a
+`services/health/http-server.ts`, a runnable bootstrap in
+`services/health/index.ts` (see `services/health/README.md` for env vars),
+and the keeper. The hosting application must construct a
 `HealthAggregator`, pass it to `createHealthHttpServer`, and listen on the
 configured internal port. The health adapter exports `kora_service_health`
-gauges and numeric per-service metrics. Indexer targets and event counters must
-be supplied by the deployment that hosts the indexer; do not treat a missing
-target as a working integration.
+gauges and numeric per-service metrics.
+
+## Indexer `/metrics`
+
+The Rust indexer (`services/indexer`) exposes Prometheus 0.0.4 text via its
+metrics registry (`IndexerStore::metrics_text`, served by the host process on
+configurable `INDEXER_METRICS_PORT` at `GET /metrics`):
+
+- `kora_indexer_lag_seconds`: gauge computed as `(head - checkpoint) * 5`.
+  Emits a stale/head-unavailable comment instead of a bogus zero when the RPC
+  head is unknown; lag grows while the checkpoint stalls.
+- `kora_onchain_events_total{event_type="..."}`: counters incremented only on
+  successful `insert` (duplicate/reorg replays do not double-count). Only the
+  low-cardinality labels `default`, `circuit_breaker_trip`, `treasury_sweep`
+  are exported (unknown types fold into `default`); never use `invoice_id`.
+
+Scrape target (already in `prometheus.yml` job `kora-indexer`):
+
+```yaml
+- job_name: kora-indexer
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["indexer:9090"]
+```
 
 ## Severity and routing
 

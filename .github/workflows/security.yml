@@ -1,0 +1,31 @@
+name: security
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  iam-lint:
+    name: lint IAM policies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Lint IAM policies against secrets paths
+        run: |
+          node infra/secrets/lint-iam-policy.js --policy infra/secrets/iam-policy.example.json
+          echo "--- negative fixture must fail ---"
+          if node infra/secrets/lint-iam-policy.js --policy infra/secrets/__fixtures__/bad-policy.json; then
+            echo "ERROR: bad fixture unexpectedly passed"; exit 1
+          else
+            echo "OK: bad fixture correctly rejected"
+          fi

@@ -16,7 +16,7 @@ import {
   ServiceHealthReport,
   ServiceSlaConfig,
 } from "./types";
-import { classifyServiceStatus, rollupStatus, unreachableEntry } from "./sla-classifier";
+import { classifyPinningStatus, classifyServiceStatus, rollupStatus, unreachableEntry } from "./sla-classifier";
 
 // ── Upstream service descriptor ───────────────────────────────────────────────
 
@@ -66,6 +66,7 @@ export class HealthAggregator {
     const overall = rollupStatus(entries.map((e) => e.status));
 
     return {
+      schemaVersion: HEALTH_SCHEMA_VERSION,
       overall,
       aggregatedAt: new Date().toISOString(),
       services: entries,
@@ -77,7 +78,10 @@ export class HealthAggregator {
   private async _pollOne(svc: UpstreamService): Promise<ServiceAggregateEntry> {
     try {
       const report = await this.fetcher(svc.url, svc.sla.timeoutMs);
-      const status = classifyServiceStatus(report, svc.sla);
+      const status =
+        svc.name === "ipfs-pinning" || svc.name === "pinning"
+          ? classifyPinningStatus(report, svc.sla)
+          : classifyServiceStatus(report, svc.sla);
       return {
         name: svc.name,
         status,
@@ -128,4 +132,33 @@ export const DEFAULT_SLAS: Record<string, ServiceSlaConfig> = {
     downThresholds: { unpinnedCids: 200 },
     timeoutMs: 3_000,
   },
+  reporting: {
+    degradedThresholds: { exportQueueDepth: 100 },
+    downThresholds: { exportQueueDepth: 1_000 },
+    timeoutMs: 3_000,
+  },
+  "ipfs-pinning": {
+    degradedThresholds: { failedProviders: 1 },
+    downThresholds: { failedProviders: 999_999 },
+    timeoutMs: 3_000,
+  },
 };
+
+export const HEALTH_SCHEMA_VERSION = "1.1.0";
+
+/** Env-configurable probe URLs (IPv6-safe: set to bracketed host if needed). */
+export function reportingProbeUrl(): string {
+  return process.env.REPORTING_URL ?? "http://reporting:8080/health";
+}
+
+export function ipfsPinningProbeUrl(): string {
+  return process.env.IPFS_PINNING_URL ?? "http://ipfs-pinning:8080/health";
+}
+
+/** Default upstream descriptors including reporting + ipfs-pinning probes. */
+export function buildDefaultServices(): UpstreamService[] {
+  return [
+    { name: "reporting", url: reportingProbeUrl(), sla: DEFAULT_SLAS.reporting },
+    { name: "ipfs-pinning", url: ipfsPinningProbeUrl(), sla: DEFAULT_SLAS["ipfs-pinning"] },
+  ];
+}

@@ -8,9 +8,9 @@
  *  - Unreachable service → "down" in report, others still reported
  */
 
-import { HealthAggregator, HealthFetcher, UpstreamService } from "../health-aggregator";
-import { renderPrometheusMetrics } from "../http-server";
-import { classifyServiceStatus, rollupStatus } from "../sla-classifier";
+import { HealthAggregator, HealthFetcher, UpstreamService, DEFAULT_SLAS, buildDefaultServices } from "../health-aggregator";
+import { createHealthHttpServer, renderPrometheusMetrics } from "../http-server";
+import { classifyPinningStatus, classifyServiceStatus, rollupStatus } from "../sla-classifier";
 import { ServiceHealthReport, ServiceSlaConfig } from "../types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,6 +171,7 @@ describe("HealthAggregator — report shape", () => {
 describe("renderPrometheusMetrics", () => {
   it("exports service status gauges and numeric health metrics", () => {
     const output = renderPrometheusMetrics({
+      schemaVersion: "1.1.0",
       overall: "degraded",
       aggregatedAt: "2026-09-27T00:00:00.000Z",
       services: [
@@ -187,5 +188,124 @@ describe("renderPrometheusMetrics", () => {
     expect(output).toContain('kora_service_health{service="api\\"east",status="ok"} 0');
     expect(output).toContain("kora_service_api_east_lagSeconds 3");
     expect(output).not.toContain("detail");
+  });
+});
+
+describe("reporting + ipfs-pinning probes", () => {
+  it("marks reporting down when probe fails (timeout)", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("reporting")) throw new Error("timeout");
+      return okReport({ providersReachable: 2, providerCount: 2 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.services.find((s) => s.name === "reporting")!.status).toBe("down");
+    expect(report.overall).toBe("down");
+  });
+
+  it("marks pinning degraded/down via provider reachability bits", () => {
+    const sla = DEFAULT_SLAS["ipfs-pinning"];
+    expect(classifyPinningStatus(okReport({ providersReachable: 0, providerCount: 2 }), sla)).toBe("down");
+    expect(classifyPinningStatus(okReport({ providersReachable: 1, providerCount: 2 }), sla)).toBe("degraded");
+    expect(classifyPinningStatus(okReport({ providersReachable: 2, providerCount: 2 }), sla)).toBe("ok");
+  });
+
+  it("all-green matrix: reporting + pinning ok => overall ok", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("pinning")) return okReport({ providersReachable: 2, providerCount: 2 });
+      return okReport({ exportQueueDepth: 5 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.overall).toBe("ok");
+  });
+
+  it("partial-degraded matrix: queue backup warns, pinning all-fail downs", async () => {
+    const services: UpstreamService[] = [
+      { name: "reporting", url: "http://reporting/health", sla: DEFAULT_SLAS.reporting },
+      { name: "ipfs-pinning", url: "http://pinning/health", sla: DEFAULT_SLAS["ipfs-pinning"] },
+    ];
+    const fetcher: HealthFetcher = async (url) => {
+      if (url.includes("reporting")) return okReport({ exportQueueDepth: 150 });
+      return okReport({ providersReachable: 0, providerCount: 3 });
+    };
+    const report = await new HealthAggregator(services, fetcher).aggregate();
+    expect(report.services.find((s) => s.name === "reporting")!.status).toBe("degraded");
+    expect(report.services.find((s) => s.name === "ipfs-pinning")!.status).toBe("down");
+    expect(report.overall).toBe("down");
+  });
+
+  it("exposes env-configurable probe URLs", () => {
+    expect(buildDefaultServices().length).toBe(2);
+  });
+});
+
+
+describe("createHealthHttpServer — smoke (#1024)", () => {
+  function get(url: string): Promise<{ statusCode: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const http = require("http") as typeof import("http");
+      http
+        .get(url, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve({ statusCode: res.statusCode ?? 0, body }));
+        })
+        .on("error", reject);
+    });
+  }
+
+  it("serves 200 /health JSON and /metrics text from the factory server", async () => {
+    const aggregator = new HealthAggregator(
+      [{ name: "api", url: "http://api/health", sla: { timeoutMs: 1_000 } }],
+      async () => okReport({ lagSeconds: 1 })
+    );
+    const server = createHealthHttpServer(aggregator);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    expect(port).toBeGreaterThan(0);
+    try {
+      const health = await get(`http://127.0.0.1:${port}/health`);
+      expect(health.statusCode).toBe(200);
+      expect(JSON.parse(health.body).overall).toBe("ok");
+
+      const metrics = await get(`http://127.0.0.1:${port}/metrics`);
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.body).toContain("kora_service_health");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+  });
+
+  it("records an unreachable upstream as down without hanging the aggregate", async () => {
+    const aggregator = new HealthAggregator(
+      [{ name: "keeper", url: "http://keeper/health", sla: { timeoutMs: 50 } }],
+      async () => {
+        throw new Error("ECONNREFUSED");
+      }
+    );
+    const server = createHealthHttpServer(aggregator);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    try {
+      const health = await get(`http://127.0.0.1:${port}/health`);
+      expect(health.statusCode).toBe(503);
+      expect(JSON.parse(health.body).overall).toBe("down");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
   });
 });

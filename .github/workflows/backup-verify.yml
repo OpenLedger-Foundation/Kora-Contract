@@ -1,0 +1,53 @@
+name: backup-verify
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-restore:
+    name: verify-restore (auto)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: infra/backup/package.json
+
+      - name: Install backup tooling deps
+        working-directory: infra/backup
+        run: npm ci || npm install
+
+      - name: Verify audit-log
+        working-directory: infra/backup
+        run: node verify-restore.ts --service audit-log --auto --json > /tmp/verify-audit-log.json || echo "AUDIT_FAIL=1" >> $GITHUB_ENV
+
+      - name: Verify keeper
+        working-directory: infra/backup
+        run: node verify-restore.ts --service keeper --auto --json > /tmp/verify-keeper.json || echo "KEEPER_FAIL=1" >> $GITHUB_ENV
+
+      - name: Verify reporting
+        working-directory: infra/backup
+        run: node verify-restore.ts --service reporting --auto --json > /tmp/verify-reporting.json || echo "REPORTING_FAIL=1" >> $GITHUB_ENV
+
+      - name: Combine report
+        run: |
+          node -e "const fs=require('fs');const load=(p)=>{try{return JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){return {ok:false,error:'missing artifact: '+p}}};const report={generatedAt:new Date().toISOString(),services:{'audit-log':load('/tmp/verify-audit-log.json'),keeper:load('/tmp/verify-keeper.json'),reporting:load('/tmp/verify-reporting.json')}};fs.writeFileSync('verify-report.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));const failed=Object.entries(report.services).filter(([_,v])=>!v.ok);if(failed.length){console.error('FAILED: '+failed.map(([k])=>k).join(','));process.exit(1)}"
+
+      - name: Upload verify report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-verify-report
+          path: |
+            verify-report.json
+            /tmp/verify-*.json

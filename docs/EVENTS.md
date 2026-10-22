@@ -100,7 +100,7 @@ Where:
 | Topic | Function | Payload | Description |
 |-------|----------|---------|-------------|
 | `MKTPL_CANCELLED` | listing_cancelled | (invoice_id, seller, timestamp) | Listing cancelled |
-| `MKTPL_EXPIRED` | listing_expired | (invoice_id, seller, timestamp) | Funding deadline passed |
+| `MKTPL_EXPIRED` | listing_expired | (seller, invoice_id, timestamp) | Funding deadline passed |
 
 ### Treasury Contract (TREAS_*)
 

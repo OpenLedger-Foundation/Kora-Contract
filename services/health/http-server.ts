@@ -1,7 +1,7 @@
 /** HTTP adapter for the health aggregation library. */
 
 import * as http from "http";
-import { HealthAggregator } from "./health-aggregator";
+import { HealthAggregator, HEALTH_SCHEMA_VERSION } from "./health-aggregator";
 import { AggregatedHealthReport } from "./types";
 
 function escapeLabel(value: string): string {
@@ -46,6 +46,7 @@ export function createHealthHttpServer(aggregator: HealthAggregator): http.Serve
 
     try {
       const report = await aggregator.aggregate();
+      report.schemaVersion = (report as Partial<AggregatedHealthReport>).schemaVersion ?? HEALTH_SCHEMA_VERSION;
       if (request.url === "/metrics") {
         response.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
         response.end(renderPrometheusMetrics(report));

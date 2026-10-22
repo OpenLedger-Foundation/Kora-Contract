@@ -265,7 +265,7 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 
 ### 7. Council Rotation & Term-Limit Enforcement (#845)
 - **Defined Term Limits:** Council seats possess configurable term lengths (`configure_council_terms`) preventing indefinite tenure.
-- **Rotation Elections:** Expiry triggers a structured election (`initiate_council_rotation_election`, `vote_council_rotation`, `conclude_council_rotation_election`).
+- **Rotation Elections:** Expiry triggers a structured election (`initiate_council_rotation`, `vote_council_rotation`, `conclude_council_rotation`).
 - **Quorum Safety:** An expiring seat's authority only lapses once a replacement is confirmed; safe minimum quorum is preserved throughout transitions.
 - **Failed-Election Fallback:** If an election fails to reach quorum or confirm a successor, an automatic term extension grace period activates, preventing any gap in protocol authority.
 - **Key Rotation Integration:** Leverages the key-rotation procedures for secure credential handoff.
