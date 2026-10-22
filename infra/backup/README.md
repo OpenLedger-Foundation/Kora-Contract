@@ -237,6 +237,17 @@ The `verify-restore.js` script supports an `--auto` mode that:
 0 3 * * * cd /opt/kora/infra/backup && node verify-restore.js --service audit-log --auto >> /var/log/kora-verify-restore.log 2>&1
 ```
 
+### Scheduled GitHub Workflow (`backup-verify.yml`)
+
+A weekly scheduled workflow runs `verify-restore --auto --json` for each of
+`audit-log`, `keeper`, and `reporting` without exposing secret values in logs:
+
+- Schedule: Mondays at 03:00 UTC (`0 3 * * 1`), plus manual `workflow_dispatch` drills.
+- Each service runs `node verify-restore.ts --service <name> --auto --json`; outputs are combined into `verify-report.json`.
+- The combined JSON report is uploaded as the `backup-verify-report` artifact.
+- Any per-service failure fails the job with a concise `FAILED: <services>` summary.
+- Permissions are minimal (`contents: read`); no secrets are printed — only pass/fail, durations, and non-secret paths.
+
 ---
 
 ## Audit Log Hash-Chain Integrity After Restore
