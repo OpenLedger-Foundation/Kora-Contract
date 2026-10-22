@@ -444,6 +444,13 @@ curl http://localhost:3000/api/v1/health
 # Check RPC node health
 curl http://localhost:8000/health
 
+# Aggregated health (schemaVersion 1.1.0; 503 when critical probes fail)
+curl http://localhost:8080/health
+# Probes: reporting GET $REPORTING_URL (default http://reporting:8080/health),
+# ipfs-pinning GET $IPFS_PINNING_URL (default http://ipfs-pinning:8080/health).
+# Reporting export queue backup surfaces "degraded"; all pinning providers
+# failing surfaces "degraded"/"down". Probe timeouts count as failures.
+
 # Check disk usage
 df -h
 

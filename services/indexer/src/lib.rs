@@ -35,11 +35,80 @@ struct RpcEvent {
 pub struct IndexerStore {
     events: Mutex<HashMap<(u64, u32), NormalizedEvent>>,
     last_checkpoint: Mutex<u64>,
+    metrics: Mutex<MetricsRegistry>,
+}
+
+/// Low-cardinality event types only — never use invoice_id or similar.
+const ALLOWED_EVENT_TYPES: &[&str] = &["default", "circuit_breaker_trip", "treasury_sweep"];
+
+fn normalize_event_type(t: &str) -> &'static str {
+    for a in ALLOWED_EVENT_TYPES {
+        if *a == t {
+            return match *a {
+                "default" => "default",
+                "circuit_breaker_trip" => "circuit_breaker_trip",
+                "treasury_sweep" => "treasury_sweep",
+                _ => "default",
+            };
+        }
+    }
+    "default"
+}
+
+#[derive(Default)]
+pub struct MetricsRegistry {
+    /// Low-cardinality counters keyed by normalized event_type.
+    event_counts: HashMap<String, u64>,
+    /// Last network head ledger seen (for lag gauge).
+    head_ledger: Option<u64>,
+}
+
+impl MetricsRegistry {
+    pub fn inc_event(&mut self, event_type: &str) {
+        let key = normalize_event_type(event_type).to_string();
+        *self.event_counts.entry(key).or_insert(0) += 1;
+    }
+
+    pub fn set_head(&mut self, seq: u64) {
+        self.head_ledger = Some(seq);
+    }
+
+    /// Lag in seconds ≈ (head - checkpoint) * 5s/ledger; None when head unknown.
+    pub fn lag_seconds(&self, checkpoint: u64) -> Option<u64> {
+        self.head_ledger.map(|h| h.saturating_sub(checkpoint).saturating_mul(5))
+    }
+
+    /// Prometheus 0.0.4 text exposition. Always emits TYPE/HELP lines even with zero events.
+    pub fn render(&self, checkpoint: u64) -> String {
+        let mut out = String::new();
+        out.push_str("# HELP kora_indexer_lag_seconds Current processed-ledger lag.\n");
+        out.push_str("# TYPE kora_indexer_lag_seconds gauge\n");
+        match self.lag_seconds(checkpoint) {
+            Some(lag) => out.push_str(&format!("kora_indexer_lag_seconds {}\n", lag)),
+            None => out.push_str("# kora_indexer_lag_seconds: head unavailable\n"),
+        }
+        out.push_str("# HELP kora_onchain_events_total Monotonically increasing counters from finalized indexed events.\n");
+        out.push_str("# TYPE kora_onchain_events_total counter\n");
+        for t in ALLOWED_EVENT_TYPES {
+            let v = self.event_counts.get(*t).copied().unwrap_or(0);
+            out.push_str(&format!("kora_onchain_events_total{{event_type=\"{}\"}} {}\n", t, v));
+        }
+        out
+    }
 }
 
 impl IndexerStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn metrics_text(&self) -> String {
+        let m = self.metrics.lock().unwrap();
+        m.render(*self.last_checkpoint.lock().unwrap())
+    }
+
+    pub fn set_head_ledger(&self, seq: u64) {
+        self.metrics.lock().unwrap().set_head(seq);
     }
 
     pub fn insert(&self, event: NormalizedEvent) -> bool {
@@ -140,6 +209,8 @@ impl IndexerService {
         let inserted = self.store.insert(event);
         if inserted {
             self.store.set_checkpoint(ledger_seq);
+            // Count only on actual insert: duplicate/reorg replays do not double-increment.
+            self.store.metrics.lock().unwrap().inc_event(event_type);
             let _ = self.checkpoint.write(ledger_seq);
         }
         Ok(inserted)
@@ -230,6 +301,23 @@ mod tests {
 
         let queried = store.query_by_contract("invoice_nft");
         assert_eq!(queried.len(), 1);
+    }
+
+    #[test]
+    fn test_metrics_line_format() {
+        let store = Arc::new(IndexerStore::new());
+        let indexer = IndexerService::new(store.clone());
+        indexer.ingest_raw_event("invoice_nft", "default", 100, 1, r#"{"id": 1}"#).unwrap();
+        indexer.ingest_raw_event("invoice_nft", "default", 101, 1, r#"{"id": 2}"#).unwrap();
+        // Duplicate must not double-increment.
+        indexer.ingest_raw_event("invoice_nft", "default", 101, 1, r#"{"id": 2}"#).unwrap();
+        store.set_head_ledger(110);
+        let text = store.metrics_text();
+        assert!(text.contains("# TYPE kora_indexer_lag_seconds gauge"));
+        assert!(text.contains("kora_indexer_lag_seconds 45"));
+        assert!(text.contains("kora_onchain_events_total{event_type=\"default\"} 2"));
+        assert!(text.contains("# TYPE kora_onchain_events_total counter"));
+        assert!(!text.contains("invoice"));
     }
 
     #[test]
