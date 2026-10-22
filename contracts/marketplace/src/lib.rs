@@ -98,6 +98,10 @@ pub enum DataKey {
     ReferrerSplitBps,
     /// Address of the deployed debtor_attestation contract (#960).
     DebtorAttestation,
+    /// Set once the expiry event has been emitted for a listing (#1021).
+    /// Guarantees single-flight listing_expired/MKTPL_EXPIRED emission
+    /// across repeated claim_refund calls.
+    ExpiryEmitted(u64),
 }
 
 /// Cross-contract dependency addresses marketplace relies on. (#445)
@@ -1367,6 +1371,31 @@ impl MarketplaceContract {
 
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Mark a listing expired exactly once (CEI-safe): deactivates the
+    /// listing and emits `listing_expired` (topic `MKTPL_EXPIRED`) on the
+    /// first post-deadline recognition only. Fully funded listings and
+    /// admin-cancelled listings never reach here. (#1021)
+    fn mark_listing_expired(env: &Env, invoice_id: u64, listing: &mut Listing) {
+        if listing.funded_amount >= listing.asking_price {
+            return;
+        }
+        listing.is_active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Listing(invoice_id), listing);
+        let emitted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExpiryEmitted(invoice_id))
+            .unwrap_or(false);
+        if !emitted {
+            env.storage()
+                .persistent()
+                .set(&DataKey::ExpiryEmitted(invoice_id), &true);
+            events::listing_expired(env, invoice_id, &listing.seller);
+        }
+    }
+
     /// Claim a refund for a listing that expired without reaching full funding,
     /// or whose cancellation was confirmed by the admin via the two-phase flow.
     ///
@@ -1380,7 +1409,7 @@ impl MarketplaceContract {
     ) -> Result<(), KoraError> {
         investor.require_auth();
 
-        let listing: Listing = env
+        let mut listing: Listing = env
             .storage()
             .persistent()
             .get(&DataKey::Listing(invoice_id))
@@ -1400,6 +1429,12 @@ impl MarketplaceContract {
 
         if !cancellation_confirmed && env.ledger().timestamp() <= listing.funding_deadline {
             return Err(KoraError::FundingNotExpired);
+        }
+
+        // Expiry path (deadline passed, not cancelled): deactivate idempotently
+        // and emit listing_expired/MKTPL_EXPIRED exactly once per invoice. (#1021)
+        if !cancellation_confirmed {
+            Self::mark_listing_expired(&env, invoice_id, &mut listing);
         }
 
         // Guard: investor hasn't already claimed

@@ -9,7 +9,7 @@
  */
 
 import { HealthAggregator, HealthFetcher, UpstreamService, DEFAULT_SLAS, buildDefaultServices } from "../health-aggregator";
-import { renderPrometheusMetrics } from "../http-server";
+import { createHealthHttpServer, renderPrometheusMetrics } from "../http-server";
 import { classifyPinningStatus, classifyServiceStatus, rollupStatus } from "../sla-classifier";
 import { ServiceHealthReport, ServiceSlaConfig } from "../types";
 
@@ -243,5 +243,69 @@ describe("reporting + ipfs-pinning probes", () => {
 
   it("exposes env-configurable probe URLs", () => {
     expect(buildDefaultServices().length).toBe(2);
+  });
+});
+
+
+describe("createHealthHttpServer — smoke (#1024)", () => {
+  function get(url: string): Promise<{ statusCode: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const http = require("http") as typeof import("http");
+      http
+        .get(url, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve({ statusCode: res.statusCode ?? 0, body }));
+        })
+        .on("error", reject);
+    });
+  }
+
+  it("serves 200 /health JSON and /metrics text from the factory server", async () => {
+    const aggregator = new HealthAggregator(
+      [{ name: "api", url: "http://api/health", sla: { timeoutMs: 1_000 } }],
+      async () => okReport({ lagSeconds: 1 })
+    );
+    const server = createHealthHttpServer(aggregator);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    expect(port).toBeGreaterThan(0);
+    try {
+      const health = await get(`http://127.0.0.1:${port}/health`);
+      expect(health.statusCode).toBe(200);
+      expect(JSON.parse(health.body).overall).toBe("ok");
+
+      const metrics = await get(`http://127.0.0.1:${port}/metrics`);
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.body).toContain("kora_service_health");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
+  });
+
+  it("records an unreachable upstream as down without hanging the aggregate", async () => {
+    const aggregator = new HealthAggregator(
+      [{ name: "keeper", url: "http://keeper/health", sla: { timeoutMs: 50 } }],
+      async () => {
+        throw new Error("ECONNREFUSED");
+      }
+    );
+    const server = createHealthHttpServer(aggregator);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    try {
+      const health = await get(`http://127.0.0.1:${port}/health`);
+      expect(health.statusCode).toBe(503);
+      expect(JSON.parse(health.body).overall).toBe("down");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+    }
   });
 });

@@ -1,0 +1,27 @@
+{
+  "name": "@kora/health",
+  "version": "1.0.0",
+  "description": "Kora Protocol — Aggregated health service bootstrap",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/jest": "29.5.12",
+    "@types/node": "20.12.12",
+    "jest": "29.7.0",
+    "ts-jest": "29.1.4",
+    "typescript": "5.4.5"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": ["**/__tests__/**/*.test.ts"]
+  }
+}

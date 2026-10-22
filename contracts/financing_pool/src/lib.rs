@@ -1,13 +1,21 @@
 #![no_std]
 
+// Host-only formal-verification sources are `include!`d into `verification` below and
+// need the `alloc` macros/types that a `#![no_std]` crate does not get from the prelude.
+extern crate alloc;
+
 // Formal verification model — host-only (requires std).
 // Gated so it never gets compiled into the WASM binary.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod verification {
+    #![allow(dead_code)]
+
     pub mod model {
+        use alloc::{format, string::String, string::ToString, vec, vec::Vec};
         include!("../verification/model.rs");
     }
     pub mod invariants {
+        use alloc::{format, string::String, string::ToString, vec, vec::Vec};
         use super::model;
         include!("../verification/invariants.rs");
     }
@@ -88,6 +96,17 @@ pub enum FinancingPoolError {
     GracePeriodActive = 35,
     EscrowPending = 36,
     EscrowAlreadyConfigured = 37,
+    /// Pool already holds the maximum number of distinct investor positions
+    /// (`MAX_POSITIONS_PER_POOL`). Referenced by the position guard.
+    TooManyInvestors = 38,
+    /// A batch operation exceeded its documented size cap (`MAX_NETTING_INVOICES`).
+    BatchSizeExceeded = 39,
+    /// `migrate_versions` was called with a from/to pair this schema cannot apply.
+    InvalidMigrationTarget = 40,
+    /// `release_funds` was invoked by anything other than the configured
+    /// marketplace contract (issue #909). Also returned when no marketplace
+    /// address has been configured yet.
+    MarketplaceOnly = 41,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -149,12 +168,8 @@ pub enum DataKey {
     RepaymentApproval(u64),
     /// Grace period in seconds before an invoice can be marked defaulted.
     GracePeriod,
-        /// The configured repayment escrow contract.
-        DisputeEscrow,
-        /// Open escrow reservation marker; repayment entry points reject these invoices.
-        EscrowPending(u64),
-        /// Amount reserved by the escrow for an invoice.
-        EscrowReservation(u64),
+    /// Amount reserved by the escrow for an invoice.
+    EscrowReservation(u64),
     /// PositionShare set for a pool, keyed by (invoice_id, original_investor).
     PositionShares(u64, Address),
     /// Next share index for a position (used for generating unique share IDs).
@@ -167,9 +182,7 @@ pub enum DataKey {
     Marketplace,
     /// Per-investor auto-compound preference, keyed by investor address (#578)
     AutoCompound(Address),
-    /// Dispute escrow contract address (#895)
-    DisputeEscrow,
-    EscrowPending(u64),
+    /// Invoice whose escrow reservation has been consumed by a settlement.
     EscrowUsed(u64),
 }
 
@@ -660,10 +673,20 @@ impl FinancingPoolContract {
     /// - `FinancingPoolError::InvalidAddress` — `token` is the contract's own address.
     /// - `FinancingPoolError::NotInitialized` — Contract cross-references are missing.
     /// - `FinancingPoolError::InvalidAmount` — Invoice amount is out of the safe range.
-    /// - `FinancingPoolError::Unauthorized` — Caller is not the authorized marketplace.
+    /// - `FinancingPoolError::Unauthorized` — `marketplace` parameter does not match the
+    ///   stored marketplace (Issue #909).
+    /// - `FinancingPoolError::MarketplaceOnly` — A marketplace is configured but the
+    ///   invoking contract is not it (Issue #909).
     ///
-    /// **Security:** Requires `marketplace.require_auth()`. Only the marketplace contract
-    /// (stored at initialization) may call this. Emits `pool_opened` event.
+    /// **Security:** Issue #909: `marketplace.require_auth()` alone only proves
+    /// *some* address signed — a caller passes this address as a parameter, so a
+    /// malicious caller can pass its own address and sign for it. Once an admin
+    /// has wired `set_marketplace`, the authoritative check is that the
+    /// **invoking contract** (`env.invoker()`) equals the stored
+    /// `DataKey::Marketplace`; an EOA cannot satisfy it because an EOA is not a
+    /// contract. Follows the established skip-if-unconfigured pattern: before a
+    /// marketplace is wired, behavior is unchanged (legacy auth-only path), so
+    /// deployments are never bricked by the migration. Emits `pool_opened` event.
     pub fn release_funds(
         env: Env,
         marketplace: Address,
@@ -672,6 +695,26 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         marketplace.require_auth();
         Self::require_not_paused(&env)?;
+
+        // Issue #909: when a marketplace is configured, bind the caller to it.
+        // `invoker()` is the immediate calling contract; a direct (EOA)
+        // invocation yields the account address, which can never equal a
+        // configured contract address.
+        if let Some(configured_marketplace) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Marketplace)
+        {
+            if env.invoker() != configured_marketplace {
+                return Err(FinancingPoolError::MarketplaceOnly);
+            }
+            // The parameter must identify the same marketplace that authorized
+            // the call; otherwise event attribution and downstream accounting
+            // could claim a different caller than the real one.
+            if marketplace != configured_marketplace {
+                return Err(FinancingPoolError::Unauthorized);
+            }
+        }
 
         if env.storage().persistent().has(&DataKey::Pool(invoice_id)) {
             return Err(FinancingPoolError::PoolAlreadyClosed);
@@ -856,7 +899,9 @@ impl FinancingPoolContract {
     /// Set the authorized marketplace contract address. Admin only.
     ///
     /// Used by `distribute_yield` to route auto-compounded payouts into a target
-    /// listing on the investor's behalf (#578).
+    /// listing on the investor's behalf (#578), and by `release_funds` as the
+    /// authoritative caller binding (Issue #909). Emits `marketplace_set` so
+    /// off-chain monitors can alert on rotation.
     pub fn set_marketplace(
         env: Env,
         admin: Address,
@@ -866,6 +911,10 @@ impl FinancingPoolContract {
         Self::require_admin(&env, &admin)?;
         kora_shared::validation::require_not_self(&env, &marketplace)?;
         env.storage().instance().set(&DataKey::Marketplace, &marketplace);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("MKT_SET"),),
+            (marketplace, env.ledger().timestamp()),
+        );
         Ok(())
     }
 

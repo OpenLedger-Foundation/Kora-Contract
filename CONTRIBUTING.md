@@ -148,6 +148,31 @@ cargo test --all
 
 All three must pass with no errors or warnings before opening a PR.
 
+### Pre-commit Hooks
+
+A pre-commit configuration is checked in at [`.pre-commit-config.yaml`](.pre-commit-config.yaml). It mirrors the verification commands above — `cargo fmt`, `cargo clippy`, and a fast unit-test subset — so formatting, linting, and unit tests are enforced before a commit is created.
+
+Enable it locally with the [pre-commit](https://pre-commit.com/) framework:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The hooks are declared as `repo: local` hooks, so they invoke the same `cargo` commands used by CI and require no extra toolchain downloads. They can also be run on demand against the whole tree:
+
+```bash
+pre-commit run --all-files
+```
+
+If a hook must be skipped for an exceptional case — for example a work-in-progress commit that intentionally does not compile yet — use the standard git escape hatch:
+
+```bash
+git commit --no-verify
+```
+
+`--no-verify` skips **all** hooks, so the skipped checks must be run manually before the branch is pushed.
+
 ### Understanding AUDIT FIX Comments
 
 When reviewing code, you may see comments marked with `// AUDIT FIX:` These indicate code changes made in response to audit findings or internal reviews.

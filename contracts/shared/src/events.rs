@@ -268,10 +268,13 @@ pub fn listing_cancelled(env: &Env, invoice_id: u64, seller: &Address) {
 }
 
 /// Schema: (actor=seller, invoice_id, timestamp)
+///
+/// On-chain topic is the documented `MKTPL_EXPIRED` string. (`symbol_short!`
+/// is limited to 9 chars so the short `LST_EXP` alias is retired.)
 pub fn listing_expired(env: &Env, invoice_id: u64, seller: &Address) {
     emit(
         env,
-        symbol_short!("LST_EXP"),
+        soroban_sdk::Symbol::new(env, "MKTPL_EXPIRED"),
         (seller.clone(), invoice_id, env.ledger().timestamp()),
     );
 }

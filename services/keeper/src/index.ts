@@ -8,10 +8,12 @@
  */
 
 import * as http from "http";
+import { Keypair } from "@stellar/stellar-sdk";
 import { JobStore } from "./jobStore";
 import { Dispatcher } from "./dispatcher";
 import { Scheduler } from "./scheduler";
 import { KeeperConfig } from "./types";
+import { IndexerDeadlineClient } from "./indexerClient";
 import { ListingTtlKeeper } from "./ttlKeeper";
 import pino from "pino";
 
@@ -32,6 +34,9 @@ function loadConfig(): KeeperConfig {
     activeListingsUrl: process.env.KEEPER_ACTIVE_LISTINGS_URL ?? "",
     indexerApiKey: process.env.KEEPER_INDEXER_API_KEY ?? "",
     ttlThresholdLedgers: Number(process.env.KEEPER_TTL_THRESHOLD_LEDGERS ?? "518400"),
+    indexerUrl: process.env.INDEXER_URL ?? process.env.KEEPER_ACTIVE_LISTINGS_URL ?? "",
+    deadlineHorizonSec: Number(process.env.DEADLINE_HORIZON_SEC ?? "86400"),
+    ingestIntervalMs: Number(process.env.DEADLINE_POLL_INTERVAL_MS ?? "60000"),
   };
 }
 
@@ -40,6 +45,14 @@ async function main(): Promise<void> {
 
   if (!config.keeperSecret) {
     logger.error("KEEPER_SECRET env var is required");
+    process.exit(1);
+  }
+  // Fail fast on invalid key material so the keeper never starts in a state
+  // where on-chain submission would silently no-op instead of erroring.
+  try {
+    Keypair.fromSecret(config.keeperSecret);
+  } catch {
+    logger.error("KEEPER_SECRET is not a valid Stellar secret key");
     process.exit(1);
   }
   if (!config.marketplaceContractAddress || !config.activeListingsUrl) {
@@ -57,6 +70,31 @@ async function main(): Promise<void> {
   const scheduler = new Scheduler(store, dispatcher, config, () => ttlKeeper.scan());
 
   scheduler.start();
+
+  // ── Indexer deadline ingestion (poll adapter, #1022) ──────────────────────
+  // Runs on its own cadence so ingestion storms never coincide with dispatch
+  // ticks. Outages degrade health only; the scheduler keeps dispatching.
+  const deadlineClient = new IndexerDeadlineClient({
+    indexerUrl: config.indexerUrl,
+    apiKey: config.indexerApiKey || undefined,
+    horizonSec: config.deadlineHorizonSec,
+    contractAddress: config.marketplaceContractAddress,
+  });
+
+  const ingestOnce = async (): Promise<void> => {
+    try {
+      const deadlines = await deadlineClient.fetchDeadlines();
+      if (deadlines.length > 0) {
+        scheduler.enqueueDeadlines(deadlines);
+        logger.info({ count: deadlines.length }, "Enqueued indexer deadlines");
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Deadline ingestion tick failed");
+    }
+  };
+  void ingestOnce();
+  const ingestTimer = setInterval(() => void ingestOnce(), config.ingestIntervalMs);
+  const clearIngest = (): void => clearInterval(ingestTimer);
 
   // ── Observability HTTP server ────────────────────────────────────────────
   const server = http.createServer((req, res) => {
@@ -114,6 +152,7 @@ async function main(): Promise<void> {
   // ── Graceful shutdown ───────────────────────────────────────────────────
   const shutdown = (): void => {
     logger.info("Shutting down keeper service…");
+    clearIngest();
     scheduler.stop();
     store.close();
     server.close(() => process.exit(0));
