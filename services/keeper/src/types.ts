@@ -90,4 +90,10 @@ export interface KeeperConfig {
   indexerApiKey: string;
   /** Minimum remaining TTL in ledgers before a listing is bumped. */
   ttlThresholdLedgers: number;
+  /** Indexer deadline export endpoint (INDEXER_URL). Empty = manual seed only. */
+  indexerUrl: string;
+  /** Ingest deadlines within now + horizon seconds (DEADLINE_HORIZON_SEC). */
+  deadlineHorizonSec: number;
+  /** Ingestion poll cadence in ms, separate from the dispatch tick. */
+  ingestIntervalMs: number;
 }

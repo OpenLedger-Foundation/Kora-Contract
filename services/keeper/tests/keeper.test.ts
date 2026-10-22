@@ -52,6 +52,9 @@ const BASE_CONFIG: KeeperConfig = {
   activeListingsUrl: "https://indexer.test/api/v1/listings",
   indexerApiKey: "",
   ttlThresholdLedgers: 518_400,
+  indexerUrl: "https://indexer.test/api/v1/deadlines",
+  deadlineHorizonSec: 86_400,
+  ingestIntervalMs: 60_000,
 };
 
 // ---------------------------------------------------------------------------
@@ -423,5 +426,89 @@ describe("ListingTtlKeeper", () => {
 
     await expect(keeper.scan()).rejects.toThrow("indexer unavailable");
     expect(keeper.getMetrics().errors).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IndexerDeadlineClient ingestion (#1022)
+// ---------------------------------------------------------------------------
+
+import { IndexerDeadlineClient } from "../src/indexerClient";
+
+function mockFetch(rows: unknown, ok = true): typeof fetch {
+  return (async () =>
+    ({
+      ok,
+      status: ok ? 200 : 503,
+      json: async () => rows,
+    }) as never) as typeof fetch;
+}
+
+describe("IndexerDeadlineClient", () => {
+  const NOW = 1_700_000_000;
+
+  test("maps in-horizon funding deadlines with stable dedupKeys", async () => {
+    const client = new IndexerDeadlineClient({
+      indexerUrl: "https://indexer.test/api/v1/deadlines",
+      horizonSec: 3600,
+      contractAddress: "CTEST",
+      fetchFn: mockFetch([{ invoice_id: 7, funding_deadline: NOW + 100 }]),
+    });
+    const deadlines = await client.fetchDeadlines(NOW);
+    expect(deadlines).toHaveLength(1);
+    expect(deadlines[0]).toMatchObject({
+      dedupKey: "funding_expiry:7",
+      kind: "funding_expiry",
+      deadlineTs: NOW + 100,
+    });
+  });
+
+  test("already-passed deadlines enqueue as immediately ready; far-future skipped", async () => {
+    const client = new IndexerDeadlineClient({
+      indexerUrl: "https://indexer.test/api/v1/deadlines",
+      horizonSec: 3600,
+      contractAddress: "CTEST",
+      fetchFn: mockFetch([
+        { invoice_id: 1, funding_deadline: NOW - 5 },
+        { invoice_id: 2, funding_deadline: NOW + 99_999 },
+      ]),
+    });
+    const deadlines = await client.fetchDeadlines(NOW);
+    expect(deadlines.map((d) => d.dedupKey)).toEqual(["funding_expiry:1"]);
+  });
+
+  test("cancelled listings are skipped; outage yields [] without throwing", async () => {
+    const okClient = new IndexerDeadlineClient({
+      indexerUrl: "https://indexer.test/api/v1/deadlines",
+      horizonSec: 3600,
+      contractAddress: "CTEST",
+      fetchFn: mockFetch([{ invoice_id: 3, funding_deadline: NOW + 10, status: "cancelled" }]),
+    });
+    await expect(okClient.fetchDeadlines(NOW)).resolves.toEqual([]);
+
+    const downClient = new IndexerDeadlineClient({
+      indexerUrl: "https://indexer.test/api/v1/deadlines",
+      horizonSec: 3600,
+      contractAddress: "CTEST",
+      fetchFn: mockFetch([], false),
+    });
+    await expect(downClient.fetchDeadlines(NOW)).resolves.toEqual([]);
+    expect(downClient.degraded).toBe(true);
+  });
+
+  test("restart-safe: re-enqueue of same dedupKey is ignored by the store", async () => {
+    const store = new JobStore(tmpDb());
+    const client = new IndexerDeadlineClient({
+      indexerUrl: "https://indexer.test/api/v1/deadlines",
+      horizonSec: 3600,
+      contractAddress: "CTEST",
+      fetchFn: mockFetch([{ invoice_id: 9, funding_deadline: NOW + 10 }]),
+    });
+    const batch = await client.fetchDeadlines(NOW);
+    const scheduler = new Scheduler(store, {} as never, BASE_CONFIG);
+    scheduler.enqueueDeadlines(batch);
+    scheduler.enqueueDeadlines(batch); // restart replay
+    expect(store.getStatusCounts().pending).toBe(1);
+    store.close();
   });
 });
