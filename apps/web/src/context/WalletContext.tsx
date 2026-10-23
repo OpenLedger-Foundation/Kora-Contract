@@ -76,3 +76,5 @@ export const useWallet = (): WalletContextValue => {
   }
   return context;
 };
+/** Like `useWallet`, but returns `undefined` outside a `WalletProvider` instead of throwing. */
+export const useOptionalWallet = (): WalletContextValue | undefined => useContext(WalletContext);

@@ -4,6 +4,7 @@ export { loadKoraAddresses, manifestToAddresses } from "./deployment";
 export type { DeploymentManifest } from "./deployment";
 export {
   AccessControlClient,
+  DebtorAttestationClient,
   DisputeEscrowClient,
   FinancingPoolClient,
   FractionalizerClient,
@@ -14,11 +15,13 @@ export {
   RiskRegistryClient,
   SecondaryMarketClient,
   TreasuryClient,
+  decodeProposal,
   encodeEnum,
   metadataHashToBytes,
   optionalString,
 } from "./clients";
-export { TESTNET, MAINNET } from "./base";
+export { TESTNET, MAINNET, NULL_ACCOUNT } from "./base";
+export type { AttestationStatus, ProposalTally } from "./clients";
 export { TransactionOutcomeUnknownError } from "./transactionRecovery";
 export type { NetworkConfig } from "./base";
 export type { TransactionReconciliation } from "./transactionRecovery";

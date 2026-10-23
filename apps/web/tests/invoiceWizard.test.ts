@@ -146,7 +146,7 @@ describe('IpfsPinningClient (real ipfs-pinning REST client, #1001)', () => {
     // Hash must be sent normalized lowercase for service integrity checks.
     expect(headers['X-SHA256']).toBe(SHA256_HELLO_HEX);
     expect(headers['X-Content-Type']).toBe('application/pdf');
-    expect(new Uint8Array(init.body as ArrayBufferView).byteLength).toBe(5);
+    expect((init.body as Uint8Array).byteLength).toBe(5);
   });
 
   it('polls pin status with the documented GET surface', async () => {

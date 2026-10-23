@@ -19,8 +19,6 @@
  * surfaced in `providerOutcomes` when the service returns them.
  */
 
-import type { PinResult } from './types';
-
 const DEFAULT_BASE_URL = '';
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_RETRIES = 1;
@@ -155,7 +153,7 @@ export class IpfsPinningClient {
     });
 
     request.onProgress?.(75); // bytes transmitted; waiting on provider pins
-    const result = (await this.parseJson(response)) as PinResult;
+    const result = (await this.parseJson(response)) as unknown as PinResult;
     if (!result || typeof result.cid !== 'string' || result.cid.length === 0) {
       throw new PinningClientError('MALFORMED_RESPONSE', 'Pinning service returned no CID.');
     }
@@ -166,7 +164,7 @@ export class IpfsPinningClient {
   /** Poll pin status for a CID (idempotent; safe to call repeatedly). */
   public async getPinStatus(cid: string): Promise<PinStatusResult> {
     const response = await this.request(`/pins/${encodeURIComponent(cid)}`, { method: 'GET' });
-    return (await this.parseJson(response)) as PinStatusResult;
+    return (await this.parseJson(response)) as unknown as PinStatusResult;
   }
 
   /** Download the pinned bytes for gateway-alteration checks ("fails closed"). */
@@ -290,4 +288,4 @@ export function validateFileForPinning(fileName: string, sizeBytes: number, cont
   return null;
 }
 
-export { RETRYABLE_CODES, SERVICE_ERROR_CODES, DEFAULT_TIMEOUT_MS, DEFAULT_MAX_RETRIES };
+export { RETRYABLE_CODES };

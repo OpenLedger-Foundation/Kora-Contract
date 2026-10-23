@@ -59,7 +59,7 @@ const mockDisbursements: GrantDisbursement[] = [
 describe('WaveService', () => {
   describe('parseGitHubIssue', () => {
     test('parses completed issue correctly', () => {
-      const service = new waveService.constructor() as any;
+      const service = new (waveService.constructor as new () => unknown)() as any;
       const issue = service.parseGitHubIssue(mockGitHubIssues[0]);
 
       expect(issue.issueNumber).toBe(100);
@@ -72,7 +72,7 @@ describe('WaveService', () => {
     });
 
     test('parses in-progress issue correctly', () => {
-      const service = new waveService.constructor() as any;
+      const service = new (waveService.constructor as new () => unknown)() as any;
       const issue = service.parseGitHubIssue(mockGitHubIssues[1]);
 
       expect(issue.issueNumber).toBe(101);
@@ -82,7 +82,7 @@ describe('WaveService', () => {
     });
 
     test('parses open issue correctly', () => {
-      const service = new waveService.constructor() as any;
+      const service = new (waveService.constructor as new () => unknown)() as any;
       const issue = service.parseGitHubIssue(mockGitHubIssues[2]);
 
       expect(issue.issueNumber).toBe(102);
@@ -95,7 +95,7 @@ describe('WaveService', () => {
 
   describe('getPointsForComplexity', () => {
     test('assigns correct points for each complexity level', () => {
-      const service = new waveService.constructor() as any;
+      const service = new (waveService.constructor as new () => unknown)() as any;
 
       expect(service.getPointsForComplexity('Low')).toBe(50);
       expect(service.getPointsForComplexity('Medium')).toBe(100);

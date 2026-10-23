@@ -1,22 +1,62 @@
 import React, { useState } from 'react';
 import { ConcentrationCapCheck, FundingStep, ListingFundingState, YieldPreview } from '../../types/funding';
-import { fundingService } from '../../services/fundingService';
+import { FundingService, fundingService as defaultFundingService } from '../../services/fundingService';
 import { useTransactionSimulation } from '../../context/SimulationContext';
+import { useOptionalWallet } from '../../context/WalletContext';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
 import { KillSwitchGate } from '../common/KillSwitchGate';
+import { DataNotice, ErrorPanel, LoadingPanel } from '../common/KoraDataState';
 
 interface MultiStepFundingFlowProps {
   listingId?: number;
   investorTotalPortfolioUsd?: number;
   investorDebtorExposureUsd?: number;
+  /** Injected service (tests / storybook). Defaults to the env-configured singleton. */
+  service?: FundingService;
+  /** Pre-loaded listing; skips the initial fetch. */
+  initialListing?: ListingFundingState;
 }
 
-export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
+export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = (props) => (
+  <KillSwitchGate flagName="multi-asset-pool">
+    <FundingFlowLoader {...props} />
+  </KillSwitchGate>
+);
+
+/** Loads listing data through the SDK and renders loading / error / empty states. */
+export const FundingFlowLoader: React.FC<MultiStepFundingFlowProps> = ({
   listingId = 101,
+  service = defaultFundingService,
+  initialListing,
+  ...rest
+}) => {
+  const { state, reload } = useAsyncResource(
+    () => service.loadListingState(listingId),
+    [listingId, service],
+    initialListing,
+  );
+  if (state.status === 'loading') return <LoadingPanel label="Loading listing from the Stellar network…" />;
+  if (state.status === 'error') {
+    return <ErrorPanel error={state.error} onRetry={reload} emptyTitle="Listing not available" />;
+  }
+  return <FundingFlowBody listing={state.data} {...rest} />;
+};
+
+interface FundingFlowBodyProps {
+  listing: ListingFundingState;
+  investorTotalPortfolioUsd?: number;
+  investorDebtorExposureUsd?: number;
+}
+
+export const FundingFlowBody: React.FC<FundingFlowBodyProps> = ({
+  listing,
   investorTotalPortfolioUsd = 10000,
   investorDebtorExposureUsd = 2000,
 }) => {
   const { runSimulation } = useTransactionSimulation();
-  const [listing] = useState<ListingFundingState>(fundingService.getListingState(listingId));
+  const wallet = useOptionalWallet();
+  const walletConnected = wallet?.status === 'connected' && Boolean(wallet.address);
+  const feePct = listing.platformFeePercentage;
 
   const [step, setStep] = useState<FundingStep>('AMOUNT_SELECTION');
   const [amountUsd, setAmountUsd] = useState<number>(1000);
@@ -29,7 +69,7 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
     setAmountUsd(newAmount);
     setErrorMsg(null);
 
-    const check = fundingService.checkConcentrationCap(
+    const check = defaultFundingService.checkConcentrationCap(
       listing.debtorName,
       investorDebtorExposureUsd,
       newAmount,
@@ -38,10 +78,11 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
     );
     setCapCheck(check);
 
-    const preview = fundingService.calculateYieldPreview(
+    const preview = defaultFundingService.calculateYieldPreview(
       newAmount,
       listing.annualYieldPercentage,
-      listing.tenorDays
+      listing.tenorDays,
+      feePct
     );
     setYieldPreview(preview);
   };
@@ -49,8 +90,18 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
   const handleProceedToPreview = (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (listing.isOpenForFunding === false && !listing.isFullyFunded) {
+      setErrorMsg('This listing is not open for funding (cancelled, expired or no longer listed).');
+      return;
+    }
+
     if (listing.isFullyFunded || listing.remainingFundingUsd <= 0) {
       setErrorMsg('Notice: This listing has been fully funded by other investors.');
+      return;
+    }
+
+    if (amountUsd < listing.minContributionUsd) {
+      setErrorMsg(`Minimum contribution is $${listing.minContributionUsd.toLocaleString()}.`);
       return;
     }
 
@@ -59,7 +110,7 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
       return;
     }
 
-    const check = fundingService.checkConcentrationCap(
+    const check = defaultFundingService.checkConcentrationCap(
       listing.debtorName,
       investorDebtorExposureUsd,
       amountUsd,
@@ -72,16 +123,21 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
       return;
     }
 
-    const preview = fundingService.calculateYieldPreview(
+    const preview = defaultFundingService.calculateYieldPreview(
       amountUsd,
       listing.annualYieldPercentage,
-      listing.tenorDays
+      listing.tenorDays,
+      feePct
     );
     setYieldPreview(preview);
     setStep('YIELD_PREVIEW');
   };
 
   const handleSimulateAndSign = async () => {
+    if (!walletConnected) {
+      setErrorMsg('Connect your wallet to simulate and sign this contribution.');
+      return;
+    }
     setStep('SIMULATION_AND_SIGN');
     await runSimulation({
       flowType: 'FUNDING',
@@ -91,12 +147,12 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
         listingId: listing.listingId,
         amountUsd,
         debtor: listing.debtorName,
+        investor: wallet?.address,
       },
     });
   };
 
   return (
-    <KillSwitchGate flagName="multi-asset-pool">
     <div
       className="multi-step-funding-flow bg-white border border-gray-200 rounded-2xl p-4 sm:p-6 shadow-sm max-w-xl mx-auto"
       role="region"
@@ -121,6 +177,8 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
           </span>
         </div>
       </div>
+
+      <DataNotice notice={listing.notice} devFixture={listing.source === 'dev-fixture'} />
 
       {/* Listing Status Overview */}
       <div className="mb-6 p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-1">
@@ -201,7 +259,7 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
               <strong className="text-gray-900">${yieldPreview.contributionAmountUsd.toLocaleString()} USD</strong>
             </div>
             <div className="flex justify-between text-gray-700">
-              <span>Platform Service Fee (0.5%):</span>
+              <span>Platform Service Fee ({feePct ?? 0.5}%{feePct === undefined ? ', estimated' : ''}):</span>
               <strong className="text-rose-600">-${yieldPreview.platformFeeUsd.toLocaleString()} USD</strong>
             </div>
             <div className="flex justify-between text-gray-700 border-t border-gray-200 pt-2">
@@ -214,6 +272,11 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
             </div>
           </div>
 
+          {!walletConnected && (
+            <p role="status" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2">
+              Connect your wallet to simulate and sign. Listing data above is read without a wallet.
+            </p>
+          )}
           <div className="flex gap-3">
             <button
               type="button"
@@ -225,7 +288,9 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
             <button
               type="button"
               onClick={handleSimulateAndSign}
-              className="w-1/2 py-3 bg-indigo-600 text-white font-semibold text-sm rounded-xl hover:bg-indigo-700 transition-colors shadow-sm"
+              disabled={!walletConnected}
+              title={walletConnected ? undefined : 'Connect a wallet first'}
+              className="w-1/2 py-3 disabled:opacity-50 bg-indigo-600 text-white font-semibold text-sm rounded-xl hover:bg-indigo-700 transition-colors shadow-sm"
             >
               Simulate & Sign →
             </button>
@@ -251,6 +316,5 @@ export const MultiStepFundingFlow: React.FC<MultiStepFundingFlowProps> = ({
         </div>
       )}
     </div>
-    </KillSwitchGate>
   );
 };

@@ -159,7 +159,7 @@ export class InvoiceWizardService {
     }
 
     // Buffer is a Uint8Array subclass; crypto.subtle accepts the ArrayBufferView.
-    const digest = await crypto.subtle.digest('SHA-256', content as unknown as ArrayBufferView);
+    const digest = await crypto.subtle.digest('SHA-256', content as unknown as BufferSource);
     return Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');

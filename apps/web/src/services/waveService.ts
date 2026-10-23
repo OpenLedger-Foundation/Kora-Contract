@@ -3,7 +3,7 @@
  * Fetches and processes Wave contributor data from GitHub and on-chain treasury
  */
 
-import type {
+import {
   WaveIssue,
   WaveIssueStatus,
   PayoutStatus,

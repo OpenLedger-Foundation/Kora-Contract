@@ -1,12 +1,14 @@
 import {
+  DebtorAttestationClient,
   DisputeEscrowClient,
   FractionalizerClient,
   GovernanceVotingClient,
   SecondaryMarketClient,
+  decodeProposal,
   encodeEnum,
 } from "../src/clients";
 import { KoraClient, KoraAddresses } from "../src/KoraClient";
-import { TESTNET } from "../src/base";
+import { NULL_ACCOUNT, TESTNET } from "../src/base";
 import {
   CONTRACT_ERROR_MESSAGES,
   DISPUTE_ESCROW_ERROR_MESSAGES,
@@ -441,6 +443,109 @@ describe("SDK Typed Clients - Issue #936", () => {
       expect(CONTRACT_ERROR_MESSAGES[14]).toBe("Invalid amount");
       expect(CONTRACT_ERROR_MESSAGES[90]).toBe("Arithmetic overflow");
       expect(getErrorMessage(90)).toBe("Arithmetic overflow");
+    });
+  });
+});
+
+describe("DebtorAttestationClient and read-only simulation (#788, #938)", () => {
+  const contractId = StrKey.encodeContract(Buffer.alloc(32, 7));
+
+  it("attestViaRelay sends relay, debtor, invoice, amount, expiry, nonce and sig", async () => {
+    const client = new DebtorAttestationClient(contractId, TESTNET);
+    const relay = Keypair.random();
+    const debtor = Keypair.random().publicKey();
+    const spy = jest.spyOn(client as any, "invoke").mockResolvedValue(xdr.ScVal.scvVoid());
+    await client.attestViaRelay(relay, debtor, 7n, 1000n, 2000n, 3n);
+    expect(spy).toHaveBeenCalledWith("attest_via_relay", expect.any(Array), relay);
+    const args = spy.mock.calls[0][1] as xdr.ScVal[];
+    expect(args).toHaveLength(7);
+    expect(scValToNative(args[5])).toBe(3n);
+  });
+
+  it("reject is signed by the caller", async () => {
+    const client = new DebtorAttestationClient(contractId, TESTNET);
+    const caller = Keypair.random();
+    const spy = jest.spyOn(client as any, "invoke").mockResolvedValue(xdr.ScVal.scvVoid());
+    await client.reject(caller, 9n);
+    expect(spy).toHaveBeenCalledWith("reject", expect.any(Array), caller);
+  });
+
+  it("decodes status enums, nonces and confirmation flags", async () => {
+    const client = new DebtorAttestationClient(contractId, TESTNET);
+    const spy = jest.spyOn(client as any, "invoke");
+    spy.mockResolvedValueOnce(xdr.ScVal.scvVec([nativeToScVal("Confirmed", { type: "symbol" })]));
+    await expect(client.attestationStatus(1n)).resolves.toBe("Confirmed");
+    spy.mockResolvedValueOnce(nativeToScVal(4n, { type: "u64" }));
+    await expect(client.nonceOf(Keypair.random().publicKey())).resolves.toBe(4n);
+    spy.mockResolvedValueOnce(xdr.ScVal.scvBool(true));
+    await expect(client.isConfirmed(1n, 10n)).resolves.toBe(true);
+  });
+
+  it("KoraClient wires debtorAttestation when the address is provided", () => {
+    const addresses: KoraAddresses = {
+      invoiceNft: contractId, marketplace: contractId, financingPool: contractId, treasury: contractId,
+      riskRegistry: contractId, accessControl: contractId, priceOracle: contractId, debtorAttestation: contractId,
+    };
+    expect(new KoraClient(addresses, TESTNET).debtorAttestation).toBeInstanceOf(DebtorAttestationClient);
+  });
+
+  it("read-only calls simulate from the null account instead of loading the contract as an account", async () => {
+    const client = new DebtorAttestationClient(contractId, TESTNET);
+    const server = (client as any).server;
+    const getAccount = jest.spyOn(server, "getAccount");
+    const simulate = jest.spyOn(server, "simulateTransaction").mockResolvedValue({
+      id: "1", latestLedger: 1, events: [], _parsed: true, transactionData: undefined,
+      minResourceFee: "0", cost: { cpuInsns: "0", memBytes: "0" },
+      result: { auth: [], retval: xdr.ScVal.scvBool(false) },
+    } as any);
+    await expect(client.isConfirmed(1n, 1n)).resolves.toBe(false);
+    expect(getAccount).not.toHaveBeenCalled();
+    const tx = simulate.mock.calls[0][0] as any;
+    expect(tx.source).toBe(NULL_ACCOUNT);
+  });
+});
+
+describe("GovernanceVotingClient tally reads (#933)", () => {
+  const contractId = StrKey.encodeContract(Buffer.alloc(32, 9));
+  const snakeProposal = () =>
+    nativeToScVal({
+      id: nativeToScVal(3n, { type: "u64" }),
+      proposer: Keypair.random().publicKey(),
+      title: "Grant",
+      description: "d",
+      proposal_type: xdr.ScVal.scvVec([nativeToScVal("Financial", { type: "symbol" })]),
+      voting_mode: xdr.ScVal.scvVec([nativeToScVal("Standard", { type: "symbol" })]),
+      votes_for: nativeToScVal(700n, { type: "i128" }),
+      votes_against: nativeToScVal(200n, { type: "i128" }),
+      votes_abstain: nativeToScVal(100n, { type: "i128" }),
+      created_at: nativeToScVal(10n, { type: "u64" }),
+      expires_at: nativeToScVal(20n, { type: "u64" }),
+      executed: false,
+      quorum_required: nativeToScVal(500n, { type: "i128" }),
+    });
+
+  it("decodes snake_case proposal structs into the camelCase Proposal type", async () => {
+    const client = new GovernanceVotingClient(contractId, TESTNET);
+    jest.spyOn(client as any, "invoke").mockResolvedValue(snakeProposal());
+    const proposal = await client.getProposal(3n);
+    expect(proposal).toMatchObject({ id: 3n, votesFor: 700n, votingMode: "Standard", proposalType: "Financial", quorumRequired: 500n });
+  });
+
+  it("getProposalTally returns on-chain counts or null", async () => {
+    const client = new GovernanceVotingClient(contractId, TESTNET);
+    const spy = jest.spyOn(client as any, "invoke").mockResolvedValueOnce(snakeProposal());
+    await expect(client.getProposalTally(3n)).resolves.toEqual({
+      proposalId: 3n, votesFor: 700n, votesAgainst: 200n, votesAbstain: 100n, quorumRequired: 500n,
+      createdAt: 10n, expiresAt: 20n, executed: false, votingMode: "Standard",
+    });
+    spy.mockResolvedValueOnce(xdr.ScVal.scvVoid());
+    await expect(client.getProposalTally(4n)).resolves.toBeNull();
+  });
+
+  it("decodeProposal accepts camelCase input and rejects non-objects", () => {
+    expect(decodeProposal(null)).toBeNull();
+    expect(decodeProposal({ id: 1, votesFor: "5", votingMode: "Quadratic", executed: true })).toMatchObject({
+      id: 1n, votesFor: 5n, votesAgainst: 0n, votingMode: "Quadratic", executed: true,
     });
   });
 });

@@ -1,10 +1,17 @@
 import { Keypair } from '@stellar/stellar-sdk';
 import { createHash } from 'node:crypto';
+import { Tally, Vote, VoteChoice, VotingRules, voteMessage } from './ballot';
+import {
+  OnChainTally,
+  ReconcileResult,
+  TallyReconciliationError,
+  WeightMode,
+  passes,
+  reconcileTallies,
+} from './reconcile';
 
-export type VoteChoice = 'for' | 'against';
-export type Vote = { proposalId: string; voter: string; choice: VoteChoice; weight: bigint; signature: string };
-export type VotingRules = { quorum: bigint; thresholdBps: number; votingEndsAt: number; executeFromResult: boolean };
-export type Tally = { for: bigint; against: bigint; total: bigint; passed: boolean };
+export * from './ballot';
+export * from './reconcile';
 
 export interface GovernanceSource {
   votingWeight(proposalId: string, voter: string): Promise<bigint>;
@@ -44,8 +51,57 @@ export class MemoryVoteStore implements VoteStore {
   }
 }
 
-export function voteMessage(chainId: string, proposalId: string, voter: string, choice: VoteChoice): Buffer {
-  return Buffer.from(`KORA_OFFCHAIN_VOTE_V1\n${chainId}\n${proposalId}\n${voter}\n${choice}`, 'utf8');
+/** Reads on-chain counts; satisfied by `createSdkTallyReader(kora.governanceVoting)`. */
+export interface OnChainTallyReader {
+  getOnChainTally(onChainProposalId: bigint): Promise<OnChainTally | null>;
+}
+
+/** Structural subset of `GovernanceVotingClient` from @kora-protocol/sdk. */
+export interface GovernanceTallyClient {
+  getProposalTally(proposalId: bigint): Promise<{
+    proposalId: bigint;
+    votesFor: bigint;
+    votesAgainst: bigint;
+    votesAbstain: bigint;
+    quorumRequired: bigint;
+    expiresAt: bigint;
+    executed: boolean;
+    votingMode: string;
+  } | null>;
+}
+
+export function createSdkTallyReader(client: GovernanceTallyClient): OnChainTallyReader {
+  return {
+    async getOnChainTally(id) {
+      const t = await client.getProposalTally(id);
+      if (!t) return null;
+      return {
+        proposalId: t.proposalId,
+        votesFor: t.votesFor,
+        votesAgainst: t.votesAgainst,
+        votesAbstain: t.votesAbstain,
+        quorumRequired: t.quorumRequired,
+        expiresAt: Number(t.expiresAt),
+        executed: t.executed,
+        votingMode: t.votingMode === 'Quadratic' ? 'Quadratic' : 'Standard',
+      };
+    },
+  };
+}
+
+/**
+ * Maps an off-chain proposal id to the governance_voting `u64` id. The default
+ * accepts the numeric ids governance-sync uses (`"12"`) and `proposal-12`/`gov-12`.
+ */
+export function defaultOnChainProposalId(proposalId: string): bigint | null {
+  const match = /^(?:[a-z]+-)?(\d+)$/i.exec(proposalId.trim());
+  return match ? BigInt(match[1]) : null;
+}
+
+export interface ReconciliationOptions {
+  reader: OnChainTallyReader;
+  resolveOnChainId?: (proposalId: string) => bigint | null;
+  weightMode?: WeightMode;
 }
 
 export class OffchainVotingService {
@@ -54,7 +110,34 @@ export class OffchainVotingService {
     private readonly source: GovernanceSource,
     private readonly store: VoteStore,
     private readonly now: () => number = () => Math.floor(Date.now() / 1000),
+    /** When set, `finalize` refuses to anchor results that drift from chain. */
+    private readonly reconciliation?: ReconciliationOptions,
   ) {}
+
+  /**
+   * Compares stored ballots with on-chain counts for the proposal.
+   * Requires `reconciliation` options. Use `toApiResponse` to serialize.
+   */
+  async reconcile(proposalId: string): Promise<ReconcileResult> {
+    if (!this.reconciliation) throw new Error('On-chain reconciliation is not configured');
+    const { reader, resolveOnChainId = defaultOnChainProposalId, weightMode } = this.reconciliation;
+    const onChainProposalId = resolveOnChainId(proposalId);
+    const [rules, ballots, onChain] = await Promise.all([
+      this.source.rules(proposalId),
+      this.store.votes(proposalId),
+      onChainProposalId === null ? Promise.resolve(null) : reader.getOnChainTally(onChainProposalId),
+    ]);
+    return reconcileTallies({
+      proposalId,
+      onChainProposalId,
+      ballots,
+      onChain,
+      rules,
+      chainId: this.chainId,
+      weightMode,
+      now: this.now(),
+    });
+  }
 
   async open(proposalId: string): Promise<void> {
     if (await this.source.onChainVotingOpen(proposalId) || !(await this.source.offchainVotingEnabled(proposalId))) {
@@ -80,7 +163,7 @@ export class OffchainVotingService {
       valid = false;
     }
     if (!valid) throw new Error('Invalid vote signature');
-    const vote = { proposalId, voter, choice, weight, signature };
+    const vote: Vote = { proposalId, voter, choice, weight, signature, castAt: this.now() };
     if (!(await this.store.recordVoteIfAbsent(vote))) throw new Error('Already voted');
     return vote;
   }
@@ -88,13 +171,16 @@ export class OffchainVotingService {
   async finalize(proposalId: string): Promise<{ summary: Tally; hash: string }> {
     const rules = await this.source.rules(proposalId);
     if (this.now() < rules.votingEndsAt) throw new Error('Voting is still open');
+    if (this.reconciliation) {
+      const result = await this.reconcile(proposalId);
+      if (!result.finalizable) throw new TallyReconciliationError(result);
+    }
     const summary = (await this.store.votes(proposalId)).reduce<Tally>((tally, vote) => {
       tally[vote.choice] += vote.weight;
       tally.total += vote.weight;
       return tally;
     }, { for: 0n, against: 0n, total: 0n, passed: false });
-    summary.passed = summary.total >= rules.quorum && summary.total > 0n
-      && (summary.for * 10_000n) / summary.total >= BigInt(rules.thresholdBps);
+    summary.passed = passes(summary.for, summary.total, rules.quorum, rules.thresholdBps);
     const canonical = `${proposalId}:${summary.for}:${summary.against}:${summary.total}:${summary.passed}`;
     const hash = createHash('sha256').update(canonical).digest('hex');
     await this.source.anchorResult(proposalId, hash, summary);

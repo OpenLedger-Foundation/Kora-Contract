@@ -31,13 +31,14 @@ const REQUIRED_MANIFEST_CONTRACT_KEYS: Record<
 };
 
 const OPTIONAL_MANIFEST_CONTRACT_KEYS: Record<
-  "disputeEscrow" | "fractionalizer" | "secondaryMarket" | "governanceVoting",
+  "disputeEscrow" | "fractionalizer" | "secondaryMarket" | "governanceVoting" | "debtorAttestation",
   string
 > = {
   disputeEscrow: "dispute_escrow",
   fractionalizer: "fractionalizer",
   secondaryMarket: "secondary_market",
   governanceVoting: "governance_voting",
+  debtorAttestation: "debtor_attestation",
 };
 
 /**

@@ -1,4 +1,5 @@
 import {
+  Account,
   Contract,
   Networks,
   rpc,
@@ -42,6 +43,14 @@ export function getNetworkConfig(name: keyof typeof NETWORKS): NetworkConfig {
 }
 
 const TRANSACTION_POLL_INTERVAL_MS = 1000;
+
+/**
+ * Source account for read-only simulations. Soroban RPC does not require the
+ * simulation source to exist, and a contract ID cannot be loaded with
+ * `getAccount`, so reads use the all-zero account (same as stellar-sdk's
+ * contract client).
+ */
+export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const TRANSACTION_POLL_TIMEOUT_MS = 30000;
 
 export interface InvokeOptions {
@@ -96,9 +105,9 @@ export class BaseClient {
     keypair?: Keypair,
     options: InvokeOptions = {}
   ): Promise<xdr.ScVal> {
-    const account = await this.server.getAccount(
-      keypair?.publicKey() ?? this.contract.contractId()
-    );
+    const account = keypair
+      ? await this.server.getAccount(keypair.publicKey())
+      : new Account(NULL_ACCOUNT, "0");
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: this.networkPassphrase,
