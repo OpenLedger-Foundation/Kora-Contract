@@ -40,4 +40,14 @@ export interface ListingFundingState {
   tenorDays: number;
   annualYieldPercentage: number;
   isFullyFunded: boolean;
+  /** False when the listing is cancelled, expired or the invoice left `Listed`. */
+  isOpenForFunding?: boolean;
+  /** `sdk` = read from contracts; `dev-fixture` = local sample data (never in production). */
+  source?: 'sdk' | 'dev-fixture';
+  /** Marketplace fee from `get_fee_bps`, as a percentage. */
+  platformFeePercentage?: number;
+  /** ISO timestamp of the listing's funding deadline. */
+  fundingDeadline?: string;
+  /** Non-fatal warning to show with the data (e.g. stale deployment manifest). */
+  notice?: string;
 }

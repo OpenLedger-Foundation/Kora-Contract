@@ -83,7 +83,7 @@ const FeatureFlagContext = createContext<FeatureFlagContextValue>({
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 const FLAGS_BASE_URL =
-  (typeof process !== 'undefined' && process.env?.['REACT_APP_FLAGS_URL']) ??
+  (typeof process !== 'undefined' ? process.env?.['REACT_APP_FLAGS_URL'] : undefined) ??
   'http://localhost:3050';
 
 /** How often to reconnect the SSE stream after an error (ms). */

@@ -1,22 +1,39 @@
 import React, { useState } from 'react';
 import { RiskBreakdown } from '../../types/risk';
-import { riskService } from '../../services/riskService';
+import { RiskService, riskService as defaultRiskService } from '../../services/riskService';
+import { useAsyncResource } from '../../hooks/useAsyncResource';
+import { DataNotice, ErrorPanel, LoadingPanel } from '../common/KoraDataState';
 
 interface RiskScoreVisualizationProps {
+  /** Pre-loaded breakdown; skips the fetch. */
   breakdown?: RiskBreakdown;
   invoiceId?: string;
-  isUnderReview?: boolean;
+  /** Injected service (tests). Defaults to the env-configured singleton. */
+  service?: RiskService;
 }
 
+/** Loads the risk breakdown via the SDK (registry + pipeline) with loading and error states. */
 export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
   breakdown: initialBreakdown,
   invoiceId = 'INV-2026-101',
-  isUnderReview = false,
+  service = defaultRiskService,
 }) => {
-  const [breakdown] = useState<RiskBreakdown>(
-    initialBreakdown || riskService.getRiskBreakdown(invoiceId, { isUnderReview })
+  const { state, reload } = useAsyncResource(
+    () => service.loadRiskBreakdown(invoiceId),
+    [invoiceId, service],
+    initialBreakdown,
   );
+  if (state.status === 'loading') return <LoadingPanel label="Loading risk data from the registry…" />;
+  if (state.status === 'error') {
+    return <ErrorPanel error={state.error} onRetry={reload} emptyTitle="No risk data for this invoice" />;
+  }
+  return <RiskScoreCard breakdown={state.data} />;
+};
+
+export const RiskScoreCard: React.FC<{ breakdown: RiskBreakdown }> = ({ breakdown }) => {
   const [expanded, setExpanded] = useState<boolean>(false);
+  const riskService = defaultRiskService;
+  const registry = breakdown.registry;
 
   const meta = riskService.getRiskTierMetadata(breakdown.tier);
 
@@ -26,6 +43,8 @@ export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
       role="region"
       aria-label={`Risk score assessment for invoice ${breakdown.invoiceId}`}
     >
+      <DataNotice notice={breakdown.notice} devFixture={breakdown.source === 'dev-fixture'} />
+
       {/* Header & Main Tier Indicator */}
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div>
@@ -56,7 +75,7 @@ export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
       </div>
 
       {/* Under Review Notice Banner if applicable */}
-      {breakdown.status === 'UNDER_REVIEW' && (
+      {(breakdown.status === 'UNDER_REVIEW' || breakdown.status === 'DISPUTED') && (
         <div
           className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800"
           role="alert"
@@ -97,9 +116,45 @@ export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
 
         <div className="flex items-center justify-between text-xs text-gray-500 pt-1">
           <span>Verifier Consensus: <strong>{breakdown.verifierCount} Nodes</strong></span>
-          <span>Confidence: <strong>{breakdown.confidencePercentage}%</strong></span>
+          <span>
+            Confidence:{' '}
+            <strong>{breakdown.confidencePercentage === null ? 'n/a' : `${breakdown.confidencePercentage}%`}</strong>
+          </span>
         </div>
       </div>
+
+      {breakdown.source === 'sdk' && (
+        <dl
+          className="mb-4 grid grid-cols-2 gap-2 p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+          aria-label="Risk registry fields"
+        >
+          <dt className="text-gray-500">On-chain tier</dt>
+          <dd className="text-gray-900 font-semibold">{breakdown.onChainTier ?? 'n/a'}</dd>
+          {registry ? (
+            <>
+              <dt className="text-gray-500">SME verified</dt>
+              <dd className="text-gray-900 font-semibold">{registry.verified ? 'Yes' : 'No'}</dd>
+              <dt className="text-gray-500">Registry SME score</dt>
+              <dd className="text-gray-900 font-semibold">{registry.smeRiskScore}/100</dd>
+              <dt className="text-gray-500">Invoices / defaults</dt>
+              <dd className="text-gray-900 font-semibold">
+                {registry.totalInvoices} / {registry.defaults}
+              </dd>
+            </>
+          ) : (
+            <>
+              <dt className="text-gray-500">Risk registry</dt>
+              <dd className="text-gray-900 font-semibold">SME not registered</dd>
+            </>
+          )}
+        </dl>
+      )}
+
+      {breakdown.pipelineNotice && (
+        <p role="note" className="mb-4 text-xs text-gray-600">
+          {breakdown.pipelineNotice}
+        </p>
+      )}
 
       {/* Expandable Factor Breakdown Toggle */}
       <button
@@ -125,6 +180,9 @@ export const RiskScoreVisualization: React.FC<RiskScoreVisualizationProps> = ({
             Risk Factor Pipeline Breakdown
           </h4>
 
+          {breakdown.factors.length === 0 && (
+            <p className="text-xs text-gray-500">No factor breakdown available.</p>
+          )}
           {breakdown.factors.map((factor) => (
             <div key={factor.id} className="p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-1">
               <div className="flex items-center justify-between font-semibold text-gray-900">

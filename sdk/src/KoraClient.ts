@@ -1,6 +1,7 @@
 import { NetworkConfig, TESTNET } from "./base";
 import {
   AccessControlClient,
+  DebtorAttestationClient,
   DisputeEscrowClient,
   FinancingPoolClient,
   FractionalizerClient,
@@ -25,6 +26,7 @@ export interface KoraAddresses {
   fractionalizer?: string;
   secondaryMarket?: string;
   governanceVoting?: string;
+  debtorAttestation?: string;
 }
 
 /**
@@ -53,6 +55,7 @@ export class KoraClient {
   readonly fractionalizer?: FractionalizerClient;
   readonly secondaryMarket?: SecondaryMarketClient;
   readonly governanceVoting?: GovernanceVotingClient;
+  readonly debtorAttestation?: DebtorAttestationClient;
 
   constructor(addresses: KoraAddresses, network: NetworkConfig = TESTNET) {
     this.invoiceNft    = new InvoiceNftClient(addresses.invoiceNft, network);
@@ -73,6 +76,9 @@ export class KoraClient {
     }
     if (addresses.governanceVoting) {
       this.governanceVoting = new GovernanceVotingClient(addresses.governanceVoting, network);
+    }
+    if (addresses.debtorAttestation) {
+      this.debtorAttestation = new DebtorAttestationClient(addresses.debtorAttestation, network);
     }
   }
 

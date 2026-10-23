@@ -606,6 +606,55 @@ export class SecondaryMarketClient extends BaseClient {
 
 // ── GovernanceVotingClient ────────────────────────────────────────────────────
 
+/** On-chain vote counts for one proposal (see `GovernanceVotingClient.getProposalTally`). */
+export interface ProposalTally {
+  proposalId: bigint;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  votesAbstain: bigint;
+  quorumRequired: bigint;
+  createdAt: bigint;
+  expiresAt: bigint;
+  executed: boolean;
+  votingMode: VotingMode;
+}
+
+function pick(obj: Record<string, unknown>, camel: string, snake: string): unknown {
+  return camel in obj ? obj[camel] : obj[snake];
+}
+
+function asBigInt(value: unknown): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" || (typeof value === "string" && value !== "")) return BigInt(value);
+  return 0n;
+}
+
+/**
+ * Normalizes a decoded `Proposal` struct. `scValToNative` yields the Rust
+ * snake_case field names and unit enums as `["Variant"]`; this returns the
+ * camelCase `Proposal` type the SDK declares.
+ */
+export function decodeProposal(native: unknown): Proposal | null {
+  if (!native || typeof native !== "object") return null;
+  const o = native as Record<string, unknown>;
+  const variant = (v: unknown) => String(Array.isArray(v) ? v[0] : v);
+  return {
+    id: asBigInt(o.id),
+    proposer: String(o.proposer ?? ""),
+    title: String(o.title ?? ""),
+    description: String(o.description ?? ""),
+    proposalType: variant(pick(o, "proposalType", "proposal_type")) as ProposalType,
+    votingMode: variant(pick(o, "votingMode", "voting_mode")) as VotingMode,
+    votesFor: asBigInt(pick(o, "votesFor", "votes_for")),
+    votesAgainst: asBigInt(pick(o, "votesAgainst", "votes_against")),
+    votesAbstain: asBigInt(pick(o, "votesAbstain", "votes_abstain")),
+    createdAt: asBigInt(pick(o, "createdAt", "created_at")),
+    expiresAt: asBigInt(pick(o, "expiresAt", "expires_at")),
+    executed: pick(o, "executed", "executed") === true,
+    quorumRequired: asBigInt(pick(o, "quorumRequired", "quorum_required")),
+  };
+}
+
 export class GovernanceVotingClient extends BaseClient {
   constructor(contractId: string, network: NetworkConfig) {
     super(contractId, network);
@@ -718,7 +767,28 @@ export class GovernanceVotingClient extends BaseClient {
 
   async getProposal(proposalId: bigint): Promise<Proposal | null> {
     const result = await this.invoke("get_proposal", [this.u64(proposalId)]);
-    return (scValToNative(result) as Proposal) ?? null;
+    return decodeProposal(scValToNative(result));
+  }
+
+  /**
+   * Reads the on-chain vote counts for a proposal, for reconciling off-chain
+   * tallies (services/offchain-voting). Returns `null` when the proposal does
+   * not exist.
+   */
+  async getProposalTally(proposalId: bigint): Promise<ProposalTally | null> {
+    const proposal = await this.getProposal(proposalId);
+    if (!proposal) return null;
+    return {
+      proposalId: proposal.id,
+      votesFor: proposal.votesFor,
+      votesAgainst: proposal.votesAgainst,
+      votesAbstain: proposal.votesAbstain,
+      quorumRequired: proposal.quorumRequired,
+      createdAt: proposal.createdAt,
+      expiresAt: proposal.expiresAt,
+      executed: proposal.executed,
+      votingMode: proposal.votingMode,
+    };
   }
 
   async getVoteRecord(
@@ -741,3 +811,66 @@ export class GovernanceVotingClient extends BaseClient {
   }
 }
 
+
+// ── DebtorAttestationClient ───────────────────────────────────────────────────
+
+export type AttestationStatus = "Pending" | "Confirmed" | "Rejected" | "Expired";
+
+/** Decodes a Soroban unit enum (`["Confirmed"]` or `"Confirmed"`) to its variant name. */
+function enumVariant(value: unknown): string {
+  return Array.isArray(value) ? String(value[0]) : String(value);
+}
+
+export class DebtorAttestationClient extends BaseClient {
+  constructor(contractId: string, network: NetworkConfig) {
+    super(contractId, network);
+  }
+
+  /**
+   * Relay attestation for debtors without a wallet. The relay must be
+   * whitelisted on-chain; `nonce` must equal `nonceOf(debtor)`.
+   */
+  async attestViaRelay(
+    relay: Keypair,
+    debtor: string,
+    invoiceId: bigint,
+    amount: bigint,
+    expiresAt: bigint,
+    nonce: bigint,
+    relaySig: Buffer = Buffer.alloc(0)
+  ): Promise<void> {
+    await this.invoke(
+      "attest_via_relay",
+      [
+        this.addr(relay.publicKey()),
+        this.addr(debtor),
+        this.u64(invoiceId),
+        this.i128(amount),
+        this.u64(expiresAt),
+        this.u64(nonce),
+        this.bytes(relaySig),
+      ],
+      relay
+    );
+  }
+
+  /** Rejects an existing attestation record (debtor or whitelisted relay only). */
+  async reject(caller: Keypair, invoiceId: bigint): Promise<void> {
+    await this.invoke("reject", [this.addr(caller.publicKey()), this.u64(invoiceId)], caller);
+  }
+
+  async attestationStatus(invoiceId: bigint): Promise<AttestationStatus> {
+    const result = await this.invoke("attestation_status", [this.u64(invoiceId)]);
+    return enumVariant(scValToNative(result)) as AttestationStatus;
+  }
+
+  async nonceOf(debtor: string): Promise<bigint> {
+    const result = await this.invoke("nonce_of", [this.addr(debtor)]);
+    return BigInt(scValToNative(result) as bigint | number);
+  }
+
+  async isConfirmed(invoiceId: bigint, expectedAmount: bigint): Promise<boolean> {
+    const result = await this.invoke("is_confirmed", [this.u64(invoiceId), this.i128(expectedAmount)]);
+    return scValToNative(result) as boolean;
+  }
+}
