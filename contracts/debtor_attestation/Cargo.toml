@@ -14,9 +14,4 @@ soroban-sdk = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-soroban-sdk = { workspace = true }
-kora-shared = { path = "../shared" }
-
-[dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }

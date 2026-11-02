@@ -6,6 +6,7 @@
 
 #[cfg(test)]
 mod issue_469_position_balance {
+    use kora_access_control::AccessControlContract;
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_invoice_nft::InvoiceNftContractClient;
     use soroban_sdk::{
@@ -41,19 +42,20 @@ mod issue_469_position_balance {
         let admin = Address::generate(&env);
         let investor1 = Address::generate(&env);
         let investor2 = Address::generate(&env);
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
         let treasury = Address::generate(&env);
 
-        // Deploy NFT
+        // Deploy NFT (real access_control: state-changing paths check pause state)
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac_id).initialize(&admin);
+        nft.initialize(&admin, &ac_id);
 
         // Deploy Pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
         let oracle = Address::generate(&env);
         let risk_registry = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
@@ -62,10 +64,11 @@ mod issue_469_position_balance {
             &nft_id,
             &risk_registry,
             &treasury,
-            &ac2,
+            &ac_id,
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
 
@@ -78,6 +81,24 @@ mod issue_469_position_balance {
             pool_client,
             nft,
         }
+    }
+
+    fn mint_and_list(t: &TestEnv, invoice_id: u64, amount: i128, marketplace: &Address) {
+        use soroban_sdk::{Bytes, String as SorobanString, Symbol};
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xABu8; 32]);
+        let ipfs_cid = SorobanString::from_str(&t.env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        t.nft.mint_invoice(
+            &t.admin,
+            &debtor_hash,
+            &amount,
+            &Symbol::new(&t.env, "USDC"),
+            &(t.env.ledger().timestamp() + 86_400 * 30),
+            &ipfs_cid,
+            &50u32,
+            &None,
+        );
+        t.nft.set_authorized_callers(&t.admin, marketplace, &t.pool_client.address);
+        t.nft.set_listed(marketplace, &invoice_id);
     }
 
     /// Issue #469: Test that record_position should reject positions
@@ -94,9 +115,9 @@ mod issue_469_position_balance {
         let claimed_pool_amount = 1_000_000i128;
 
         // Create a pool via release_funds
-        t.nft.mint(&t.admin, &invoice_id, &claimed_pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, claimed_pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Admin records investor1 contributed 600k
         // This call succeeds, but we don't verify if the contract actually
@@ -108,13 +129,12 @@ mod issue_469_position_balance {
                 &t.investor1,
                 &600_000i128,
                 &claimed_pool_amount,
-            )
-            .unwrap();
+            );
 
         // Admin records investor2 contributed 600k
         // Total recorded is 1.2M, but the pool total_funded is only supposed to be 1M
         // This is an inconsistency that should be caught
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor2,
@@ -138,18 +158,17 @@ mod issue_469_position_balance {
         let pool_amount = 2_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record investor1 with 1.5M contribution
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &1_500_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &1_500_000i128, &pool_amount);
 
         // Try to record investor2 with 1M contribution
         // Total would be 2.5M but pool is only 2M
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor2,
@@ -172,20 +191,18 @@ mod issue_469_position_balance {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record investor1 with 600k
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
 
         // Record investor2 with 400k
         // Total is now 1M, matching pool amount
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // This should succeed — all funds are accounted for
     }
@@ -197,25 +214,26 @@ mod issue_469_position_balance {
         let invoice_id = 1u64;
         let pool_amount = 1_000_000i128;
         let buyer = Address::generate(&t.env);
+        soroban_sdk::token::StellarAssetClient::new(&t.env, &t.token).mint(&buyer, &600_000i128);
 
         // Create pool and record positions
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // buy_position transfers investor1's position to buyer
-        // The invariant should remain: total contributions still = pool_amount
+        // The invariant should remain: total contributions still = pool_amount.
+        // A sale must be listed first.
         t.pool_client
-            .buy_position(&t.investor1, &invoice_id, &buyer, &1i128)
-            .unwrap();
+            .list_position_for_sale(&t.investor1, &invoice_id, &t.token, &600_000i128);
+        t.pool_client
+            .buy_position(&buyer, &invoice_id, &t.investor1);
 
         // After the buy, the sum of all positions should still equal pool_amount
         // This is an invariant that must hold throughout the pool's lifetime

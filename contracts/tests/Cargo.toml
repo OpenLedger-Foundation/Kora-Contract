@@ -114,3 +114,8 @@ kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
 kora-secondary-market = { path = "../secondary_market" }
 kora-fractionalizer = { path = "../fractionalizer" }
+kora-parameter-registry = { path = "../parameter_registry" }
+kora-vesting = { path = "../vesting" }
+kora-dispute-escrow = { path = "../dispute_escrow" }
+kora-dispute-resolution = { path = "../dispute_resolution" }
+kora-governance-voting = { path = "../governance_voting" }

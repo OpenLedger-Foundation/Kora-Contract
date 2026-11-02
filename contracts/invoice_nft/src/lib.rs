@@ -36,7 +36,7 @@ use kora_shared::{
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use soroban_sdk::IntoVal;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -70,11 +70,17 @@ pub enum InvoiceNftError {
     InvalidMigrationTarget = 26,
     InvalidReferrer = 27,
     ReferralAlreadyLocked = 28,
+    MigrationVersionMismatch = 29,
 }
 
 impl From<kora_shared::migration::MigrationError> for InvoiceNftError {
-    fn from(_: kora_shared::migration::MigrationError) -> Self {
-        InvoiceNftError::InvalidMigrationTarget
+    fn from(e: kora_shared::migration::MigrationError) -> Self {
+        match e {
+            kora_shared::migration::MigrationError::VersionMismatch => {
+                InvoiceNftError::MigrationVersionMismatch
+            }
+            _ => InvoiceNftError::InvalidMigrationTarget,
+        }
     }
 }
 
@@ -124,6 +130,9 @@ impl From<InvoiceNftError> for KoraError {
             InvoiceNftError::MintRateLimitExceeded => KoraError::MintRateLimitExceeded,
             InvoiceNftError::InvalidParameterValue => KoraError::InvalidParameterValue,
             InvoiceNftError::InvalidMigrationTarget => KoraError::InvalidParameterValue,
+            InvoiceNftError::MigrationVersionMismatch => KoraError::InvalidParameterValue,
+            InvoiceNftError::InvalidReferrer => KoraError::InvalidAddress,
+            InvoiceNftError::ReferralAlreadyLocked => KoraError::InvalidInvoiceStatus,
         }
     }
 }
@@ -393,6 +402,7 @@ impl InvoiceNftContract {
                 match (old, new) {
                     (0, 1) => Ok(()),
                     (1, 2) => Self::migrate_v1_to_v2(&env),
+                    (2, 3) => Self::migrate_v2_to_v3(&env),
                     _ => Err(InvoiceNftError::InvalidMigrationTarget),
                 }
             },
@@ -449,6 +459,49 @@ impl InvoiceNftContract {
         Ok(())
     }
 
+    // Version 2 -> 3: hot/cold split — rewrite Invoice(id) as InvoiceHot(id) +
+    // InvoiceCold(id), then remove the legacy Invoice(id) key to reclaim rent.
+    fn migrate_v2_to_v3(env: &Env) -> Result<(), InvoiceNftError> {
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextId)
+            .unwrap_or(1);
+
+        let mut id: u64 = 1;
+        while id < next_id {
+            let key = DataKey::Invoice(id);
+            if let Some(old) = env.storage().persistent().get::<DataKey, Invoice>(&key) {
+                let hot = InvoiceHot {
+                    id: old.id,
+                    sme: old.sme.clone(),
+                    amount: old.amount,
+                    currency: old.currency.clone(),
+                    due_date: old.due_date,
+                    risk_score: old.risk_score,
+                    risk_tier: old.risk_tier.clone(),
+                    status: old.status.clone(),
+                    created_at: old.created_at,
+                    funded_at: old.funded_at,
+                    repaid_at: old.repaid_at,
+                };
+                let cold = InvoiceCold {
+                    debtor_hash: old.debtor_hash.clone(),
+                    ipfs_cid: old.ipfs_cid.clone(),
+                    metadata_hash: old.metadata_hash.clone(),
+                    notes: old.notes.clone(),
+                };
+                env.storage().persistent().set(&DataKey::InvoiceHot(id), &hot);
+                env.storage().persistent().set(&DataKey::InvoiceCold(id), &cold);
+                env.storage().persistent().remove(&key);
+            }
+            id += 1;
+        }
+        env.storage().instance().set(&DataKey::MigrationVersion, &3u32);
+
+        Ok(())
+    }
+
     // ── Admin wiring ──────────────────────────────────────────────────────────
 
     pub fn set_risk_registry(env: Env, admin: Address, risk_registry: Address) -> Result<(), InvoiceNftError> {
@@ -477,8 +530,11 @@ impl InvoiceNftContract {
         env.storage().instance().set(&DataKey::DebtorAttestation, &attestation);
         Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftSetDebtorAttestation);
         // Standardized configuration event; field_tag 7 = debtor_attestation.
-        let zero = Address::generate(&env);
-        events::dependency_updated(&env, &admin, 7u32, old.as_ref().unwrap_or(&zero), &attestation);
+        // Only emitted when a previous address exists (no test-only address
+        // generation in production code).
+        if let Some(old_addr) = old.as_ref() {
+            events::dependency_updated(&env, &admin, 7u32, old_addr, &attestation);
+        }
         Ok(())
     }
 
@@ -515,6 +571,46 @@ impl InvoiceNftContract {
         Self::require_admin(&env, &admin)?;
         require_valid_risk_score(config.max_risk_score)?;
         env.storage().instance().set(&DataKey::ProtocolConfig, &config);
+        Ok(())
+    }
+
+    /// Propose a two-step admin transfer. The proposal takes effect only when
+    /// the nominated address calls `accept_admin`.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), InvoiceNftError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &new_admin)?;
+        if new_admin == admin {
+            return Err(InvoiceNftError::InvalidAddress);
+        }
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Self::append_audit_entry(&env, &admin, AdminActionType::TransferAdmin);
+        Ok(())
+    }
+
+    /// Accept a pending admin transfer. Only the nominated address may call.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), InvoiceNftError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(InvoiceNftError::NotInitialized)?;
+        if new_admin != pending {
+            return Err(InvoiceNftError::NotAdmin);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Self::append_audit_entry(&env, &new_admin, AdminActionType::TransferAdmin);
+        Ok(())
+    }
+
+    /// Cancel a pending admin transfer. Admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), InvoiceNftError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Self::append_audit_entry(&env, &admin, AdminActionType::TransferAdmin);
         Ok(())
     }
 
@@ -673,8 +769,6 @@ impl InvoiceNftContract {
                 }
             }
         }
-
-        Self::consume_mint_quota(&env, &sme, 1)?;
 
         let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
 
@@ -1592,6 +1686,46 @@ impl InvoiceNftContract {
             .set(&DataKey::AuditLogTotal, &(total + 1));
     }
 
+    /// Return a page of audit log entries, newest first.
+    /// `page` is 0-indexed; `page_size` is clamped to 1–50.
+    pub fn get_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminAuditEntry> {
+        let page_size = (page_size.max(1).min(50)) as u64;
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuditLogTotal)
+            .unwrap_or(0);
+        let head: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuditLogHead)
+            .unwrap_or(0);
+        let stored = total.min(MAX_AUDIT_LOG_SIZE);
+
+        let skip = (page as u64).saturating_mul(page_size);
+        let mut results = Vec::new(&env);
+
+        let mut i: u64 = 0;
+        while i < page_size {
+            let offset = skip + i;
+            if offset >= stored {
+                break;
+            }
+            // Walk backwards from the most recently written slot.
+            let pos = (head + MAX_AUDIT_LOG_SIZE - 1 - offset) % MAX_AUDIT_LOG_SIZE;
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, AdminAuditEntry>(&DataKey::AuditEntry(pos))
+            {
+                results.push_back(entry);
+            }
+            i += 1;
+        }
+
+        results
+    }
+
     fn load_hot(env: &Env, id: u64) -> Result<InvoiceHot, InvoiceNftError> {
         env.storage()
             .persistent()
@@ -1849,12 +1983,12 @@ mod tests {
         env.as_contract(&client.address, || {
             env.storage().instance().set(&DataKey::MigrationVersion, &0u32);
         });
-        client.migrate_versions(&admin, &0, &2);
+        client.migrate_versions(&admin, &0, &3);
         let version: u32 = env.as_contract(&client.address, || {
             env.storage().instance().get(&DataKey::MigrationVersion).unwrap()
         });
         assert_eq!(version, SCHEMA_VERSION);
-        client.migrate_versions(&admin, &0, &2);
+        client.migrate_versions(&admin, &0, &3);
         assert_eq!(client.try_migrate_versions(&admin, &1, &2).unwrap_err().unwrap(),
             InvoiceNftError::MigrationVersionMismatch);
     }
@@ -2335,18 +2469,6 @@ mod tests {
     }
 
     // ── #427: batch-mint correlation event ─────────────────────────────────────
-
-    fn batch_input(env: &Env, risk_score: u32) -> BatchInvoiceInput {
-        BatchInvoiceInput {
-            debtor_hash: Bytes::from_slice(env, &[9u8; 32]),
-            amount: 500_000_000i128,
-            currency: Symbol::new(env, "USDC"),
-            due_date: env.ledger().timestamp() + 86_400 * 30,
-            ipfs_cid: ipfs_cid(env),
-            risk_score,
-            notes: None,
-        }
-    }
 
     /// Decodes the most recently published event's data tuple as (actor, u64, Vec<u64>, u64).
     fn last_event_data(env: &Env) -> (Address, u64, Vec<u64>, u64) {

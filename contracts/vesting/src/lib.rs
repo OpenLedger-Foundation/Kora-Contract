@@ -2,7 +2,6 @@
 
 use kora_shared::{
     errors::CommonError,
-    events,
     validation::{require_non_negative_amount, require_not_self, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env};
@@ -103,7 +102,7 @@ impl VestingContract {
     /// **Errors:**
     /// - `VestingError::NotAdmin` — Caller is not the admin.
     /// - `VestingError::InvalidAmount` — total_amount ≤ 0.
-    /// - `VestingError::InvalidSchedule` — vesting_duration ≤ cliff_duration.
+    /// - `VestingError::InvalidVestingSchedule` — vesting_duration ≤ cliff_duration.
     /// - `VestingError::GrantAlreadyExists` — A grant already exists for this beneficiary.
     /// - `VestingError::InvalidAddress` — beneficiary is contract address.
     ///
@@ -127,7 +126,7 @@ impl VestingContract {
             return Err(VestingError::InvalidAmount);
         }
         if vesting_duration <= cliff_duration {
-            return Err(VestingError::InvalidSchedule);
+            return Err(VestingError::InvalidVestingSchedule);
         }
 
         let key = DataKey::Grant(beneficiary.clone());
@@ -371,10 +370,9 @@ impl VestingContract {
     /// - After cliff, before full vesting: Linear proportion based on time
     /// - After full vesting: total_amount
     /// - If revoked: freeze calculation at revocation timestamp
-    fn calculate_vested(env: &Env, grant: &VestingGrant) -> Result<i128, VestingError> {
-        let now = env.ledger().timestamp();
+    fn calculate_vested_at(grant: &VestingGrant, at_time: u64) -> Result<i128, VestingError> {
         let effective_time = if grant.revoked {
-            grant.revoked_at.unwrap_or(now)
+            grant.revoked_at.unwrap_or(at_time)
         } else {
             at_time
         };
@@ -452,6 +450,10 @@ mod tests {
         token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()).address())
     }
 
+    fn token_balance_of(env: &Env, token: &token::StellarAssetClient<'_>, account: &Address) -> i128 {
+        token::Client::new(env, &token.address).balance(account)
+    }
+
     #[test]
     fn test_vesting_lifecycle() {
         let env = Env::default();
@@ -485,9 +487,9 @@ mod tests {
         assert_eq!(vested, 5_000); // 50% vested
 
         // Release tokens
-        let balance_before = token.balance(&beneficiary);
+        let balance_before = token_balance_of(&env, &token, &beneficiary);
         client.release(&beneficiary);
-        let balance_after = token.balance(&beneficiary);
+        let balance_after = token_balance_of(&env, &token, &beneficiary);
         assert_eq!(balance_after - balance_before, 5_000);
 
         // After full duration: everything vested
@@ -534,7 +536,7 @@ mod tests {
 
         // Can still release the vested amount
         client.release(&beneficiary);
-        assert_eq!(token.balance(&beneficiary), 5_000);
+        assert_eq!(token_balance_of(&env, &token, &beneficiary), 5_000);
     }
 
     #[test]
@@ -577,7 +579,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "VestingError(InvalidSchedule)")]
     fn test_invalid_schedule_cliff_equals_duration() {
         let env = Env::default();
         env.mock_all_auths();
@@ -593,7 +594,13 @@ mod tests {
         client.initialize(&admin, &token.address);
 
         // Invalid: cliff == vesting_duration
-        client.create_grant(&admin, &beneficiary, &10_000, &1000, &500, &500);
+        assert_eq!(
+            client
+                .try_create_grant(&admin, &beneficiary, &10_000, &1000, &500, &500)
+                .unwrap_err()
+                .unwrap(),
+            VestingError::InvalidVestingSchedule
+        );
     }
 
     #[test]

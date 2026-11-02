@@ -6,6 +6,7 @@
 
 #[cfg(test)]
 mod issue_468_currency_resolution {
+    use kora_access_control::AccessControlContract;
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_invoice_nft::InvoiceNftContractClient;
     use soroban_sdk::{
@@ -47,8 +48,9 @@ mod issue_468_currency_resolution {
         // Deploy NFT
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac_id).initialize(&admin);
+        nft.initialize(&admin, &ac_id);
 
         // Deploy Pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
@@ -66,6 +68,7 @@ mod issue_468_currency_resolution {
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
 

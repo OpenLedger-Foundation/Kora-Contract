@@ -19,6 +19,7 @@ members = [
     "contracts/parameter_registry",
     "contracts/fractionalizer",
     "contracts/secondary_market",
+    "contracts/vesting",
     "contracts/tests",
     "contracts/xtask",
     "contracts/fuzz",

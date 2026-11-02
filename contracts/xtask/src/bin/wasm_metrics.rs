@@ -62,6 +62,12 @@ const CONTRACTS: &[&str] = &[
     "governance",
     "governance_voting",
     "parameter_registry",
+    "debtor_attestation",
+    "secondary_market",
+    "referral_rewards",
+    "verifier_nomination",
+    "fractionalizer",
+    "vesting",
 ];
 
 /// Synthetic cost-per-byte multiplier used to derive `estimated_cost_units`.

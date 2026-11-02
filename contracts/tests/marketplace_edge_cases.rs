@@ -14,6 +14,7 @@ mod marketplace_edge_cases {
     use kora_invoice_nft::InvoiceNftContractClient;
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_shared::errors::KoraError;
+    use kora_risk_registry::RiskRegistryContractClient;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
         Address, Env, Symbol,
@@ -24,16 +25,41 @@ mod marketplace_edge_cases {
         admin: Address,
         seller: Address,
         investor: Address,
+        sme: Address,
         token: Address,
         treasury: Address,
+        registry: Address,
+        staking_token: Address,
         mp: MarketplaceContractClient<'static>,
         nft: InvoiceNftContractClient<'static>,
         pool_client: FinancingPoolContractClient<'static>,
     }
 
-    fn setup() -> TestEnv {
+    fn mint_for_list(t: &TestEnv, invoice_id: u64, face_value: i128) {
+        use soroban_sdk::{Bytes, String as SorobanString, Symbol};
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xABu8; 32]);
+        let ipfs_cid = SorobanString::from_str(&t.env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &face_value,
+            &Symbol::new(&t.env, "USDC"),
+            &(t.env.ledger().timestamp() + 86_400 * 30),
+            &ipfs_cid,
+            &50u32,
+            &None,
+        );
+    }
+
+    fn setup_with_fee(protocol_fee_bps: u32) -> TestEnv {
+        setup_with_fee_and_investor(protocol_fee_bps, None)
+    }
+
+    /// TestEnv with real backing contracts so cross-contract calls settle.
+    /// If `extra_investor` is set, it is accredited and funded as well.
+    fn setup_with_fee_and_investor(protocol_fee_bps: u32, extra_investor: Option<Address>) -> TestEnv {
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         env.ledger().set(LedgerInfo {
             timestamp: 1_700_000_000,
@@ -49,49 +75,129 @@ mod marketplace_edge_cases {
         let admin = Address::generate(&env);
         let seller = Address::generate(&env);
         let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let token = Address::generate(&env);
+        let sme = seller.clone();
 
-        // Deploy NFT
+        // Real access_control for pause/authorization gates.
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac_id);
+        ac_client.initialize(&admin);
+
+        // Real treasury (fund flow records fees there).
+        let treasury_id = env.register_contract(None, kora_treasury::TreasuryContract);
+        let treasury_client = kora_treasury::TreasuryContractClient::new(&env, &treasury_id);
+        treasury_client.initialize(&admin, &50u32);
+
+        // Real NFT.
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        nft.initialize(&admin, &ac_id);
+
+        // Real risk registry (compliance gates).
+        let registry_id = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
+        let registry_client = RiskRegistryContractClient::new(&env, &registry_id);
+        let staking_token_admin = Address::generate(&env);
+        let staking_token = env.register_stellar_asset_contract_v2(staking_token_admin).address();
+        registry_client.initialize(&admin, &nft_id, &staking_token, &1_000_000i128, &5_000u32);
+
+        // Trading token (real SAC so transfers settle).
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+
+        // Real price oracle + parameter registry (registry-aware reads).
+        let oracle_id = env.register_contract(None, kora_price_oracle::PriceOracleContract);
+        kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id).initialize(&admin, &ac_id);
+        let preg_id = env.register_contract(None, kora_parameter_registry::ParameterRegistryContract);
+        kora_parameter_registry::ParameterRegistryContractClient::new(&env, &preg_id).initialize(&admin, &None);
 
         // Deploy Pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
-        let oracle_id = env.register_contract(None, kora_price_oracle::PriceOracleContract);
-        let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
-        oracle_client.initialize(&admin, &ac2);
+        let dispute_resolution = Address::generate(&env);
         pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
+            &admin, &nft_id, &registry_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &0u64, &dispute_resolution,
         );
 
         // Deploy Marketplace
         let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
         let mp = MarketplaceContractClient::new(&env, &mp_id);
-        let mp_ac = Address::generate(&env);
-        let param_registry = mp_id; // self for unit tests
         mp.initialize(
-            &admin, &nft_id, &pool_id, &treasury, &mp_ac, &oracle_id, &risk_registry, &param_registry, &50u32, &0u32,
+            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &registry_id, &preg_id, &protocol_fee_bps, &0u32,
         );
 
-        mp.whitelist_token(&admin, &token);
+        // Whitelist the token (timelocked) and mirror it into the treasury.
+        mp.propose_token_whitelist(&admin, &token);
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000 + 86_400 + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        mp.execute_token_whitelist(&admin, &token);
+        treasury_client.whitelist_token(&admin, &token);
+        treasury_client.set_marketplace(&admin, &mp_id);
+        mp.set_token_currency(&admin, &token, &Symbol::new(&env, "USDC"));
+
+        // Accredited + funded investor (funding requires both).
+        mp.set_investor_accredited(&admin, &investor, &true);
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&investor, &1_000_000_000_000i128);
+        if let Some(extra) = &extra_investor {
+            mp.set_investor_accredited(&admin, extra, &true);
+            soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(extra, &1_000_000_000_000i128);
+        }
+
+        // Authorize marketplace + pool on the NFT (listing/funding flows).
+        nft.set_authorized_callers(&admin, &mp_id, &pool_id);
+        // Lower the dust floor: these are amount-arithmetic tests, not spam-gate tests.
+        mp.set_min_contribution(&admin, &1);
+
+        // Attest the seller so listing exercises the real compliance gate.
+        let setup_verifier = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&setup_verifier, &1_000_000i128);
+        registry_client.add_verifier(&admin, &setup_verifier, &1_000_000i128);
+        registry_client.register_sme(&setup_verifier, &seller, &50u32, &true);
 
         TestEnv {
             env,
             admin,
             seller,
             investor,
+            sme,
             token,
-            treasury,
+            treasury: treasury_id,
+            registry: registry_id,
+            staking_token,
             mp,
             nft,
             pool_client,
         }
+    }
+
+    impl TestEnv {
+        fn registry_client(&self) -> kora_risk_registry::RiskRegistryContractClient<'static> {
+            RiskRegistryContractClient::new(&self.env, &self.registry)
+        }
+
+        /// Accredit an investor and fund it with the test token.
+        fn accredit_and_fund(&self, investor: &Address, amount: i128) {
+            self.mp.set_investor_accredited(&self.admin, investor, &true);
+            soroban_sdk::token::StellarAssetClient::new(&self.env, &self.token).mint(investor, &amount);
+        }
+
+        /// Register + attest a seller so listings pass the compliance gate.
+        fn attest_seller(&self, seller: &Address) {
+            let verifier = Address::generate(&self.env);
+            soroban_sdk::token::StellarAssetClient::new(&self.env, &self.staking_token).mint(&verifier, &1_000_000i128);
+            self.registry_client().add_verifier(&self.admin, &verifier, &1_000_000i128);
+            self.registry_client().register_sme(&verifier, seller, &50u32, &true);
+        }
+    }
+
+    fn setup() -> TestEnv {
+        setup_with_fee(50u32)
     }
 
     // ── Fee Calculation Edge Cases ────────────────────────────────────────────
@@ -102,13 +208,15 @@ mod marketplace_edge_cases {
         let deadline = t.env.ledger().timestamp() + 86_400;
 
         // List invoice with specific asking price
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 11_000_000_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &10_000_000_000i128,
             &11_000_000_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fund with small amount (50 bps fee means: 1_000_000 * 50 / 10_000 = 5_000 fee)
@@ -117,7 +225,7 @@ mod marketplace_edge_cases {
         let expected_net = funding_amount - expected_fee;
 
         // Verify fee calculation by checking listing state after funding
-        t.mp.fund_invoice(&t.investor, &1u64, &funding_amount);
+        t.mp.fund_invoice(&t.investor, &1u64, &funding_amount, &None);
         let listing = t.mp.get_listing(&1u64);
 
         // funded_amount should be exactly the full amount (fee is separate)
@@ -129,13 +237,15 @@ mod marketplace_edge_cases {
         let t = setup();
         let deadline = t.env.ledger().timestamp() + 86_400;
 
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 11_000_000_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &10_000_000_000i128,
             &11_000_000_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fund with odd amount that doesn't divide evenly by 10_000
@@ -143,65 +253,21 @@ mod marketplace_edge_cases {
         // Fee: 1_000_001 * 50 / 10_000 = 5_000.005 → truncates to 5_000
         // Net: 1_000_001 - 5_000 = 995_001
 
-        t.mp.fund_invoice(&t.investor, &1u64, &funding_amount);
+        t.mp.fund_invoice(&t.investor, &1u64, &funding_amount, &None);
         let listing = t.mp.get_listing(&1u64);
         assert_eq!(listing.funded_amount, funding_amount);
     }
 
     #[test]
     fn test_fee_calculation_zero_fee_bps() {
-        let env = Env::default();
-        env.mock_all_auths();
+        let t = setup_with_fee(0u32);
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_700_000_000,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1000,
-            min_persistent_entry_ttl: 1000,
-            max_entry_ttl: 100_000,
-        });
-
-        let admin = Address::generate(&env);
-        let seller = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let token = Address::generate(&env);
-
-        // Deploy with 0 fee bps
-        let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
-        let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
-
-        let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
-        let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
-        let oracle_id = env.register_contract(None, kora_price_oracle::PriceOracleContract);
-        let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
-        oracle_client.initialize(&admin, &ac2);
-        pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
-        );
-
-        let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
-        let mp = MarketplaceContractClient::new(&env, &mp_id);
-        let mp_ac = Address::generate(&env);
-        let param_registry = mp_id; // self for unit tests
-        mp.initialize(
-            &admin, &nft_id, &pool_id, &treasury, &mp_ac, &oracle_id, &risk_registry, &param_registry, &0u32, &0u32,
-        ); // 0 fee
-
-        mp.whitelist_token(&admin, &token);
-
-        let deadline = env.ledger().timestamp() + 86_400;
-        mp.list_invoice(&seller, &1u64, &9_000i128, &10_000i128, &token, &deadline);
+        let deadline = t.env.ledger().timestamp() + 86_400;
+        mint_for_list(&t, 1, 10_000);
+        t.mp.list_invoice(&t.seller, &1u64, &9_000i128, &10_000i128, &t.token, &deadline, &None);
 
         // Fund should work even with 0 fees
-        let result = mp.try_fund_invoice(&investor, &1u64, &1_000i128);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128, &None);
         // May fail on cross-contract call but not on fee calculation
         if let Err(Ok(e)) = result {
             assert_ne!(e, KoraError::InvalidAmount);
@@ -211,58 +277,14 @@ mod marketplace_edge_cases {
 
     #[test]
     fn test_fee_calculation_max_fee_bps() {
-        let env = Env::default();
-        env.mock_all_auths();
+        let t = setup_with_fee(10_000u32);
 
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_700_000_000,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1000,
-            min_persistent_entry_ttl: 1000,
-            max_entry_ttl: 100_000,
-        });
-
-        let admin = Address::generate(&env);
-        let seller = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let token = Address::generate(&env);
-
-        // Deploy with maximum fee bps (10_000 = 100%)
-        let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
-        let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
-
-        let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
-        let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
-        let oracle_id = env.register_contract(None, kora_price_oracle::PriceOracleContract);
-        let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id);
-        oracle_client.initialize(&admin, &ac2);
-        pool_client.initialize(
-            &admin, &nft_id, &risk_registry, &treasury, &ac2, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
-        );
-
-        let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
-        let mp = MarketplaceContractClient::new(&env, &mp_id);
-        let mp_ac = Address::generate(&env);
-        let param_registry = mp_id; // self for unit tests
-        mp.initialize(
-            &admin, &nft_id, &pool_id, &treasury, &mp_ac, &oracle_id, &risk_registry, &param_registry, &10_000u32, &0u32,
-        ); // 100% fee
-
-        mp.whitelist_token(&admin, &token);
-
-        let deadline = env.ledger().timestamp() + 86_400;
-        mp.list_invoice(&seller, &1u64, &9_000i128, &10_000i128, &token, &deadline);
+        let deadline = t.env.ledger().timestamp() + 86_400;
+        mint_for_list(&t, 1, 10_000);
+        t.mp.list_invoice(&t.seller, &1u64, &9_000i128, &10_000i128, &t.token, &deadline, &None);
 
         // With 100% fee, net amount to pool would be 0 - this might be rejected
-        let result = mp.try_fund_invoice(&investor, &1u64, &1_000i128);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128, &None);
         // This is an edge case that might fail, which is expected behavior
         if let Err(Ok(e)) = result {
             // Should fail, not silently succeed
@@ -277,20 +299,22 @@ mod marketplace_edge_cases {
         let t = setup();
         let deadline = t.env.ledger().timestamp() + 86_400;
 
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 10_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &9_000i128,
             &10_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Cancel the listing
         t.mp.cancel_listing(&t.seller, &1u64);
 
         // Try to fund cancelled listing - should fail
-        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128, &None);
         assert_eq!(
             result.unwrap_err().unwrap(),
             KoraError::ListingAlreadyCancelled
@@ -302,13 +326,15 @@ mod marketplace_edge_cases {
         let t = setup();
         let deadline = t.env.ledger().timestamp() + 100;
 
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 10_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &9_000i128,
             &10_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fast-forward past deadline
@@ -325,7 +351,7 @@ mod marketplace_edge_cases {
         });
 
         // Funding past deadline should fail
-        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &1_000i128, &None);
         assert_eq!(
             result.unwrap_err().unwrap(),
             KoraError::FundingDeadlinePassed
@@ -338,6 +364,9 @@ mod marketplace_edge_cases {
         let other_seller = Address::generate(&t.env);
         let deadline = t.env.ledger().timestamp() + 86_400;
 
+        t.attest_seller(&other_seller);
+        mint_for_list(&t, 1, 10_000);
+        t.mp.set_investor_accredited(&t.admin, &other_seller, &true);
         t.mp.list_invoice(
             &other_seller,
             &1u64,
@@ -345,6 +374,7 @@ mod marketplace_edge_cases {
             &10_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Admin should be able to cancel
@@ -360,13 +390,15 @@ mod marketplace_edge_cases {
         let stranger = Address::generate(&t.env);
         let deadline = t.env.ledger().timestamp() + 86_400;
 
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 10_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &9_000i128,
             &10_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Stranger cannot cancel
@@ -382,6 +414,7 @@ mod marketplace_edge_cases {
         let bad_token = Address::generate(&t.env);
         let deadline = t.env.ledger().timestamp() + 86_400;
 
+        mint_for_list(&t, 1, 10_000);
         let result = t.mp.try_list_invoice(
             &t.seller,
             &1u64,
@@ -389,6 +422,7 @@ mod marketplace_edge_cases {
             &10_000i128,
             &bad_token,
             &deadline,
+            &None,
         );
         assert_eq!(result.unwrap_err().unwrap(), KoraError::TokenNotWhitelisted);
     }
@@ -398,8 +432,19 @@ mod marketplace_edge_cases {
         let t = setup();
         let token_to_remove = Address::generate(&t.env);
 
-        // Whitelist a token
-        t.mp.whitelist_token(&t.admin, &token_to_remove);
+        // Whitelist a token (timelocked propose + execute).
+        t.mp.propose_token_whitelist(&t.admin, &token_to_remove);
+        t.env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+            timestamp: t.env.ledger().timestamp() + 86_400 + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        t.mp.execute_token_whitelist(&t.admin, &token_to_remove);
 
         // Verify it's whitelisted
         assert!(t.mp.is_token_whitelisted(&token_to_remove));
@@ -429,6 +474,7 @@ mod marketplace_edge_cases {
         let deadline = t.env.ledger().timestamp() + 86_400;
         let asking_price = 9_000i128;
         let face_value = 10_000i128;
+        mint_for_list(&t, 1u64, face_value);
 
         t.mp.list_invoice(
             &t.seller,
@@ -437,11 +483,12 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Try to fund more than asking price
         let excessive_amount = asking_price + 1;
-        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &excessive_amount);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &excessive_amount, &None);
         assert_eq!(
             result.unwrap_err().unwrap(),
             KoraError::ExceedsFundingTarget
@@ -452,8 +499,9 @@ mod marketplace_edge_cases {
     fn test_partial_funding_works() {
         let t = setup();
         let deadline = t.env.ledger().timestamp() + 86_400;
-        let asking_price = 10_000i128;
+        let asking_price = 9_000i128;
         let face_value = 10_000i128;
+        mint_for_list(&t, 1u64, face_value);
 
         t.mp.list_invoice(
             &t.seller,
@@ -462,11 +510,12 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fund partially
         let partial_amount = asking_price / 2;
-        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &partial_amount);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &partial_amount, &None);
 
         // May fail on cross-contract calls but not on amount validation
         if let Err(Ok(e)) = result {
@@ -480,16 +529,18 @@ mod marketplace_edge_cases {
         let t = setup();
         let deadline = t.env.ledger().timestamp() + 86_400;
 
-        t.mp.list_invoice(
+        mint_for_list(&t, 1, 10_000);
+            t.mp.list_invoice(
             &t.seller,
             &1u64,
             &9_000i128,
             &10_000i128,
             &t.token,
             &deadline,
+        &None,
         );
 
-        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &-1_000i128);
+        let result = t.mp.try_fund_invoice(&t.investor, &1u64, &-1_000i128, &None);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidAmount);
     }
 
@@ -500,7 +551,7 @@ mod marketplace_edge_cases {
         let t = setup();
         let stranger = Address::generate(&t.env);
 
-        let result = t.mp.try_set_fee(&stranger, &100u32);
+        let result = t.mp.try_set_fee_bps(&stranger, &100u32);
         assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
     }
 
@@ -509,7 +560,7 @@ mod marketplace_edge_cases {
         let t = setup();
 
         // Try to set fee > 10_000 bps (> 100%)
-        let result = t.mp.try_set_fee(&t.admin, &10_001u32);
+        let result = t.mp.try_set_fee_bps(&t.admin, &10_001u32);
         assert!(result.is_err());
     }
 
@@ -518,7 +569,7 @@ mod marketplace_edge_cases {
         let t = setup();
 
         // Update fee from 50 to 100
-        let result = t.mp.try_set_fee(&t.admin, &100u32);
+        let result = t.mp.try_set_fee_bps(&t.admin, &100u32);
         assert!(result.is_ok());
 
         // Verify fee was updated
@@ -538,6 +589,7 @@ mod marketplace_edge_cases {
         let funding_amount = 5_000i128;
 
         // List invoice
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -545,10 +597,11 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fund invoice via marketplace
-        t.mp.fund_invoice(&t.investor, &invoice_id, &funding_amount);
+        t.mp.fund_invoice(&t.investor, &invoice_id, &funding_amount, &None);
 
         // Verify that position was created in financing pool
         let positions_count = t.pool_client.get_positions_count(&invoice_id);
@@ -567,6 +620,7 @@ mod marketplace_edge_cases {
         let asking_price = 10_000i128;
         let face_value = 12_000i128;
 
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -574,6 +628,7 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         let investor1 = t.investor.clone();
@@ -582,10 +637,10 @@ mod marketplace_edge_cases {
         let amount2 = 4_000i128;
 
         // Fund from investor 1
-        t.mp.fund_invoice(&investor1, &invoice_id, &amount1);
+        t.mp.fund_invoice(&investor1, &invoice_id, &amount1, &None);
 
         // Fund from investor 2
-        t.mp.fund_invoice(&investor2, &invoice_id, &amount2);
+        t.mp.fund_invoice(&investor2, &invoice_id, &amount2, &None);
 
         // Verify both positions exist
         let pos1 = t.pool_client.get_position(&invoice_id, &investor1);
@@ -606,6 +661,7 @@ mod marketplace_edge_cases {
         let asking_price = 10_000i128;
         let face_value = 12_000i128;
 
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -613,16 +669,17 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         let amount1 = 2_000i128;
         let amount2 = 3_000i128;
 
         // First contribution
-        t.mp.fund_invoice(&t.investor, &invoice_id, &amount1);
+        t.mp.fund_invoice(&t.investor, &invoice_id, &amount1, &None);
 
         // Second contribution from same investor
-        t.mp.fund_invoice(&t.investor, &invoice_id, &amount2);
+        t.mp.fund_invoice(&t.investor, &invoice_id, &amount2, &None);
 
         // Verify position was updated (not duplicated)
         let position = t.pool_client.get_position(&invoice_id, &t.investor);
@@ -640,6 +697,7 @@ mod marketplace_edge_cases {
         let asking_price = 10_000i128;
         let face_value = 10_000i128;
 
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -647,6 +705,7 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         let investor1 = t.investor.clone();
@@ -654,8 +713,8 @@ mod marketplace_edge_cases {
         let amount1 = 6_000i128;
         let amount2 = 4_000i128;
 
-        t.mp.fund_invoice(&investor1, &invoice_id, &amount1);
-        t.mp.fund_invoice(&investor2, &invoice_id, &amount2);
+        t.mp.fund_invoice(&investor1, &invoice_id, &amount1, &None);
+        t.mp.fund_invoice(&investor2, &invoice_id, &amount2, &None);
 
         // Investor 1 should have 60% share (6_000 bps)
         let pos1 = t.pool_client.get_position(&invoice_id, &investor1);
@@ -674,6 +733,7 @@ mod marketplace_edge_cases {
         let asking_price = 10_000i128;
         let face_value = 10_000i128;
 
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -681,11 +741,12 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         // Fund partially
         let funding_amount = 5_000i128;
-        t.mp.fund_invoice(&t.investor, &invoice_id, &funding_amount);
+        t.mp.fund_invoice(&t.investor, &invoice_id, &funding_amount, &None);
 
         // Position should exist even before release_funds
         let position = t.pool_client.get_position(&invoice_id, &t.investor);
@@ -693,7 +754,7 @@ mod marketplace_edge_cases {
 
         // Complete funding triggers release_funds
         let investor2 = Address::generate(&t.env);
-        t.mp.fund_invoice(&investor2, &invoice_id, &5_000i128);
+        t.mp.fund_invoice(&investor2, &invoice_id, &5_000i128, &None);
 
         // Both positions should still exist
         let pos1 = t.pool_client.get_position(&invoice_id, &t.investor);
@@ -710,6 +771,7 @@ mod marketplace_edge_cases {
         let asking_price = 10_000i128;
         let face_value = 10_000i128;
 
+        mint_for_list(&t, invoice_id, face_value);
         t.mp.list_invoice(
             &t.seller,
             &invoice_id,
@@ -717,14 +779,15 @@ mod marketplace_edge_cases {
             &face_value,
             &t.token,
             &deadline,
+        &None,
         );
 
         let investor1 = t.investor.clone();
         let investor2 = Address::generate(&t.env);
 
         // Fund from multiple investors
-        t.mp.fund_invoice(&investor1, &invoice_id, &6_000i128);
-        t.mp.fund_invoice(&investor2, &invoice_id, &4_000i128);
+        t.mp.fund_invoice(&investor1, &invoice_id, &6_000i128, &None);
+        t.mp.fund_invoice(&investor2, &invoice_id, &4_000i128, &None);
 
         // Release funds (triggered automatically by reaching asking_price)
         // Now repay to trigger yield distribution
@@ -746,6 +809,9 @@ mod multi_token_tests {
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_invoice_nft::InvoiceNftContractClient;
     use kora_marketplace::MarketplaceContractClient;
+    use kora_risk_registry::RiskRegistryContractClient;
+    use kora_parameter_registry::ParameterRegistryContractClient;
+    use kora_shared::errors::KoraError;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
         Address, Env, Symbol,
@@ -765,7 +831,7 @@ mod multi_token_tests {
 
     fn deploy() -> TestEnv {
         let env = Env::default();
-        env.mock_all_auths();
+        env.mock_all_auths_allowing_non_root_auth();
 
         env.ledger().set(LedgerInfo {
             timestamp: 1_700_000_000,
@@ -793,19 +859,31 @@ mod multi_token_tests {
 
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let rr = Address::generate(&env);
+        let registry_id = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
+        let registry_client = kora_risk_registry::RiskRegistryContractClient::new(&env, &registry_id);
+        let staking_token_admin = Address::generate(&env);
+        let staking_token = env.register_stellar_asset_contract_v2(staking_token_admin).address();
+        registry_client.initialize(&admin, &nft_id, &staking_token, &1_000_000i128, &5_000u32);
+        let setup_verifier = Address::generate(&env);
+        soroban_sdk::token::StellarAssetClient::new(&env, &staking_token).mint(&setup_verifier, &1_000_000i128);
+        registry_client.add_verifier(&admin, &setup_verifier, &1_000_000i128);
+        registry_client.register_sme(&setup_verifier, &seller, &50u32, &true);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
         pool_client.initialize(
-            &admin, &nft_id, &rr, &Address::generate(&env), &ac_id, &200u32, &oracle, &10_000u32, &dispute_resolution,
+            &admin, &nft_id, &registry_id, &Address::generate(&env), &ac_id, &200u32, &oracle, &10_000u32, &0u64, &dispute_resolution,
         );
 
         let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
         let mp = MarketplaceContractClient::new(&env, &mp_id);
-        let param_registry = mp_id; // self for unit tests
+        let preg_id = env.register_contract(None, kora_parameter_registry::ParameterRegistryContract);
+        kora_parameter_registry::ParameterRegistryContractClient::new(&env, &preg_id).initialize(&admin, &None);
         mp.initialize(
-            &admin, &nft_id, &pool_id, &Address::generate(&env), &ac_id, &oracle, &rr, &param_registry, &50u32, &0u32,
+            &admin, &nft_id, &pool_id, &Address::generate(&env), &ac_id, &oracle, &registry_id, &preg_id, &50u32, &0u32,
         );
+        nft.set_authorized_callers(&admin, &mp_id, &pool_id);
+        mp.set_token_currency(&admin, &token_a, &Symbol::new(&env, "USDC"));
+        mp.set_token_currency(&admin, &token_b, &Symbol::new(&env, "EURC"));
 
         mp.propose_token_whitelist(&admin, &token_a);
         env.ledger().set(LedgerInfo {
@@ -864,6 +942,7 @@ mod multi_token_tests {
             &due_date,
             &ipfs_cid,
             &30u32,
+        &None,
         );
         let id_b = t.nft.mint_invoice(
             &t.seller,
@@ -873,10 +952,11 @@ mod multi_token_tests {
             &due_date,
             &ipfs_cid,
             &30u32,
+        &None,
         );
 
         let deadline = t.env.ledger().timestamp() + 86_400 * 30;
-        assert!(t.mp.try_list_invoice(&t.seller, &id_a, &9_500_000_000i128, &10_000_000_000i128, &t.token_a, &deadline).is_ok());
-        assert!(t.mp.try_list_invoice(&t.seller, &id_b, &9_500_000_000i128, &10_000_000_000i128, &t.token_b, &deadline).is_ok());
+        assert!(t.mp.try_list_invoice(&t.seller, &id_a, &9_500_000_000i128, &10_000_000_000i128, &t.token_a, &deadline, &None).is_ok());
+        assert!(t.mp.try_list_invoice(&t.seller, &id_b, &9_500_000_000i128, &10_000_000_000i128, &t.token_b, &deadline, &None).is_ok());
     }
 }

@@ -6,14 +6,32 @@
 
 #[cfg(test)]
 mod issue_470_concentration_cap {
+    use kora_access_control::AccessControlContract;
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_invoice_nft::InvoiceNftContractClient;
     use kora_parameter_registry::{ParameterRegistryContract, ParameterRegistryContractClient};
     use kora_shared::types::RegistryParamKey;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Env,
+        Address, Bytes, Env, String as SorobanString, Symbol,
     };
+
+    fn mint_nft(t: &TestEnv, invoice_id: u64, amount: i128, marketplace: &Address) {
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xABu8; 32]);
+        let ipfs_cid = SorobanString::from_str(&t.env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        t.nft.mint_invoice(
+            &t.admin,
+            &debtor_hash,
+            &amount,
+            &Symbol::new(&t.env, "USDC"),
+            &(t.env.ledger().timestamp() + 86_400 * 30),
+            &ipfs_cid,
+            &50u32,
+            &None,
+        );
+        t.nft.set_authorized_callers(&t.admin, marketplace, &t.pool_client.address);
+        t.nft.set_listed(marketplace, &invoice_id);
+    }
 
     struct TestEnv {
         env: Env,
@@ -44,16 +62,18 @@ mod issue_470_concentration_cap {
         let token = Address::generate(&env);
         let treasury = Address::generate(&env);
 
-        // Deploy NFT
+        // Deploy NFT (with a real access_control: mint checks pause state).
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        let ac_id = env.register_contract(None, AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac_id).initialize(&admin);
+        nft.initialize(&admin, &ac_id);
 
         // Deploy Pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
+        let ac2 = env.register_contract(None, kora_access_control::AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac2).initialize(&admin);
         let oracle = Address::generate(&env);
         let risk_registry = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
@@ -66,6 +86,7 @@ mod issue_470_concentration_cap {
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
 
@@ -91,29 +112,27 @@ mod issue_470_concentration_cap {
         let invoice_id = 1u64;
 
         // Set a 30% (3000 bps) concentration cap
-        t.pool_client.set_max_position_bps(&t.admin, &3_000u32).unwrap();
+        t.pool_client.set_max_position_bps(&t.admin, &3_000u32);
 
         // Create a pool via release_funds
-        t.nft.mint(&t.admin, &invoice_id, &1_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_nft(&t, invoice_id, 1_000_000i128, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Stage 1: Contribute 100k out of 1M pool (10%, well below 30% cap)
         // This call should succeed
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128);
 
         // Stage 2: Contribute another 100k out of 1M (10% in this call, 20% cumulative)
         // This call should succeed, but cumulative is now 20%
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128);
 
         // Stage 3: Contribute another 150k out of 1M (15% in this call, 35% cumulative)
         // This call should now fail because cumulative (35%) exceeds cap (30%)
         // Currently it incorrectly succeeds; after the fix it must fail.
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor,
@@ -135,21 +154,20 @@ mod issue_470_concentration_cap {
         let invoice_id = 1u64;
 
         // Set a 50% (5000 bps) concentration cap
-        t.pool_client.set_max_position_bps(&t.admin, &5_000u32).unwrap();
+        t.pool_client.set_max_position_bps(&t.admin, &5_000u32);
 
         // Create a pool
-        t.nft.mint(&t.admin, &invoice_id, &2_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_nft(&t, invoice_id, 2_000_000i128, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Contribute 900k out of 2M pool (45%, within 50% cap)
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &900_000i128, &2_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &900_000i128, &2_000_000i128);
 
         // Try to contribute another 200k out of 2M (10% in this call, 55% cumulative)
         // This should fail because cumulative exceeds the 50% cap
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor,
@@ -167,31 +185,31 @@ mod issue_470_concentration_cap {
         let invoice_id = 1u64;
 
         // Set a 40% (4000 bps) concentration cap
-        t.pool_client.set_max_position_bps(&t.admin, &4_000u32).unwrap();
+        t.pool_client.set_max_position_bps(&t.admin, &4_000u32);
 
         // Create a pool
-        t.nft.mint(&t.admin, &invoice_id, &1_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_nft(&t, invoice_id, 1_000_000i128, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Contribute 300k out of 1M (30%)
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &300_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &300_000i128, &1_000_000i128);
 
         // Contribute another 100k out of 1M (10%, cumulative 40% = exactly at cap)
         // This should succeed
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &100_000i128, &1_000_000i128);
 
-        // Try to contribute 1 more token (cumulative would be 40.0001%)
-        // This should fail
-        let result = t.pool_client.record_position(
+        // Try to contribute 100 more stroops (cumulative 400100/1M = 4001 bps).
+        // Integer bps granularity cannot resolve dust below 1 bps, so the
+        // over-cap probe must move the needle past the 4000 bps boundary.
+        // This should fail.
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor,
-            &1i128,
+            &100i128,
             &1_000_000i128,
         );
 
@@ -214,28 +232,24 @@ mod issue_470_concentration_cap {
         // The registry key must exist before the pool will read it; bootstrap
         // defaults already have it, but we overwrite with the test value.
         registry
-            .admin_set_parameter(&t.admin, &RegistryParamKey::MaxPositionBps, &2_000i128)
-            .unwrap();
+            .admin_set_parameter(&t.admin, &RegistryParamKey::MaxPositionBps, &2_000i128);
 
         // Wire the registry into the pool.
         t.pool_client
-            .set_parameter_registry(&t.admin, &registry_id)
-            .unwrap();
+            .set_parameter_registry(&t.admin, &registry_id);
 
         // Create a pool via release_funds
-        t.nft.mint(&t.admin, &invoice_id, &1_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
+        mint_nft(&t, invoice_id, 1_000_000i128, &marketplace);
         t.pool_client
-            .release_funds(&marketplace, &invoice_id, &t.token)
-            .unwrap();
+            .release_funds(&marketplace, &invoice_id, &t.token);
 
         // Contribute 150k out of 1M (15%, within 20% registry cap) – succeeds.
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &150_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &150_000i128, &1_000_000i128);
 
         // Contribute another 100k out of 1M (10%, cumulative 25% > 20%) – fails.
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor,
@@ -256,32 +270,27 @@ mod issue_470_concentration_cap {
 
         // Lower the constructor cap to 30% first.
         t.pool_client
-            .set_max_position_bps(&t.admin, &3_000u32)
-            .unwrap();
+            .set_max_position_bps(&t.admin, &3_000u32);
 
         // Deploy and seed the registry with a higher cap (60% = 6000 bps).
         let registry_id = t.env.register_contract(None, ParameterRegistryContract);
         let registry = ParameterRegistryContractClient::new(&t.env, &registry_id);
         registry.initialize(&t.admin, &None);
         registry
-            .admin_set_parameter(&t.admin, &RegistryParamKey::MaxPositionBps, &6_000i128)
-            .unwrap();
+            .admin_set_parameter(&t.admin, &RegistryParamKey::MaxPositionBps, &6_000i128);
         t.pool_client
-            .set_parameter_registry(&t.admin, &registry_id)
-            .unwrap();
+            .set_parameter_registry(&t.admin, &registry_id);
 
         // Create a pool.
-        t.nft.mint(&t.admin, &invoice_id, &2_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
+        mint_nft(&t, invoice_id, 2_000_000i128, &marketplace);
         t.pool_client
-            .release_funds(&marketplace, &invoice_id, &t.token)
-            .unwrap();
+            .release_funds(&marketplace, &invoice_id, &t.token);
 
         // Contribute 1M out of 2M (50%) — exceeds the constructor cap (30%) but
         // is within the registry cap (60%).  With registry wired, this succeeds.
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &1_000_000i128, &2_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &1_000_000i128, &2_000_000i128);
     }
 
     /// Issue #968: Without registry, the constructor-stored default/stored value
@@ -293,17 +302,15 @@ mod issue_470_concentration_cap {
 
         // Do NOT wire a registry — rely on the constructor default (10 000 bps).
         t.pool_client
-            .set_max_position_bps(&t.admin, &3_000u32)
-            .unwrap();
+            .set_max_position_bps(&t.admin, &3_000u32);
 
-        t.nft.mint(&t.admin, &invoice_id, &1_000_000i128, &Default::default());
         let marketplace = Address::generate(&t.env);
+        mint_nft(&t, invoice_id, 1_000_000i128, &marketplace);
         t.pool_client
-            .release_funds(&marketplace, &invoice_id, &t.token)
-            .unwrap();
+            .release_funds(&marketplace, &invoice_id, &t.token);
 
         // 40% share (4000 bps) exceeds 30% local cap -> fails.
-        let result = t.pool_client.record_position(
+        let result = t.pool_client.try_record_position(
             &t.admin,
             &invoice_id,
             &t.investor,
@@ -314,8 +321,7 @@ mod issue_470_concentration_cap {
 
         // 25% share (2500 bps) within 30% local cap -> succeeds.
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor, &250_000i128, &1_000_000i128)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor, &250_000i128, &1_000_000i128);
     }
 
     /// Issue #968: Non-admin cannot set the registry pointer.
@@ -339,6 +345,7 @@ mod issue_470_concentration_cap {
 mod issue_748_protocol_debtor_cap {
     use kora_invoice_nft::{InvoiceNftContract, InvoiceNftContractClient};
     use kora_marketplace::{DataKey as MarketplaceKey, MarketplaceContract, MarketplaceContractClient};
+    use kora_parameter_registry::ParameterRegistryContractClient;
     use kora_shared::{errors::KoraError, types::RiskTier};
     use soroban_sdk::{testutils::{Address as _, Ledger, LedgerInfo}, Address, Bytes, Env, String, Symbol};
 
@@ -362,8 +369,10 @@ mod issue_748_protocol_debtor_cap {
         let marketplace = MarketplaceContractClient::new(&env, &marketplace_id);
         let pool = Address::generate(&env);
         nft.set_authorized_callers(&admin, &marketplace_id, &pool);
+        let preg_id = env.register_contract(None, kora_parameter_registry::ParameterRegistryContract);
+        kora_parameter_registry::ParameterRegistryContractClient::new(&env, &preg_id).initialize(&admin, &None);
         marketplace.initialize(&admin, &nft_id, &pool, &Address::generate(&env),
-            &ac, &Address::generate(&env), &Address::generate(&env), &50, &0);
+            &ac, &Address::generate(&env), &Address::generate(&env), &preg_id, &50, &0);
         marketplace.set_debtor_tier_cap(&admin, &RiskTier::C, &200);
         assert_eq!(marketplace.get_debtor_tier_cap(&RiskTier::C), 200);
         assert_eq!(marketplace.try_set_debtor_tier_cap(&admin, &RiskTier::C, &-1)

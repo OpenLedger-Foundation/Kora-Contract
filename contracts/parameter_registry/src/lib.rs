@@ -117,6 +117,10 @@ pub enum DataKey {
     UpgradeProposal,
     /// Current governed value of a parameter.
     Param(RegistryParamKey),
+    /// Whether a parameter's value came from an executed governance proposal
+    /// (as opposed to a bootstrap default). Consumers that treat local config
+    /// as authoritative until registry governance acts should consult this.
+    ParamGoverned(RegistryParamKey),
     /// A pending governance proposal to update a parameter.
     ParamProposal(u64),
     /// Monotonic proposal ID counter.
@@ -221,6 +225,7 @@ impl ParameterRegistryContract {
         // Treasury
         Self::write_param(env, admin, now, RegistryParamKey::TreasuryFeeBps, 50, 0, 10_000);
         Self::write_param(env, admin, now, RegistryParamKey::ReserveAllocationBps, 1_000, 0, 5_000);
+        Self::write_param(env, admin, now, RegistryParamKey::MinReserveRatioBps, 0, 0, 10_000);
     }
 
     fn write_param(
@@ -469,6 +474,16 @@ impl ParameterRegistryContract {
         Self::get_parameter_raw(&env, &key)
     }
 
+    /// Returns true once `key` has been set by an executed governance proposal.
+    /// Bootstrap defaults do not count: consumers use this to distinguish an
+    /// explicit governance decision from initial values.
+    pub fn is_param_governed(env: Env, key: RegistryParamKey) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ParamGoverned(key))
+            .unwrap_or(false)
+    }
+
     /// Returns just the numeric value for a key.  Returns `0` when unset so
     /// consuming contracts with sensible zero-defaults handle missing keys
     /// gracefully.
@@ -591,10 +606,15 @@ impl ParameterRegistryContract {
             .persistent()
             .set(&DataKey::Param(key.clone()), &param);
         env.storage().persistent().extend_ttl(
-            &DataKey::Param(key),
+            &DataKey::Param(key.clone()),
             PERSISTENT_TTL_THRESHOLD,
             PERSISTENT_TTL_BUMP,
         );
+        // Mark the value as explicitly decided (not a bootstrap default) so
+        // consumers can distinguish governance/admin writes from initial values.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ParamGoverned(key.clone()), &true);
         Ok(())
     }
 
@@ -626,7 +646,8 @@ impl ParameterRegistryContract {
             | RegistryParamKey::MaxPositionBps
             | RegistryParamKey::SlashPercentageBps
             | RegistryParamKey::TreasuryFeeBps
-            | RegistryParamKey::ReserveAllocationBps => {
+            | RegistryParamKey::ReserveAllocationBps
+            | RegistryParamKey::MinReserveRatioBps => {
                 if value < 0 || value > 10_000 {
                     return Err(RegistryError::ParamValueOutOfBounds);
                 }
@@ -727,6 +748,7 @@ impl ParameterRegistryContract {
             RegistryParamKey::MinimumDebtorScore => 15,
             RegistryParamKey::TreasuryFeeBps => 16,
             RegistryParamKey::ReserveAllocationBps => 17,
+            RegistryParamKey::MinReserveRatioBps => 18,
         }
     }
 

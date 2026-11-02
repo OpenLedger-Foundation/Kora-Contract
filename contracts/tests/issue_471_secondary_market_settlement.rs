@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 mod issue_471_secondary_market_settlement {
+    use kora_access_control::AccessControlContract;
     use kora_financing_pool::FinancingPoolContractClient;
     use kora_invoice_nft::InvoiceNftContractClient;
     use soroban_sdk::{
@@ -44,19 +45,20 @@ mod issue_471_secondary_market_settlement {
         let investor1 = Address::generate(&env);
         let investor2 = Address::generate(&env);
         let buyer = Address::generate(&env);
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
         let treasury = Address::generate(&env);
 
-        // Deploy NFT
+        // Deploy NFT (real access_control: state paths check pause state)
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac_id).initialize(&admin);
+        nft.initialize(&admin, &ac_id);
 
         // Deploy Pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
         let pool_client = FinancingPoolContractClient::new(&env, &pool_id);
-        let ac2 = Address::generate(&env);
         let oracle = Address::generate(&env);
         let risk_registry = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
@@ -65,12 +67,15 @@ mod issue_471_secondary_market_settlement {
             &nft_id,
             &risk_registry,
             &treasury,
-            &ac2,
+            &ac_id,
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
+        // Fund the admin (the SME in these tests) for buyout escrow transfers.
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&admin, &100_000_000i128);
 
         TestEnv {
             env,
@@ -82,6 +87,24 @@ mod issue_471_secondary_market_settlement {
             pool_client,
             nft,
         }
+    }
+
+    fn mint_and_list(t: &TestEnv, invoice_id: u64, amount: i128, marketplace: &Address) {
+        use soroban_sdk::{Bytes, String as SorobanString, Symbol};
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xABu8; 32]);
+        let ipfs_cid = SorobanString::from_str(&t.env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        t.nft.mint_invoice(
+            &t.admin,
+            &debtor_hash,
+            &amount,
+            &Symbol::new(&t.env, "USDC"),
+            &(t.env.ledger().timestamp() + 86_400 * 30),
+            &ipfs_cid,
+            &50u32,
+            &None,
+        );
+        t.nft.set_authorized_callers(&t.admin, marketplace, &t.pool_client.address);
+        t.nft.set_listed(marketplace, &invoice_id);
     }
 
     /// Issue #471: Test that an investor cannot list a position for sale
@@ -97,34 +120,26 @@ mod issue_471_secondary_market_settlement {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // investor2 proposes an early-settlement offer for investor1's position
         // (In real contract, this is propose_early_settlement)
-        t.pool_client
-            .propose_early_settlement(&t.investor2, &invoice_id, &600_000i128)
-            .ok();
+        t.pool_client.try_propose_early_settlement(&t.admin, &invoice_id, &600_000i128);
 
         // investor1 accepts the early-settlement offer
-        t.pool_client.accept_early_settlement(&t.investor1, &invoice_id).ok();
+        let _ = t.pool_client.try_accept_early_settlement(&t.investor1, &invoice_id);
 
         // Now investor1 tries to list their position for secondary market sale
         // This should fail because investor1 is already locked in the early-settlement
-        let result = t.pool_client.list_position_for_sale(
-            &t.investor1,
-            &invoice_id,
-            &500_000i128,
-        );
+        let result = t.pool_client.try_list_position_for_sale(&t.investor1, &invoice_id, &t.token, &500_000i128);
 
         // After fix: Should reject because position is in early-settlement acceptance
         assert!(
@@ -146,31 +161,25 @@ mod issue_471_secondary_market_settlement {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // investor1 lists their position for sale
-        t.pool_client
-            .list_position_for_sale(&t.investor1, &invoice_id, &500_000i128)
-            .ok();
+        let _ = t.pool_client.try_list_position_for_sale(&t.investor1, &invoice_id, &t.token, &500_000i128);
 
         // investor2 proposes an early-settlement that includes investor1
-        t.pool_client
-            .propose_early_settlement(&t.investor2, &invoice_id, &600_000i128)
-            .ok();
+        t.pool_client.try_propose_early_settlement(&t.admin, &invoice_id, &600_000i128);
 
         // investor1 tries to accept the early-settlement
         // This should fail because position is listed for sale
-        let result = t.pool_client.accept_early_settlement(&t.investor1, &invoice_id);
+        let result = t.pool_client.try_accept_early_settlement(&t.investor1, &invoice_id);
 
         // After fix: Should reject because position is listed for secondary sale
         assert!(
@@ -192,28 +201,24 @@ mod issue_471_secondary_market_settlement {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // investor2 proposes early-settlement and investor1 accepts
-        t.pool_client
-            .propose_early_settlement(&t.investor2, &invoice_id, &600_000i128)
-            .ok();
-        t.pool_client.accept_early_settlement(&t.investor1, &invoice_id).ok();
+        t.pool_client.try_propose_early_settlement(&t.admin, &invoice_id, &600_000i128);
+        let _ = t.pool_client.try_accept_early_settlement(&t.investor1, &invoice_id);
 
         // Now buyer purchases investor1's position
         // The early-settlement acceptance for investor1 must be handled:
         // either invalidated (safe option) or transferred to buyer
-        let result = t.pool_client.buy_position(&t.investor1, &invoice_id, &t.buyer, &500_000i128);
+        let result = t.pool_client.try_buy_position(&t.investor1, &invoice_id, &t.buyer);
 
         // The operation should succeed (or fail gracefully) with consistent state
         // After fix: if rejection is chosen, should reject
@@ -235,30 +240,24 @@ mod issue_471_secondary_market_settlement {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // Step 1: investor1 lists position for sale
-        t.pool_client
-            .list_position_for_sale(&t.investor1, &invoice_id, &500_000i128)
-            .ok();
+        let _ = t.pool_client.try_list_position_for_sale(&t.investor1, &invoice_id, &t.token, &500_000i128);
 
         // Step 2: investor2 proposes early-settlement
-        t.pool_client
-            .propose_early_settlement(&t.investor2, &invoice_id, &600_000i128)
-            .ok();
+        t.pool_client.try_propose_early_settlement(&t.admin, &invoice_id, &600_000i128);
 
         // Step 3: investor1 tries to accept early-settlement
-        let result = t.pool_client.accept_early_settlement(&t.investor1, &invoice_id);
+        let result = t.pool_client.try_accept_early_settlement(&t.investor1, &invoice_id);
 
         // Should fail
         assert!(
@@ -278,32 +277,24 @@ mod issue_471_secondary_market_settlement {
         let pool_amount = 1_000_000i128;
 
         // Create pool
-        t.nft.mint(&t.admin, &invoice_id, &pool_amount, &Default::default());
         let marketplace = Address::generate(&t.env);
-        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token).unwrap();
+        mint_and_list(&t, invoice_id, pool_amount, &marketplace);
+        t.pool_client.release_funds(&marketplace, &invoice_id, &t.token);
 
         // Record positions
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor1, &600_000i128, &pool_amount);
         t.pool_client
-            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount)
-            .unwrap();
+            .record_position(&t.admin, &invoice_id, &t.investor2, &400_000i128, &pool_amount);
 
         // Step 1: investor2 proposes early-settlement
-        t.pool_client
-            .propose_early_settlement(&t.investor2, &invoice_id, &600_000i128)
-            .ok();
+        t.pool_client.try_propose_early_settlement(&t.admin, &invoice_id, &600_000i128);
 
         // Step 2: investor1 accepts early-settlement
-        t.pool_client.accept_early_settlement(&t.investor1, &invoice_id).ok();
+        let _ = t.pool_client.try_accept_early_settlement(&t.investor1, &invoice_id);
 
         // Step 3: investor1 tries to list position for sale
-        let result = t.pool_client.list_position_for_sale(
-            &t.investor1,
-            &invoice_id,
-            &500_000i128,
-        );
+        let result = t.pool_client.try_list_position_for_sale(&t.investor1, &invoice_id, &t.token, &500_000i128);
 
         // Should fail
         assert!(

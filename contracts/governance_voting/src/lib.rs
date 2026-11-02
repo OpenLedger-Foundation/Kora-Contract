@@ -2,7 +2,8 @@
 
 use kora_shared::errors::CommonError;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, vec, Address, Env, Option, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, vec, Address, Env, IntoVal, String, Symbol,
+    Val, Vec,
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -577,11 +578,13 @@ impl GovernanceVotingContract {
         //   [5] snapshot_at  (u64) — proposal.created_at snapshot timestamp
         //   [6] schema_v     (u32)
         {
-            let topics = vec![
+            let topics: Vec<Symbol> = vec![
+                &env,
                 Symbol::new(&env, "voteCast"),
                 Symbol::new(&env, "SCHEMA_V"),
             ];
-            let data = vec![
+            let data: Vec<Val> = vec![
+                &env,
                 proposal_id.into_val(&env),
                 voter.into_val(&env),
                 effective_weight.into_val(&env),

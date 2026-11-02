@@ -6,7 +6,7 @@
 mod treasury_collect_fee_auth {
     use kora_treasury::TreasuryContractClient;
     use kora_shared::errors::KoraError;
-    use kora_parameter_registry::ParameterRegistryContractClient;
+    use kora_parameter_registry::{ParameterRegistryContract, ParameterRegistryContractClient};
     use kora_shared::types::RegistryParamKey;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
@@ -42,7 +42,7 @@ mod treasury_collect_fee_auth {
 
         let treasury_id = env.register_contract(None, kora_treasury::TreasuryContract);
         let treasury_client = TreasuryContractClient::new(&env, &treasury_id);
-        treasury_client.initialize(&admin);
+        treasury_client.initialize(&admin, &50u32);
 
         TestEnv {
             env,
@@ -72,16 +72,16 @@ mod treasury_collect_fee_auth {
         });
 
         let admin = Address::generate(&env);
-        let registry_id = env.register_contract(None, kora_parameter_registry::ParameterRegistryContract);
+        let registry_id = env.register_contract(None, ParameterRegistryContract);
         let registry_client = ParameterRegistryContractClient::new(&env, &registry_id);
         registry_client.initialize(&admin, &None); // bootstrap defaults
 
         let treasury_id = env.register_contract(None, kora_treasury::TreasuryContract);
         let treasury_client = TreasuryContractClient::new(&env, &treasury_id);
-        treasury_client.initialize(&admin);
+        treasury_client.initialize(&admin, &50u32);
 
         // Wire treasury to the registry
-        treasury_client.set_registry(&admin, &registry_id);
+        treasury_client.set_parameter_registry(&admin, &registry_id);
 
         (env, admin, registry_id, treasury_client, registry_client)
     }
@@ -173,7 +173,7 @@ mod treasury_collect_fee_auth {
         treasury_client.whitelist_token(&_admin, &token);
         let result = treasury_client.try_collect_fee(&token, &1_000_000i128);
         assert!(result.is_ok());
-        assert_eq!(treasury_client.get_collected(token), 1_000_000);
+        assert_eq!(treasury_client.get_collected(&token), 1_000_000);
     }
 
     #[test]
@@ -217,6 +217,6 @@ mod treasury_collect_fee_auth {
         treasury_client.whitelist_token(&admin, &token);
         let result = treasury_client.try_collect_fee(&token, &500_000i128);
         assert!(result.is_ok());
-        assert_eq!(treasury_client.get_collected(token), 500_000);
+        assert_eq!(treasury_client.get_collected(&token), 500_000);
     }
 }

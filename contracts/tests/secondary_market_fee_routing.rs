@@ -4,6 +4,7 @@ use kora_access_control::{AccessControlContract, AccessControlContractClient};
 use kora_financing_pool::FinancingPoolContractClient;
 use kora_invoice_nft::InvoiceNftContractClient;
 use kora_secondary_market::SecondaryMarketClient;
+use soroban_sdk::{Bytes, String as SorobanString, Symbol};
 use kora_treasury::TreasuryContractClient;
 use soroban_sdk::{
     testutils::Address as _, token, Address, Env,
@@ -49,7 +50,7 @@ fn setup(protocol_fee_bps: u32) -> TestEnv {
 
     let treasury_address = env.register_contract(None, kora_treasury::TreasuryContract);
     let treasury = TreasuryContractClient::new(&env, &treasury_address);
-    treasury.initialize(&admin, &0u32);
+    treasury.initialize(&admin, &50u32);
 
     let nft_address = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
     let nft = InvoiceNftContractClient::new(&env, &nft_address);
@@ -76,7 +77,9 @@ fn setup(protocol_fee_bps: u32) -> TestEnv {
     let market_address = env.register_contract(None, kora_secondary_market::SecondaryMarket);
     let market = SecondaryMarketClient::new(&env, &market_address);
     nft.set_authorized_callers(&admin, &market_address, &pool_address);
-    nft.mint(&admin, &INVOICE_ID, &POOL_AMOUNT, &Default::default());
+    let debtor_hash = Bytes::from_slice(&env, &[0xABu8; 32]);
+    let ipfs_cid = SorobanString::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+    nft.mint_invoice(&seller, &debtor_hash, &POOL_AMOUNT, &Symbol::new(&env, "USDC"), &(env.ledger().timestamp() + 86_400 * 30), &ipfs_cid, &50u32, &None);
     pool.release_funds(&market_address, &INVOICE_ID, &token_address);
     pool.record_position(
         &admin,

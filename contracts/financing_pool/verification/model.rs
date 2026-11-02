@@ -49,6 +49,8 @@
 
 #![allow(dead_code)]
 
+use alloc::{format, string::String, string::ToString, vec, vec::Vec};
+
 /// Maximum number of investors per pool in the model.
 /// Covers all realistic tiered allocations (max_position_bps >= 1250 bps → max 8).
 pub const MAX_INVESTORS: usize = 8;

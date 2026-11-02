@@ -45,7 +45,11 @@ mod vesting_lifecycle {
             env,
             &env.register_stellar_asset_contract_v2(admin.clone()).address(),
         );
-        TokenFixture { admin, address: client.address, client }
+        TokenFixture { admin, address: client.address.clone(), client }
+    }
+
+    fn token_balance(env: &Env, token: &TokenFixture, account: &Address) -> i128 {
+        soroban_sdk::token::Client::new(env, &token.address).balance(account)
     }
 
     fn setup<'a>() -> VestingFixture<'a> {
@@ -125,9 +129,9 @@ mod vesting_lifecycle {
         assert_eq!(f.client.get_unvested_balance(&f.beneficiary), 5_000);
 
         // 5. Release partial
-        let balance_before = f.token.client.balance(&f.beneficiary);
+        let balance_before = token_balance(&f.env, &f.token, &f.beneficiary);
         f.client.release(&f.beneficiary);
-        let balance_after = f.token.client.balance(&f.beneficiary);
+        let balance_after = token_balance(&f.env, &f.token, &f.beneficiary);
         assert_eq!(balance_after - balance_before, 5_000);
         let grant = f.client.get_grant(&f.beneficiary);
         assert_eq!(grant.unwrap().released_amount, 5_000);
@@ -138,11 +142,11 @@ mod vesting_lifecycle {
         assert_eq!(f.client.get_unvested_balance(&f.beneficiary), 0);
 
         // 7. Release the rest
-        let balance_before2 = f.token.client.balance(&f.beneficiary);
+        let balance_before2 = token_balance(&f.env, &f.token, &f.beneficiary);
         f.client.release(&f.beneficiary);
-        let balance_after2 = f.token.client.balance(&f.beneficiary);
+        let balance_after2 = token_balance(&f.env, &f.token, &f.beneficiary);
         assert_eq!(balance_after2 - balance_before2, 5_000);
-        assert_eq!(f.token.client.balance(&f.beneficiary), total);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), total);
     }
 
     #[test]
@@ -163,20 +167,20 @@ mod vesting_lifecycle {
         advance_to(&f.env, start + 300);
         f.client.release(&f.beneficiary);
         cumulative += 3_000;
-        assert_eq!(f.token.client.balance(&f.beneficiary), cumulative);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), cumulative);
 
         // 70 % vested (releases incremental 4_000)
         advance_to(&f.env, start + 700);
         f.client.release(&f.beneficiary);
         cumulative += 4_000;
-        assert_eq!(f.token.client.balance(&f.beneficiary), cumulative);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), cumulative);
 
         // 100 % vested (releases remaining 3_000)
         advance_to(&f.env, start + duration);
         f.client.release(&f.beneficiary);
         cumulative += 3_000;
         assert_eq!(cumulative, total);
-        assert_eq!(f.token.client.balance(&f.beneficiary), total);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), total);
 
         // Double-release should now be rejected
         let result = f.client.try_release(&f.beneficiary);
@@ -216,7 +220,7 @@ mod vesting_lifecycle {
 
         // Can still release the vested amount
         f.client.release(&f.beneficiary);
-        assert_eq!(f.token.client.balance(&f.beneficiary), 5_000);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), 5_000);
 
         // Further release should be rejected (nothing left to release)
         let result = f.client.try_release(&f.beneficiary);
@@ -387,7 +391,7 @@ mod vesting_lifecycle {
         // Advance to 600s – only 1_000 more vested, should release that
         advance_to(&f.env, start + 600);
         f.client.release(&f.beneficiary);
-        assert_eq!(f.token.client.balance(&f.beneficiary), 6_000);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), 6_000);
     }
 
     // ── Edge Cases ───────────────────────────────────────────────────────────
@@ -407,7 +411,7 @@ mod vesting_lifecycle {
 
         // Release at boundary must succeed
         f.client.release(&f.beneficiary);
-        assert_eq!(f.token.client.balance(&f.beneficiary), 1_000);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), 1_000);
     }
 
     #[test]
@@ -415,8 +419,10 @@ mod vesting_lifecycle {
         let f = setup();
         let start = f.env.ledger().timestamp();
 
-        // Very long vesting (u64::MAX effectively never fully vests)
-        let max_duration: u64 = u64::MAX;
+        // Very long vesting (effectively never fully vests in test time).
+        // NOTE: u64::MAX would vest dust (integer division yields 0), so use a
+        // large-but-representable duration that still vests a nonzero amount.
+        let max_duration: u64 = 1_000_000;
         let cliff: u64 = 1_000;
         f.client.create_grant(&f.admin, &f.beneficiary, &10_000, &start, &cliff, &max_duration);
 
@@ -429,7 +435,7 @@ mod vesting_lifecycle {
 
         // Release should work
         f.client.release(&f.beneficiary);
-        assert_eq!(f.token.client.balance(&f.beneficiary), vested);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), vested);
     }
 
     #[test]
@@ -479,7 +485,7 @@ mod vesting_lifecycle {
         // Beneficiary calls release directly (anyone can call release)
         advance_to(&f.env, start + 500);
         f.client.release(&f.beneficiary);
-        assert_eq!(f.token.client.balance(&f.beneficiary), 5_000);
+        assert_eq!(token_balance(&f.env, &f.token, &f.beneficiary), 5_000);
     }
 
     #[test]
@@ -503,13 +509,14 @@ mod vesting_lifecycle {
 
         f.client.create_grant(&f.admin, &f.beneficiary, &total, &start, &100, &2000);
 
-        // Many small releases
+        // Many small releases (strided: a step per ledger would exhaust the
+        // test host budget long before covering the schedule).
         let mut cumulative: i128 = 0;
-        for step in 200u64..=2000u64 {
+        for step in (200u64..=2000u64).step_by(20) {
             advance_to(&f.env, start + step);
             let result = f.client.try_release(&f.beneficiary);
             if result.is_ok() {
-                let new_balance = f.token.client.balance(&f.beneficiary);
+                let new_balance = token_balance(&f.env, &f.token, &f.beneficiary);
                 let released_this_step = new_balance - cumulative;
                 cumulative = new_balance;
                 assert!(released_this_step >= 0, "released amount must be non-negative");

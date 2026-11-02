@@ -8,7 +8,7 @@ use kora_shared::{
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype,
-    symbol, vec, BytesN, Env, Address, Map, Symbol, Vec,
+    vec, BytesN, Env, Address, Map, Symbol, Vec,
 };
 
 /// Default protocol fee: 250 bps (2.5%) on secondary-market trades.
@@ -55,13 +55,14 @@ pub enum DataKey {
     Listing(u64, Address),
 }
 
-fn require_admin(env: &Env) -> Result<(), SecondaryMarketError> {
+fn require_admin(env: &Env, caller: &Address) -> Result<(), SecondaryMarketError> {
+    caller.require_auth();
     let admin: Address = env
         .storage()
         .persistent()
         .get(&DataKey::Admin)
         .ok_or(SecondaryMarketError::NotInitialized)?;
-    if env.invoker() != admin {
+    if caller != &admin {
         return Err(SecondaryMarketError::NotAdmin);
     }
     Ok(())
@@ -117,16 +118,16 @@ impl SecondaryMarket {
     }
 
     /// Pauses all secondary-market operations. Admin-only.
-    pub fn pause(env: Env) -> Result<(), SecondaryMarketError> {
-        require_admin(&env)?;
+    pub fn pause(env: Env, admin: Address) -> Result<(), SecondaryMarketError> {
+        require_admin(&env, &admin)?;
         env.storage().persistent().set(&DataKey::Paused, &true);
         events::secondary_market_paused(&env);
         Ok(())
     }
 
     /// Unpauses secondary-market operations. Admin-only.
-    pub fn unpause(env: Env) -> Result<(), SecondaryMarketError> {
-        require_admin(&env)?;
+    pub fn unpause(env: Env, admin: Address) -> Result<(), SecondaryMarketError> {
+        require_admin(&env, &admin)?;
         env.storage().persistent().set(&DataKey::Paused, &false);
         events::secondary_market_unpaused(&env);
         Ok(())
@@ -139,8 +140,8 @@ impl SecondaryMarket {
     ///
     /// **Errors:**
     /// - `SecondaryMarketError::InvalidFeeRate` — Fee exceeds 1000 bps.
-    pub fn update_protocol_fee_bps(env: Env, fee_bps: u32) -> Result<(), SecondaryMarketError> {
-        require_admin(&env)?;
+    pub fn update_protocol_fee_bps(env: Env, admin: Address, fee_bps: u32) -> Result<(), SecondaryMarketError> {
+        require_admin(&env, &admin)?;
         require_valid_bps_range(fee_bps, 0, MAX_PROTOCOL_FEE_BPS)?;
         env.storage().persistent().set(&DataKey::ProtocolFeeBps, &fee_bps);
         events::secondary_market_fee_updated(&env, fee_bps);
@@ -187,7 +188,8 @@ impl SecondaryMarket {
         // Verify the pool exists and is not closed.
         let pool_client = kora_financing_pool::FinancingPoolContractClient::new(&env, &financing_pool);
         let pool: Pool = pool_client
-            .get_pool(&invoice_id)
+            .try_get_pool(&invoice_id)
+            .map_err(|_| SecondaryMarketError::PositionNotFound)?
             .map_err(|_| SecondaryMarketError::PositionNotFound)?;
         if pool.is_closed {
             return Err(SecondaryMarketError::PoolAlreadyClosed);
@@ -275,7 +277,8 @@ impl SecondaryMarket {
 
         let pool_client = kora_financing_pool::FinancingPoolContractClient::new(&env, &financing_pool);
         let pool: Pool = pool_client
-            .get_pool(&invoice_id)
+            .try_get_pool(&invoice_id)
+            .map_err(|_| SecondaryMarketError::PositionNotFound)?
             .map_err(|_| SecondaryMarketError::PositionNotFound)?;
         if pool.is_closed {
             return Err(SecondaryMarketError::PoolAlreadyClosed);
@@ -322,7 +325,7 @@ impl SecondaryMarket {
         }
         env.storage().persistent().remove(&key);
 
-        events::position_listing_cancelled(&env, invoice_id, &seller);
+        events::listing_cancelled(&env, invoice_id, &seller);
         Ok(())
     }
 }

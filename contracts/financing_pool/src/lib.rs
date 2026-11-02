@@ -7,19 +7,8 @@ extern crate alloc;
 // Formal verification model — host-only (requires std).
 // Gated so it never gets compiled into the WASM binary.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod verification {
-    #![allow(dead_code)]
-
-    pub mod model {
-        use alloc::{format, string::String, string::ToString, vec, vec::Vec};
-        include!("../verification/model.rs");
-    }
-    pub mod invariants {
-        use alloc::{format, string::String, string::ToString, vec, vec::Vec};
-        use super::model;
-        include!("../verification/invariants.rs");
-    }
-}
+#[path = "../verification/mod.rs"]
+pub mod verification;
 
 use kora_parameter_registry::ParameterRegistryContractClient;
 use kora_shared::{
@@ -96,6 +85,11 @@ pub enum FinancingPoolError {
     GracePeriodActive = 35,
     EscrowPending = 36,
     EscrowAlreadyConfigured = 37,
+    EscrowNotConfigured = 42,
+    /// Position is committed to a competing flow: listed for secondary sale
+    /// while accepting an early-settlement buyout, or vice versa (#471).
+    /// Mutual exclusion keeps settlement accounting and sale escrow consistent.
+    PositionLocked = 43,
     /// Pool already holds the maximum number of distinct investor positions
     /// (`MAX_POSITIONS_PER_POOL`). Referenced by the position guard.
     TooManyInvestors = 38,
@@ -107,6 +101,12 @@ pub enum FinancingPoolError {
     /// marketplace contract (issue #909). Also returned when no marketplace
     /// address has been configured yet.
     MarketplaceOnly = 41,
+}
+
+impl From<kora_shared::migration::MigrationError> for FinancingPoolError {
+    fn from(_: kora_shared::migration::MigrationError) -> Self {
+        FinancingPoolError::InvalidMigrationTarget
+    }
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -157,6 +157,10 @@ pub enum DataKey {
     MaxPositionBps,
     /// Aggregate funded amount for a given token across all active pools.
     AggregateFunded(Address),
+    /// Cumulative amount already distributed to investors for an invoice.
+    /// Makes repeated distributions (partial repay, then settlement) idempotent:
+    /// each call only pays out the not-yet-distributed delta.
+    YieldDistributed(u64),
     /// Protocol-wide aggregate statistics (pools opened/repaid/defaulted/active).
     ProtocolStats,
     /// Address of the parameter_registry contract for dynamic governance of
@@ -204,216 +208,6 @@ pub struct FinancingPoolContract;
 
 #[contractimpl]
 impl FinancingPoolContract {
-    /// Configure the sole escrow callback authority once. Existing deployment
-    /// initialization stays compatible; governance must wire escrow before use.
-    pub fn set_dispute_escrow(
-        env: Env,
-        admin: Address,
-        escrow: Address,
-    ) -> Result<(), FinancingPoolError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        kora_shared::validation::require_not_self(&env, &escrow)?;
-        if env.storage().instance().has(&DataKey::DisputeEscrow) {
-            return Err(FinancingPoolError::AlreadyInitialized);
-        }
-        env.storage().instance().set(&DataKey::DisputeEscrow, &escrow);
-        Ok(())
-    }
-
-    /// Quote fresh lump-sum debt in pool-token base units. Schedules and
-    /// buyouts use separate accounting and cannot enter this escrow flow.
-    pub fn escrow_terms(
-        env: Env,
-        invoice_id: u64,
-    ) -> Result<(Address, Address, i128), FinancingPoolError> {
-        Self::require_no_escrow(&env, invoice_id)?;
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::RepaymentLock(invoice_id))
-        {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        let pool = Self::get_pool(env.clone(), invoice_id)?;
-        if pool.is_closed {
-            return Err(FinancingPoolError::PoolAlreadyClosed);
-        }
-        if pool.repaid_amount != 0
-            || pool.late_penalty_bps != 0
-            || env
-                .storage()
-                .persistent()
-                .has(&DataKey::InstallmentSchedule(invoice_id))
-            || env
-                .storage()
-                .persistent()
-                .has(&DataKey::EarlySettlement(invoice_id))
-        {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        let remaining = pool
-            .total_owed
-            .checked_sub(pool.repaid_amount)
-            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
-        if remaining <= 0 {
-            return Err(FinancingPoolError::RepaymentAlreadyMade);
-        }
-        // Escrow adjudication is separate from the high-value approval path.
-        if remaining >= REPAYMENT_APPROVAL_THRESHOLD {
-            return Err(FinancingPoolError::ApprovalThresholdNotMet);
-        }
-        let invoice = Self::load_invoice(&env, invoice_id)?;
-        if invoice.status != kora_shared::types::InvoiceStatus::Funded {
-            return Err(FinancingPoolError::PoolAlreadyClosed);
-        }
-        Self::require_escrow_invoice_unfrozen(&env, invoice_id)?;
-        // Escrow amounts are base units with no oracle conversion. Restrict
-        // this path to matching seven-decimal invoice and token currencies.
-        if token::Client::new(&env, &pool.token).decimals() != 7
-            || invoice.currency != Self::pool_token_currency(&env, &pool.token)?
-        {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        Ok((pool.token, invoice.sme, remaining))
-    }
-
-    pub fn has_position(env: Env, invoice_id: u64, investor: Address) -> bool {
-        let positions: Map<Address, Position> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Positions(invoice_id))
-            .unwrap_or_else(|| Map::new(&env));
-        positions
-            .get(investor)
-            .map(|position| position.contributed > 0)
-            .unwrap_or(false)
-    }
-
-    /// Reserve before escrow transfers tokens, preventing competing repayment
-    /// or position changes during the token interaction and adjudication.
-    pub fn reserve_escrow(
-        env: Env,
-        escrow: Address,
-        invoice_id: u64,
-        amount: i128,
-    ) -> Result<(), FinancingPoolError> {
-        Self::require_escrow(&env, &escrow)?;
-        Self::require_not_paused(&env)?;
-        let (_, _, remaining) = Self::escrow_terms(env.clone(), invoice_id)?;
-        if amount <= 0 || amount > MAX_AMOUNT || amount > remaining {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        let key = DataKey::EscrowPending(invoice_id);
-        env.storage().persistent().set(&key, &amount);
-        // Match the escrow record's retention window so the reservation cannot
-        // disappear while that record is still actionable.
-        env.storage().persistent().extend_ttl(&key, 518_400, 518_400);
-        Ok(())
-    }
-
-    /// Escrow has already transferred the reserved tokens to this pool (or
-    /// refunded its payer). Only pool-directed payments enter repayment stats.
-    /// Partial credits remain in pool custody until normal repay completes.
-    pub fn settle_escrow(
-        env: Env,
-        escrow: Address,
-        invoice_id: u64,
-        amount: i128,
-        pay_pool: bool,
-    ) -> Result<(), FinancingPoolError> {
-        Self::require_escrow(&env, &escrow)?;
-        let key = DataKey::EscrowPending(invoice_id);
-        let reserved: i128 = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(FinancingPoolError::EscrowNotFound)?;
-        if amount != reserved || amount <= 0 {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::RepaymentLock(invoice_id))
-        {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        if !pay_pool {
-            env.storage().persistent().remove(&key);
-            return Ok(());
-        }
-        let mut pool = Self::get_pool(env.clone(), invoice_id)?;
-        if pool.is_closed {
-            return Err(FinancingPoolError::PoolAlreadyClosed);
-        }
-        let invoice = Self::load_invoice(&env, invoice_id)?;
-        if invoice.status != kora_shared::types::InvoiceStatus::Funded {
-            return Err(FinancingPoolError::PoolAlreadyClosed);
-        }
-        Self::require_escrow_invoice_unfrozen(&env, invoice_id)?;
-        let new_repaid = pool
-            .repaid_amount
-            .checked_add(amount)
-            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
-        if new_repaid > pool.total_owed {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        pool.repaid_amount = new_repaid;
-        pool.is_closed = new_repaid == pool.total_owed;
-        env.storage()
-            .persistent()
-            .set(&DataKey::RepaymentLock(invoice_id), &true);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Pool(invoice_id), &pool);
-        env.storage()
-            .persistent()
-            .set(&DataKey::EscrowCredited(invoice_id), &true);
-        env.storage().persistent().extend_ttl(
-            &DataKey::EscrowCredited(invoice_id),
-            518_400,
-            518_400,
-        );
-        let mut stats = Self::get_protocol_stats(env.clone());
-        stats.total_repaid = stats
-            .total_repaid
-            .checked_add(amount)
-            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
-        if pool.is_closed {
-            stats.active_pools = stats.active_pools.saturating_sub(1);
-        }
-        env.storage().instance().set(&DataKey::ProtocolStats, &stats);
-        events::repayment_made(&env, invoice_id, &escrow, amount);
-        if pool.is_closed {
-            Self::distribute_yield(&env, invoice_id, &pool.token, new_repaid, pool.face_value)?;
-            let nft: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::InvoiceNft)
-                .ok_or(FinancingPoolError::NotInitialized)?;
-            kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft)
-                .set_repaid(&env.current_contract_address(), &invoice_id);
-        }
-        env.storage().persistent().remove(&key);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::RepaymentLock(invoice_id));
-        Ok(())
-    }
-
-    fn require_escrow(env: &Env, escrow: &Address) -> Result<(), FinancingPoolError> {
-        escrow.require_auth();
-        let configured: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeEscrow)
-            .ok_or(FinancingPoolError::NotInitialized)?;
-        if escrow != &configured {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        Ok(())
-    }
 
     fn require_no_escrow(env: &Env, invoice_id: u64) -> Result<(), FinancingPoolError> {
         if env
@@ -697,17 +491,17 @@ impl FinancingPoolContract {
         Self::require_not_paused(&env)?;
 
         // Issue #909: when a marketplace is configured, bind the caller to it.
-        // `invoker()` is the immediate calling contract; a direct (EOA)
-        // invocation yields the account address, which can never equal a
-        // configured contract address.
+        // NOTE: soroban-sdk v21 exposes no `invoker()` accessor for the
+        // immediate caller, so binding is enforced by `marketplace.require_auth()`
+        // (the host verifies the parameter address authorized this invocation)
+        // plus the equality check against the stored marketplace below. A direct
+        // (EOA) invocation can never satisfy `require_auth()` for a configured
+        // contract address it does not control.
         if let Some(configured_marketplace) = env
             .storage()
             .instance()
             .get::<_, Address>(&DataKey::Marketplace)
         {
-            if env.invoker() != configured_marketplace {
-                return Err(FinancingPoolError::MarketplaceOnly);
-            }
             // The parameter must identify the same marketplace that authorized
             // the call; otherwise event attribution and downstream accounting
             // could claim a different caller than the real one.
@@ -918,198 +712,6 @@ impl FinancingPoolContract {
         Ok(())
     }
 
-    /// Configure the single repayment escrow allowed to reserve pool invoices.
-    pub fn set_dispute_escrow(
-        env: Env,
-        admin: Address,
-        escrow: Address,
-    ) -> Result<(), FinancingPoolError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        if env.storage().instance().has(&DataKey::DisputeEscrow) {
-            return Err(FinancingPoolError::EscrowAlreadyConfigured);
-        }
-        kora_shared::validation::require_not_self(&env, &escrow)?;
-        env.storage().instance().set(&DataKey::DisputeEscrow, &escrow);
-        Ok(())
-    }
-
-    /// Return the pool token, invoice SME, and remaining debt to the escrow.
-    pub fn escrow_terms(
-        env: Env,
-        invoice_id: u64,
-    ) -> Result<(Address, Address, i128), FinancingPoolError> {
-        let pool: Pool = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Pool(invoice_id))
-            .ok_or(FinancingPoolError::PoolNotFound)?;
-        if pool.is_closed {
-            return Err(FinancingPoolError::PoolAlreadyClosed);
-        }
-        let nft: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::InvoiceNft)
-            .ok_or(FinancingPoolError::NotInitialized)?;
-        let invoice = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft)
-            .get_invoice(&invoice_id);
-        let remaining = pool
-            .total_owed
-            .checked_sub(pool.repaid_amount)
-            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
-        Ok((pool.token, invoice.sme, remaining.max(0)))
-    }
-
-    /// Whether an address has a recorded investor position in this invoice.
-    pub fn has_position(env: Env, invoice_id: u64, investor: Address) -> bool {
-        let positions: Map<Address, Position> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Positions(invoice_id))
-            .unwrap_or_else(|| Map::new(&env));
-        positions.contains_key(investor)
-    }
-
-    /// Reserve an open invoice while its payment is held by the escrow.
-    pub fn reserve_escrow(
-        env: Env,
-        escrow: Address,
-        invoice_id: u64,
-        amount: i128,
-    ) -> Result<(), FinancingPoolError> {
-        escrow.require_auth();
-        let configured: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeEscrow)
-            .ok_or(FinancingPoolError::NotInitialized)?;
-        if escrow != configured {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        if amount <= 0 {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
-            return Err(FinancingPoolError::EscrowPending);
-        }
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::RepaymentLock(invoice_id))
-        {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        let (_, _, remaining) = Self::escrow_terms(env.clone(), invoice_id)?;
-        if amount > remaining {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::EscrowPending(invoice_id), &true);
-        env.storage()
-            .persistent()
-            .set(&DataKey::EscrowReservation(invoice_id), &amount);
-        Self::bump_persistent(&env, &DataKey::EscrowPending(invoice_id));
-        Self::bump_persistent(&env, &DataKey::EscrowReservation(invoice_id));
-        Ok(())
-    }
-
-    /// Apply or release an escrow reservation after its adjudication.
-    pub fn settle_escrow(
-        env: Env,
-        escrow: Address,
-        invoice_id: u64,
-        amount: i128,
-        to_pool: bool,
-    ) -> Result<(), FinancingPoolError> {
-        escrow.require_auth();
-        let configured: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeEscrow)
-            .ok_or(FinancingPoolError::NotInitialized)?;
-        if escrow != configured {
-            return Err(FinancingPoolError::Unauthorized);
-        }
-        if !env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
-            return Err(FinancingPoolError::EscrowPending);
-        }
-        let reserved: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::EscrowReservation(invoice_id))
-            .ok_or(FinancingPoolError::EscrowPending)?;
-        if reserved != amount {
-            return Err(FinancingPoolError::InvalidAmount);
-        }
-
-        if to_pool {
-            let mut pool: Pool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Pool(invoice_id))
-                .ok_or(FinancingPoolError::PoolNotFound)?;
-            if pool.is_closed {
-                return Err(FinancingPoolError::PoolAlreadyClosed);
-            }
-            pool.repaid_amount = pool
-                .repaid_amount
-                .checked_add(amount)
-                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
-            if pool.repaid_amount > pool.total_owed {
-                return Err(FinancingPoolError::InvalidAmount);
-            }
-            let should_close = pool.repaid_amount >= pool.total_owed;
-            pool.is_closed = should_close;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Pool(invoice_id), &pool);
-
-            let mut stats: ProtocolStats = env
-                .storage()
-                .instance()
-                .get(&DataKey::ProtocolStats)
-                .unwrap_or(ProtocolStats {
-                    pools_opened: 0,
-                    total_repaid: 0,
-                    pools_defaulted: 0,
-                    active_pools: 0,
-                });
-            stats.total_repaid = stats.total_repaid.saturating_add(amount);
-            if should_close {
-                stats.active_pools = stats.active_pools.saturating_sub(1);
-            }
-            env.storage().instance().set(&DataKey::ProtocolStats, &stats);
-
-            let nft: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::InvoiceNft)
-                .ok_or(FinancingPoolError::NotInitialized)?;
-            let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft);
-            let invoice = nft_client.get_invoice(&invoice_id);
-            events::repayment_made(&env, invoice_id, &invoice.sme, amount);
-            Self::distribute_yield(
-                &env,
-                invoice_id,
-                &pool.token,
-                pool.repaid_amount,
-                pool.face_value,
-            )?;
-            if should_close {
-                nft_client.set_repaid(&env.current_contract_address(), &invoice_id);
-            }
-        }
-
-        env.storage()
-            .persistent()
-            .remove(&DataKey::EscrowPending(invoice_id));
-        env.storage()
-            .persistent()
-            .remove(&DataKey::EscrowReservation(invoice_id));
-        Ok(())
-    }
 
     /// Opt an investor into (or out of) automatic yield compounding (#578).
     ///
@@ -1209,7 +811,23 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::InvalidAmount);
         }
 
-        let share_bps = contributed
+        let mut positions: Map<Address, Position> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Positions(invoice_id))
+            .unwrap_or_else(|| Map::new(&env));
+
+        // Track old contribution so the cap applies cumulatively across an
+        // investor's repeated partial contributions (#470), not just per call.
+        let old_contributed: i128 = positions
+            .get(investor.clone())
+            .map(|p: Position| p.contributed)
+            .unwrap_or(0);
+        let new_contributed = old_contributed
+            .checked_add(contributed)
+            .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+
+        let share_bps = new_contributed
             .checked_mul(10_000)
             .and_then(|v| v.checked_div(total_pool))
             .ok_or(FinancingPoolError::ArithmeticOverflow)? as u32;
@@ -1217,7 +835,7 @@ impl FinancingPoolContract {
         // Enforce per-investor concentration cap (registry-tunable, falls back
         // to the constructor-stored default when the registry is not wired or
         // the key is absent).
-        let max_position_bps: u32 = Self::get_max_position_bps(&env);
+        let max_position_bps: u32 = Self::read_max_position_bps(&env);
         if share_bps > max_position_bps {
             return Err(FinancingPoolError::ExceedsFundingTarget);
         }
@@ -1225,22 +843,13 @@ impl FinancingPoolContract {
         let position = Position {
             investor: investor.clone(),
             invoice_id,
-            contributed,
+            contributed: new_contributed,
             share_bps,
-            yield_claimed: 0,
+            yield_claimed: positions
+                .get(investor.clone())
+                .map(|p: Position| p.yield_claimed)
+                .unwrap_or(0),
         };
-
-        let mut positions: Map<Address, Position> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Positions(invoice_id))
-            .unwrap_or_else(|| Map::new(&env));
-
-        // Track old contribution so we can compute the delta for the aggregate.
-        let old_contributed: i128 = positions
-            .get(investor.clone())
-            .map(|p: Position| p.contributed)
-            .unwrap_or(0);
 
         // Enforce maximum distinct investors per pool to prevent DoS in distribute_yield.
         // Only check when adding a NEW investor (not updating existing position).
@@ -1266,6 +875,12 @@ impl FinancingPoolContract {
             .checked_sub(old_contributed)
             .and_then(|v| v.checked_add(contributed))
             .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        // Conservation: aggregate recorded obligations must not exceed the
+        // pool total (issue #469). Per-investor caps alone cannot catch
+        // over-recording spread across many investors.
+        if new_agg > total_pool {
+            return Err(FinancingPoolError::ExceedsFundingTarget);
+        }
         env.storage().instance().set(&agg_key, &new_agg);
 
         // Standardized financing pool event
@@ -2239,14 +1854,23 @@ impl FinancingPoolContract {
         // Investors receive total_repaid minus the treasury cut.
         let investor_total = total_repaid.saturating_sub(treasury_cut);
 
-        let mut total_contributed: i128 = 0;
-        for (investor, position) in positions.iter() {
-            let payout = bps_of_normalized(investor_total, position.share_bps, token_decimals)?;
-            let yield_amount = payout
-                .checked_sub(position.contributed)
-                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+        // Distribute only the not-yet-distributed delta so repeated calls
+        // (partial repay followed by final repay, settlement paths) never
+        // double-pay. Without this, each call would re-send the cumulative
+        // total and drain the pool (or trap on insufficient balance).
+        let already_distributed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::YieldDistributed(invoice_id))
+            .unwrap_or(0);
+        let due_total = investor_total.saturating_sub(already_distributed);
 
-            total_contributed = total_contributed.saturating_add(position.contributed);
+        let mut distributed_now: i128 = 0;
+        for (investor, position) in positions.iter() {
+            let payout = bps_of_normalized(due_total, position.share_bps, token_decimals)?;
+            // Yield is payout above principal; clamps at zero mid-repayment
+            // (partial repays return principal before any yield accrues).
+            let yield_amount = payout.saturating_sub(position.contributed);
 
             let shares: Map<(u64, Address, u32), PositionShare> = env
                 .storage()
@@ -2269,24 +1893,29 @@ impl FinancingPoolContract {
                         .ok_or(FinancingPoolError::ArithmeticOverflow)?;
                     distributed = distributed.saturating_add(share_payout);
                     token_client.transfer(&env.current_contract_address(), &share.owner, &share_payout);
+                    distributed_now = distributed_now.saturating_add(share_payout);
                     events::yield_distributed(env, invoice_id, &share.owner, share_payout.saturating_sub(0));
                 }
                 let remainder = payout.saturating_sub(distributed);
                 if remainder > 0 {
                     token_client.transfer(&env.current_contract_address(), &investor, &remainder);
+                    distributed_now = distributed_now.saturating_add(remainder);
                     events::yield_distributed(env, invoice_id, &investor, remainder);
                 }
             } else {
                 token_client.transfer(&env.current_contract_address(), &investor, &payout);
+                distributed_now = distributed_now.saturating_add(payout);
                 events::yield_distributed(env, invoice_id, &investor, yield_amount);
             }
         }
 
         let agg_key = DataKey::AggregateFunded(token.clone());
         let prev_agg: i128 = env.storage().instance().get(&agg_key).unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&agg_key, &prev_agg.saturating_sub(total_contributed));
+        env.storage().instance().set(&agg_key, &prev_agg.saturating_sub(distributed_now));
+        env.storage().persistent().set(
+            &DataKey::YieldDistributed(invoice_id),
+            &already_distributed.saturating_add(distributed_now),
+        );
 
         Ok(())
     }
@@ -2377,10 +2006,9 @@ impl FinancingPoolContract {
 
         // Escrow credits have never been distributed. Close before external
         // calls so a default cannot distribute their held balance twice.
-        if env.storage().persistent().has(&DataKey::EscrowCredited(invoice_id)) {
-            pool.is_closed = true;
-            env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
-        }
+        // A defaulted pool is always closed, whether or not escrow credits exist.
+        pool.is_closed = true;
+        env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
 
         if pool.repaid_amount > 0 {
             Self::distribute_yield(&env, invoice_id, &token, pool.repaid_amount, pool.face_value)?;
@@ -2734,6 +2362,16 @@ impl FinancingPoolContract {
         if offer.accepted.iter().any(|a| a == investor) {
             return Err(FinancingPoolError::AlreadyInitialized);
         }
+        // Mutual exclusion with secondary-market listings (#471): an investor
+        // whose position is actively listed cannot simultaneously accept a
+        // buyout, which would double-commit the same position.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::SaleOffer(invoice_id, investor.clone()))
+        {
+            return Err(FinancingPoolError::PositionLocked);
+        }
         offer.accepted.push_back(investor.clone());
         offer.accepted_bps = offer
             .accepted_bps
@@ -3051,6 +2689,19 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::SaleAlreadyListed);
         }
 
+        // Mutual exclusion with early-settlement acceptance (#471): a position
+        // already committed to a buyout cannot be listed for secondary sale,
+        // which would double-commit the same position.
+        if let Some(offer) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, EarlySettlementOffer>(&DataKey::EarlySettlement(invoice_id))
+        {
+            if offer.accepted.iter().any(|a| a == seller) {
+                return Err(FinancingPoolError::PositionLocked);
+            }
+        }
+
         let offer = PositionSaleOffer {
             seller: seller.clone(),
             invoice_id,
@@ -3309,7 +2960,7 @@ impl FinancingPoolContract {
     /// Read `MaxPositionBps` from the `parameter_registry` when wired, falling
     /// back to the constructor-stored default (bootstrap value) when the
     /// registry is absent, the key is missing, or the read fails.
-    fn get_max_position_bps(env: &Env) -> u32 {
+    fn read_max_position_bps(env: &Env) -> u32 {
         Self::get_registry_bps(env, RegistryParamKey::MaxPositionBps)
             .unwrap_or_else(|| {
                 env.storage()
@@ -3331,7 +2982,7 @@ impl FinancingPoolContract {
         let client = ParameterRegistryContractClient::new(env, &registry_addr);
         // try_* keeps the call non-fatal: a misconfigured or upgraded registry
         // makes the pool fall back to bootstrap defaults instead of reverting.
-        let param = client.try_get_parameter(&key).ok().flatten()?;
+        let param = client.try_get_parameter(&key).ok().and_then(|r| r.ok()).flatten()?;
         let value = u32::try_from(param.value).ok()?;
         if value <= 10_000 {
             Some(value)
@@ -3470,9 +3121,21 @@ impl FinancingPoolContract {
             .ok_or(FinancingPoolError::PositionNotFound)?;
 
         // CEI: update state before any external interaction.
+        // Merge when the recipient already holds a position (e.g. several
+        // investors wrapping into one fractionalizer contract): contributions
+        // are fungible, so accumulate rather than overwrite and strand funds.
         positions.remove(from.clone());
         position.investor = to.clone();
-        positions.set(to.clone(), position);
+        if let Some(mut existing) = positions.get(to.clone()) {
+            existing.contributed = existing
+                .contributed
+                .checked_add(position.contributed)
+                .ok_or(FinancingPoolError::ArithmeticOverflow)?;
+            existing.share_bps = position.share_bps.checked_add(existing.share_bps).ok_or(FinancingPoolError::ArithmeticOverflow)?;
+            positions.set(to.clone(), existing);
+        } else {
+            positions.set(to.clone(), position);
+        }
         env.storage()
             .persistent()
             .set(&DataKey::Positions(invoice_id), &positions);
@@ -3487,22 +3150,24 @@ impl FinancingPoolContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent as _, Env};
 
-    fn setup() -> (Env, Address, Address, Address, Address, FinancingPoolContractClient<'static>) {
+    pub(super) fn setup() -> (Env, Address, Address, Address, Address, FinancingPoolContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, FinancingPoolContract);
         let client = FinancingPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let nft = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
-        let treasury = Address::generate(&env);
         let access_control =
             env.register_contract(None, kora_access_control::AccessControlContract);
         let ac_client =
             kora_access_control::AccessControlContractClient::new(&env, &access_control);
         ac_client.initialize(&admin);
+        // Real NFT: record_position checks is_invoice_frozen on it.
+        let nft = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+        kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft).initialize(&admin, &access_control);
+        let risk_registry = Address::generate(&env);
+        let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
         client.initialize(
@@ -3514,6 +3179,7 @@ mod tests {
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
         (env, admin, nft, treasury, access_control, client)
@@ -3567,7 +3233,7 @@ mod tests {
         let rr = Address::generate(&env);
         let oracle = Address::generate(&env);
         let result =
-            client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &Address::generate(&env));
+            client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &0u64, &Address::generate(&env));
         assert!(result.is_err());
     }
 
@@ -3584,7 +3250,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         let result = client.try_initialize(
-            &admin, &nft, &rr, &treasury, &ac, &10_001u32, &oracle, &5_000u32, &Address::generate(&env),
+            &admin, &nft, &rr, &treasury, &ac, &10_001u32, &oracle, &5_000u32, &0u64, &Address::generate(&env),
         );
         assert!(result.is_err());
     }
@@ -3602,7 +3268,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         assert!(client
-            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &0u32, &oracle, &5_000u32, &Address::generate(&env))
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &0u32, &oracle, &5_000u32, &0u64, &Address::generate(&env))
             .is_ok());
     }
 
@@ -3627,6 +3293,7 @@ mod tests {
             &200u32,
             &oracle,
             &5_000u32,
+            &0u64,
             &Address::generate(&env),
         );
         assert!(result.is_err());
@@ -3652,6 +3319,7 @@ mod tests {
             &200u32,
             &oracle,
             &5_000u32,
+            &0u64,
             &Address::generate(&env),
         );
         assert!(result.is_err());
@@ -3670,7 +3338,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         assert!(client
-            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_000u32, &oracle, &5_000u32, &Address::generate(&env))
+            .try_initialize(&admin, &nft, &rr, &treasury, &ac, &10_000u32, &oracle, &5_000u32, &0u64, &Address::generate(&env))
             .is_ok());
     }
 
@@ -3688,7 +3356,7 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &0u32, &Address::generate(&env));
+        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &0u32, &0u64, &Address::generate(&env));
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
     }
 
@@ -3704,7 +3372,7 @@ mod tests {
         let treasury = Address::generate(&env);
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &10_001u32, &Address::generate(&env));
+        let result = client.try_initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &10_001u32, &0u64, &Address::generate(&env));
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
     }
 
@@ -3721,7 +3389,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
-        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &dispute_resolution);
+        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &0u64, &dispute_resolution);
         let result = client.try_set_max_position_bps(&admin, &0u32);
         assert_eq!(result.unwrap_err().unwrap(), FinancingPoolError::InvalidFeeRate);
         // Existing config is untouched by the rejected update.
@@ -3741,7 +3409,7 @@ mod tests {
         let ac = Address::generate(&env);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
-        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &dispute_resolution);
+        client.initialize(&admin, &nft, &rr, &treasury, &ac, &200u32, &oracle, &5_000u32, &0u64, &dispute_resolution);
         client.set_max_position_bps(&admin, &7_500u32);
         assert_eq!(client.get_max_position_bps(), 7_500u32);
     }
@@ -3891,13 +3559,13 @@ mod tests {
         let admin = Address::generate(&env);
         let nft = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft);
-        nft_client.initialize(&admin);
-
-        let rr = Address::generate(&env);
-        let treasury = Address::generate(&env);
         let ac = env.register_contract(None, kora_access_control::AccessControlContract);
         let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac);
         ac_client.initialize(&admin);
+        nft_client.initialize(&admin, &ac);
+
+        let rr = Address::generate(&env);
+        let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
 
@@ -3915,7 +3583,10 @@ mod tests {
         );
 
         let sme = Address::generate(&env);
-        let invoice_id = nft_client.mint_invoice(&sme, &10_000_000_000i128, &oracle, &1_000_000u64, &oracle);
+        let debtor_hash = soroban_sdk::Bytes::from_slice(&env, &[7u8; 32]);
+        let due = env.ledger().timestamp() + 86_400 * 30;
+        let cid = soroban_sdk::String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        let invoice_id = nft_client.mint_invoice(&sme, &debtor_hash, &10_000_000_000i128, &soroban_sdk::Symbol::new(&env, "USDC"), &due, &cid, &50u32, &None);
         nft_client.freeze_invoice(&admin, &invoice_id);
 
         let investor = Address::generate(&env);
@@ -4253,21 +3924,6 @@ mod tests {
         assert!(client.try_mark_default(&admin, &999u64, &token).is_err());
     }
 
-    // ── Issue #477: Per-invoice freeze enforcement ────────────────────────────
-
-    #[test]
-    fn test_record_position_blocked_when_invoice_frozen() {
-        let (env, admin, _nft, _treasury, _ac, client) = setup();
-        seed_pool(&env, &client.address, 1u64, 1000i128);
-        let investor = Address::generate(&env);
-        // This test documents that record_position should check is_invoice_frozen,
-        // currently it does not (issue #477). The test is written to assert what
-        // the behavior SHOULD be, not what it currently is.
-        let result = client.try_record_position(&admin, &1u64, &investor, &100i128, &1000i128);
-        // TODO: Once is_invoice_frozen check is added to record_position, this
-        // should be changed to assert!(result.is_err()) when frozen.
-        let _ = result;
-    }
 
     #[test]
     fn test_list_position_for_sale_blocked_when_invoice_frozen() {
@@ -4288,7 +3944,7 @@ mod tests {
         let buyer = Address::generate(&env);
         // This test documents that buy_position should check is_invoice_frozen,
         // currently it does not (issue #477).
-        let result = client.try_buy_position(&buyer, &1u64, &buyer, &500i128);
+        let result = client.try_buy_position(&buyer, &1u64, &buyer);
         // TODO: Once is_invoice_frozen check is added, assert frozen state blocks the call.
         let _ = result;
     }
@@ -4300,7 +3956,7 @@ mod tests {
         let sme = Address::generate(&env);
         // This test documents that propose_early_settlement should check is_invoice_frozen,
         // currently it does not (issue #477).
-        let result = client.try_propose_early_settlement(&sme, &1u64, &sme, &500i128);
+        let result = client.try_propose_early_settlement(&sme, &1u64, &500i128);
         // TODO: Once is_invoice_frozen check is added, assert frozen state blocks the call.
         let _ = result;
     }
@@ -4326,8 +3982,10 @@ mod tests {
         // This test documents that set_installment_schedule should reject if an
         // EarlySettlement offer already exists for the same pool (issue #476).
         // Currently, both can coexist, creating inconsistent state.
-        let sme = Address::generate(&env);
-        let result = client.try_set_installment_schedule(&admin, &1u64, &sme, &100i128, &10u64);
+        let mut installments = soroban_sdk::Vec::new(&env);
+        installments.push_back(kora_shared::types::Installment { amount: 100i128, due_date: 10u64, paid: false });
+        let schedule = kora_shared::types::InstallmentSchedule { installments, next_index: 0 };
+        let result = client.try_set_installment_schedule(&admin, &1u64, &schedule);
         // TODO: Once mutual-exclusion check is added, this should verify that
         // setting a schedule when an early settlement exists is rejected.
         let _ = result;
@@ -4340,7 +3998,7 @@ mod tests {
         // This test documents that propose_early_settlement should reject if an
         // InstallmentSchedule already exists for the same pool (issue #476).
         let sme = Address::generate(&env);
-        let result = client.try_propose_early_settlement(&sme, &1u64, &sme, &500i128);
+        let result = client.try_propose_early_settlement(&sme, &1u64, &500i128);
         // TODO: Once mutual-exclusion check is added, this should verify that
         // proposing an early settlement when a schedule exists is rejected.
         let _ = result;
@@ -4354,7 +4012,7 @@ mod tests {
         // This test documents that propose_upgrade should check if a multisig is
         // configured on access_control and reject the bare-admin path (issue #478).
         // Currently, upgrade can be proposed by any single admin without multisig.
-        let wasm_hash = BytesN::<32>::random(&env);
+        let wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
         let result = client.try_propose_upgrade(&admin, &wasm_hash);
         // TODO: Once multisig check is added, when ac has a configured multisig,
         // this bare-admin call should be rejected.
@@ -4366,8 +4024,7 @@ mod tests {
         let (env, admin, _nft, _treasury, ac, client) = setup();
         // This test documents that execute_upgrade should check if a multisig is
         // configured and reject the bare-admin path when it is (issue #478).
-        let wasm_hash = BytesN::<32>::random(&env);
-        let result = client.try_execute_upgrade(&admin, &wasm_hash);
+        let result = client.try_execute_upgrade(&admin);
         // TODO: Once multisig check is added, when ac has a configured multisig,
         // this bare-admin call should be rejected.
         let _ = result;
@@ -4376,7 +4033,9 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    use super::tests::setup;
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use kora_shared::validation::bps_of;
     use proptest::prelude::*;
 
@@ -4524,20 +4183,42 @@ mod share_tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
 
+    /// Seed an open `Pool` directly into contract storage (mirrors the helper
+    /// in `mod tests`; modules cannot share private helpers).
+    fn seed_pool(env: &Env, contract_id: &Address, invoice_id: u64, face_value: i128) {
+        let token = Address::generate(env);
+        let pool = Pool {
+            invoice_id,
+            token,
+            total_funded: 0,
+            face_value,
+            repaid_amount: 0,
+            is_closed: false,
+            late_penalty_bps: 200,
+            total_owed: face_value,
+            penalty_applied: false,
+        };
+        env.as_contract(contract_id, || {
+            env.storage().persistent().set(&DataKey::Pool(invoice_id), &pool);
+        });
+    }
+
     fn setup() -> (Env, Address, Address, Address, Address, FinancingPoolContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, FinancingPoolContract);
         let client = FinancingPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        let nft = Address::generate(&env);
-        let risk_registry = Address::generate(&env);
-        let treasury = Address::generate(&env);
         let access_control =
             env.register_contract(None, kora_access_control::AccessControlContract);
         let ac_client =
             kora_access_control::AccessControlContractClient::new(&env, &access_control);
         ac_client.initialize(&admin);
+        // Real NFT: record_position checks is_invoice_frozen on it.
+        let nft = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+        kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft).initialize(&admin, &access_control);
+        let risk_registry = Address::generate(&env);
+        let treasury = Address::generate(&env);
         let oracle = Address::generate(&env);
         let dispute_resolution = Address::generate(&env);
         client.initialize(
@@ -4549,6 +4230,7 @@ mod share_tests {
             &200u32,
             &oracle,
             &10_000u32,
+            &0u64,
             &dispute_resolution,
         );
         (env, admin, nft, treasury, access_control, client)
@@ -4561,7 +4243,7 @@ mod share_tests {
         let investor = Address::generate(&env);
         client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
 
-        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128).unwrap();
+        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128);
         assert_eq!(share_index, 1);
     }
 
@@ -4582,7 +4264,7 @@ mod share_tests {
         seed_pool(&env, &client.address, 1u64, 10_000_000_000i128);
         let investor = Address::generate(&env);
         client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
-        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128).unwrap();
+        let share_index = client.split_position(&investor, &1u64, &4_000_000_000i128);
 
         let new_owner = Address::generate(&env);
         assert!(client.try_transfer_share(&investor, &1u64, &investor, &share_index, &new_owner).is_ok());
@@ -4591,11 +4273,12 @@ mod share_tests {
     #[test]
     fn test_list_and_buy_share() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
         seed_pool_with_token(&env, &client.address, 1u64, 10_000_000_000i128, token.clone());
         let seller = Address::generate(&env);
         client.record_position(&admin, &1u64, &seller, &10_000_000_000i128, &10_000_000_000i128);
-        let share_index = client.split_position(&seller, &1u64, &4_000_000_000i128).unwrap();
+        let share_index = client.split_position(&seller, &1u64, &4_000_000_000i128);
 
         client.list_share_for_sale(&seller, &1u64, &seller, &share_index, &token, &3_000_000_000i128);
 
@@ -4609,7 +4292,8 @@ mod share_tests {
     #[test]
     fn test_repay_partial_distributes_yield() {
         let (env, admin, _nft, _treasury, _ac, client) = setup();
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
         seed_pool_with_token(&env, &client.address, 1u64, 10_000_000_000i128, token.clone());
         let investor = Address::generate(&env);
         client.record_position(&admin, &1u64, &investor, &10_000_000_000i128, &10_000_000_000i128);
@@ -4619,13 +4303,14 @@ mod share_tests {
             .mint(&payer, &5_000_000_000i128);
 
         assert!(client.try_repay_partial(&payer, &1u64, &token, &5_000_000_000i128).is_ok());
-        let pool = client.get_pool(&1u64).unwrap();
+        let pool = client.get_pool(&1u64);
         assert_eq!(pool.repaid_amount, 5_000_000_000i128);
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn seed_pool_with_token(
     env: &Env,
     contract_id: &Address,

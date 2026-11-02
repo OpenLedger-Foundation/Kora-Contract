@@ -3,12 +3,12 @@
 use kora_access_control::AccessControlContractClient;
 use kora_parameter_registry::ParameterRegistryContractClient;
 use kora_shared::{
-    audit::{chain_checksum, AdminActionType, AdminAuditEntry, AuditEntry, AuditSource, MAX_AUDIT_LOG_SIZE},
+    audit::{chain_checksum, AdminActionType, AuditEntry, MAX_AUDIT_LOG_SIZE},
     errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
-    types::{AllocationDrift, AssetAllocationPolicy, MultisigConfig, RegistryParamKey},
-    validation::{require_non_negative_amount, require_not_self, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
+    types::{MultisigConfig, RegistryParamKey},
+    validation::{require_non_negative_amount, require_not_self, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY, MAX_AMOUNT},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 
@@ -44,6 +44,8 @@ pub enum TreasuryError {
     InvalidGrant = 22,
     GrantNotFound = 23,
     TokenDecimalsNotRegistered = 24,
+    /// `emergency_withdraw` called without a declared emergency (#453).
+    EmergencyNotDeclared = 25,
 }
 
 impl From<CommonError> for TreasuryError {
@@ -615,6 +617,82 @@ impl TreasuryContract {
             Some(token.clone()),
             Some(amount),
         );
+        Ok(())
+    }
+
+    fn do_emergency_withdraw(
+        env: &Env,
+        admin: &Address,
+        token: &Address,
+        recipient: &Address,
+    ) -> Result<(), KoraError> {
+        Self::require_whitelisted_token(env, token)?;
+        Self::require_allowed_recipient(env, recipient)?;
+
+        let _guard = ReentrancyGuard::new(env)?;
+
+        let token_client = token::Client::new(env, token);
+        let balance = token_client.balance(&env.current_contract_address());
+        let reserved: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReserveBalance(token.clone()))
+            .unwrap_or(0);
+        let spendable = balance.saturating_sub(reserved);
+
+        if spendable > 0 {
+            token_client.transfer(&env.current_contract_address(), recipient, &spendable);
+            events::emergency_withdrawn(env, admin, token, spendable);
+        }
+        Self::append_audit_entry(
+            env,
+            admin,
+            AdminActionType::EmergencyWithdraw,
+            Some(token.clone()),
+            Some(spendable),
+        );
+        Ok(())
+    }
+
+    /// Map a `TreasuryError` from the direct-withdraw path into the governance
+    /// execution error space (`KoraError`). Variants mirror 1:1.
+    fn map_withdraw_err(e: TreasuryError) -> KoraError {
+        match e {
+            TreasuryError::InvalidAmount => KoraError::InvalidAmount,
+            TreasuryError::TokenNotWhitelisted => KoraError::TokenNotWhitelisted,
+            TreasuryError::ArithmeticOverflow => KoraError::ArithmeticOverflow,
+            TreasuryError::InsufficientPoolBalance => KoraError::InsufficientPoolBalance,
+            TreasuryError::Reentrancy => KoraError::Reentrancy,
+            TreasuryError::NotAdmin => KoraError::NotAdmin,
+            TreasuryError::NotInitialized => KoraError::NotInitialized,
+            TreasuryError::WithdrawalRateLimitExceeded => KoraError::WithdrawalRateLimitExceeded,
+            _ => KoraError::InvalidAmount,
+        }
+    }
+
+    /// Emergency drain of a token's spendable balance to a recipient. Admin only.
+    ///
+    /// Requires a previously declared emergency (see `declare_emergency`, #453).
+    /// Unlike `withdraw`, this path is uncapped and ignores rate limits; the
+    /// reserve floor is still excluded from the drained amount.
+    pub fn emergency_withdraw(
+        env: Env,
+        admin: Address,
+        token: Address,
+        recipient: Address,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_no_quorum_required(&env)?;
+        let declared: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyDeclared)
+            .unwrap_or(false);
+        if !declared {
+            return Err(TreasuryError::EmergencyNotDeclared);
+        }
+        Self::do_emergency_withdraw(&env, &admin, &token, &recipient)?;
         Ok(())
     }
 
@@ -1502,6 +1580,21 @@ impl TreasuryContract {
 
     /// Returns the current reserve allocation rate in basis points.
     pub fn get_reserve_allocation_bps(env: Env) -> u32 {
+        // Registry-aware: an explicitly governed registry value takes precedence
+        // over the local setting; bootstrap defaults do not override local config.
+        if let Some(reg) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::ParameterRegistry)
+        {
+            let client = ParameterRegistryContractClient::new(&env, &reg);
+            if client.is_param_governed(&RegistryParamKey::ReserveAllocationBps) {
+                let v = client.get_value(&RegistryParamKey::ReserveAllocationBps);
+                if v >= 0 && v <= 10_000 {
+                    return v as u32;
+                }
+            }
+        }
         env.storage()
             .persistent()
             .get(&DataKey::ReserveAllocationBps)
@@ -1731,7 +1824,8 @@ impl TreasuryContract {
 
         match proposal.action {
             TreasuryAction::Withdraw(token, recipient, amount) => {
-                Self::do_withdraw(&env, &executor, &token, &recipient, amount)?;
+                Self::do_withdraw(&env, &executor, &token, &recipient, amount)
+                    .map_err(Self::map_withdraw_err)?;
             }
             TreasuryAction::EmergencyWithdraw(token, recipient) => {
                 Self::do_emergency_withdraw(&env, &executor, &token, &recipient)?;
@@ -1902,18 +1996,21 @@ impl TreasuryContract {
         let amount = grant.milestones.get(grant.next_milestone).ok_or(KoraError::ProposalNotFound)?;
         let balance = token::Client::new(env, &grant.token).balance(&env.current_contract_address());
         let reserve: i128 = env.storage().persistent().get(&DataKey::ReserveBalance(grant.token.clone())).unwrap_or(0);
-        let registry: Address = env
+        // Reserve floor requires a wired parameter_registry; without one the
+        // floor is zero (same graceful fallback used across the module).
+        let min_reserve_ratio_bps: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::ParameterRegistry)
-            .ok_or(KoraError::NotInitialized)?;
-        let parameter = ParameterRegistryContractClient::new(env, &registry)
-            .get_parameter(&RegistryParamKey::MinReserveRatioBps)
-            .ok_or(KoraError::InvalidParameterValue)?;
-        if parameter.value < 0 || parameter.value > 10_000 {
-            return Err(KoraError::InvalidParameterValue);
-        }
-        Self::check_grant_reserve(balance, reserve, amount, parameter.value as u32)?;
+            .get::<_, Address>(&DataKey::ParameterRegistry)
+            .map(|registry| {
+                ParameterRegistryContractClient::new(env, &registry)
+                    .get_parameter(&RegistryParamKey::MinReserveRatioBps)
+                    .map(|p| p.value)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+            .clamp(0, 10_000) as u32;
+        Self::check_grant_reserve(balance, reserve, amount, min_reserve_ratio_bps)?;
 
         grant.remaining = grant
             .remaining
@@ -2135,7 +2232,7 @@ impl TreasuryContract {
 
         // Calculate distribution pool if not yet allocated
         let available_pool = if current_pool == 0 {
-            Self::bps_of(total_collected, config.distribution_bps)?
+            kora_shared::validation::bps_of(total_collected, config.distribution_bps)?
         } else {
             current_pool
         };
@@ -2310,7 +2407,7 @@ impl TreasuryContract {
 
         for i in 0..splits.len() {
             let (dest, bps) = splits.get(i).unwrap();
-            let share = Self::bps_of(distributable, bps)?;
+            let share = kora_shared::validation::bps_of(distributable, bps)?;
             if share > 0 {
                 token_client.transfer(&env.current_contract_address(), &dest, &share);
                 events::sweep_executed(&env, &token, &dest, share, now);
@@ -2460,75 +2557,17 @@ impl TreasuryContract {
         env.storage().instance().set(&DataKey::EpochWithdrawn(token.clone()), &(epoch_withdrawn + amount));
     }
 
-    fn enforce_rate_limit(env: &Env, token: &Address, amount: i128) -> Result<(), TreasuryError> {
-        let cap: i128 = env.storage().instance().get(&DataKey::WithdrawalCap(token.clone())).unwrap_or(0);
-        if cap == 0 {
-            return Ok(());
-        }
-        let epoch_start: u64 = env.storage().instance().get(&DataKey::EpochStart(token.clone())).unwrap_or(env.ledger().timestamp());
-        let now = env.ledger().timestamp();
-        let (new_epoch_start, epoch_withdrawn) = if now >= epoch_start.saturating_add(EPOCH_DURATION) {
-            (now, 0i128)
-        } else {
-            (epoch_start, env.storage().instance().get::<i128>(&DataKey::EpochWithdrawn(token.clone())).unwrap_or(0))
-        };
-        let new_withdrawn = epoch_withdrawn.checked_add(amount).ok_or(TreasuryError::ArithmeticOverflow)?;
-        if new_withdrawn > cap {
-            return Err(TreasuryError::WithdrawalRateLimitExceeded);
-        }
-        env.storage().instance().set(&DataKey::EpochStart(token.clone()), &new_epoch_start);
-        env.storage().instance().set(&DataKey::EpochWithdrawn(token.clone()), &new_withdrawn);
-        Ok(())
-    }
-
     fn transfer_token(env: &Env, _admin: &Address, token: &Address, recipient: &Address, amount: i128) {
         let token_client = token::Client::new(env, token);
         token_client.transfer(&env.current_contract_address(), recipient, &amount);
     }
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), TreasuryError> {
-        let admin: Address = env.storage().persistent().get(&DataKey::Admin).ok_or(TreasuryError::NotAdmin)?;
-        if *caller != admin {
-            return Err(TreasuryError::NotAdmin);
-        }
-        Ok(())
-    }
-
-    fn require_whitelisted_token(env: &Env, token: &Address) -> Result<(), TreasuryError> {
-        let whitelisted: bool = env.storage().persistent().get(&DataKey::WhitelistedToken(token.clone())).unwrap_or(false);
-        if !whitelisted {
-            return Err(TreasuryError::TokenNotWhitelisted);
-        }
-        Ok(())
-    }
-
     fn require_not_paused(env: &Env) -> Result<(), TreasuryError> {
-        if let Some(ac_addr) = env.storage().instance().get::<Address>(&DataKey::AccessControl) {
+        if let Some(ac_addr) = env.storage().instance().get::<DataKey, Address>(&DataKey::AccessControl) {
             let ac = AccessControlContractClient::new(env, &ac_addr);
             if ac.is_paused() {
                 return Err(TreasuryError::NotAdmin); // mapped from KoraError::ProtocolPaused
             }
-        }
-        Ok(())
-    }
-
-    fn require_no_quorum_required(env: &Env) -> Result<(), TreasuryError> {
-        // If access_control is linked and has multisig threshold > 1, reject direct calls
-        if let Some(ac_addr) = env.storage().instance().get::<Address>(&DataKey::AccessControl) {
-            let ac = AccessControlContractClient::new(env, &ac_addr);
-            if let Some(cfg) = ac.get_multisig_config() {
-                if cfg.threshold > 1 {
-                    return Err(TreasuryError::NotAdmin);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn require_allowed_recipient(env: &Env, recipient: &Address) -> Result<(), TreasuryError> {
-        let allowed: bool = env.storage().persistent().get(&DataKey::AllowedRecipient(recipient.clone())).unwrap_or(false);
-        if !allowed {
-            return Err(TreasuryError::NotAdmin); // RecipientNotAllowed mapped
         }
         Ok(())
     }
@@ -2552,7 +2591,7 @@ impl TreasuryContract {
             AdminActionType::SetFeeBps => "set_fee_bps",
             AdminActionType::Withdraw => "withdraw",
             AdminActionType::EmergencyWithdraw => "emergency_withdraw",
-            AdminActionType::SetReserveAllocationBps => "set_reserve_allocation_bps",
+            AdminActionType::SetReserveAllocation => "set_reserve_allocation_bps",
             AdminActionType::WhitelistToken => "whitelist_token",
             AdminActionType::ProposeWithdrawalCap => "propose_withdrawal_cap",
             AdminActionType::ExecuteWithdrawalCap => "execute_withdrawal_cap",
@@ -2561,33 +2600,11 @@ impl TreasuryContract {
             AdminActionType::ProposeRecipient => "propose_recipient",
             AdminActionType::ExecuteRecipient => "execute_recipient",
             AdminActionType::SetAccessControl => "set_access_control",
-            AdminActionType::SetMarketplace => "set_marketplace",
-            AdminActionType::SetPriceOracle => "set_price_oracle",
             AdminActionType::TreasuryProposeUpgrade => "treasury_propose_upgrade",
             AdminActionType::TreasuryExecuteUpgrade => "treasury_execute_upgrade",
             _ => "unknown_admin_action",
         };
         Self::append_audit_entry_internal(env, actor, String::from_str(&env, action_str));
-    }
-
-    fn append_audit_entry_internal(env: &Env, actor: &Address, action: String) {
-        let head: u64 = env.storage().persistent().get(&DataKey::AuditLogHead).unwrap_or(0);
-        let total: u64 = env.storage().persistent().get(&DataKey::AuditLogTotal).unwrap_or(0);
-        let entry = AuditEntry {
-            action,
-            actor: actor.clone(),
-            timestamp: env.ledger().timestamp(),
-            sequence: total + 1,
-        };
-        env.storage().persistent().set(&DataKey::AuditEntry(head), &entry);
-        env.storage().persistent().set(&DataKey::AuditLogHead, &((head + 1) % MAX_AUDIT_LOG_SIZE));
-        env.storage().persistent().set(&DataKey::AuditLogTotal, &(total + 1));
-    }
-
-    fn load_signer_config(env: &Env) -> Result<MultisigConfig, KoraError> {
-        let ac: Address = env.storage().persistent().get(&DataKey::AccessControl).ok_or(KoraError::MultisigNotConfigured)?;
-        let client = AccessControlContractClient::new(env, &ac);
-        client.get_multisig_config().ok_or(KoraError::MultisigNotConfigured)
     }
 }
 
@@ -2597,9 +2614,14 @@ impl TreasuryContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
         token, Address, Env,
     };
+
+    /// Governance timelock the treasury-action tests must advance past.
+    /// Mirrors the shared timelock default (no test overrides it).
+    const TREASURY_GOVERNANCE_TIMELOCK_DELAY: u64 =
+        kora_shared::timelock::DEFAULT_UPGRADE_DELAY;
 
     fn setup() -> (Env, Address, TreasuryContractClient<'static>) {
         let env = Env::default();
@@ -2607,7 +2629,7 @@ mod tests {
         let contract_id = env.register_contract(None, TreasuryContract);
         let client = TreasuryContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&admin, &50u32);
         (env, admin, client)
     }
 
@@ -2686,10 +2708,13 @@ mod tests {
     fn test_grant_proof_partial_release_reclaim_and_report_lifecycle() {
         let (env, admin, client) = setup();
         let treasury_id = client.address.clone();
-        let (signer_one, signer_two) = configure_grant_multisig(&env, &admin, &client);
         let recipient = Address::generate(&env);
         let token_id = deploy_token(&env, &admin, &treasury_id, 100);
         client.whitelist_token(&admin, &token_id);
+        // Register decimals before the multisig quorum is configured below:
+        // set_token_decimals is a direct admin call gated by require_no_quorum_required.
+        client.set_token_decimals(&admin, &token_id, &7u32);
+        let (signer_one, signer_two) = configure_grant_multisig(&env, &admin, &client);
         client.collect_fee(&token_id, &100i128);
 
         let mut milestones = Vec::new(&env);
@@ -2799,14 +2824,14 @@ mod tests {
         let contract_id = env.register_contract(None, TreasuryContract);
         let client = TreasuryContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        assert!(client.try_initialize(&admin).is_ok());
+        assert!(client.try_initialize(&admin, &50u32).is_ok());
         assert_eq!(client.get_fee_bps(), 50);
     }
 
     #[test]
     fn test_initialize_already_initialized() {
         let (env, admin, client) = setup();
-        let result = client.try_initialize(&admin);
+        let result = client.try_initialize(&admin, &0u32);
         assert!(result.is_err());
     }
 
@@ -2816,7 +2841,7 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register_contract(None, TreasuryContract);
         let client = TreasuryContractClient::new(&env, &contract_id);
-        let result = client.try_initialize(&contract_id);
+        let result = client.try_initialize(&contract_id, &0u32);
         assert!(result.is_err());
     }
 
@@ -2919,9 +2944,8 @@ mod tests {
 
     #[test]
     fn test_fee_rate_updated_event_reports_correct_old_fee() {
-        let (env, _admin, client) = setup();
+        let (env, admin, client) = setup();
         // With default 50, set to 75
-        let admin = Address::generate(&env);
         client.set_fee_bps(&admin, &75u32);
         assert_eq!(client.get_fee_bps(), 75);
         // Update to 100 — old must be 75

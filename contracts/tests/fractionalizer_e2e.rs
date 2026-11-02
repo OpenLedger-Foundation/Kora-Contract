@@ -87,15 +87,17 @@ mod fractionalizer_e2e {
         let investor2 = Address::generate(&env);
         let holder_a = Address::generate(&env);
         let holder_b = Address::generate(&env);
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
         let marketplace = Address::generate(&env);
         let treasury = Address::generate(&env);
 
         // 1. Deploy invoice_nft
+        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
+        kora_access_control::AccessControlContractClient::new(&env, &ac_id).initialize(&admin);
         let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
-        let ac = Address::generate(&env);
-        nft.initialize(&admin, &ac);
+        nft.initialize(&admin, &ac_id);
 
         // 2. Deploy financing_pool
         let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
@@ -108,17 +110,21 @@ mod fractionalizer_e2e {
             &nft_id,
             &risk_registry,
             &treasury,
-            &ac,
+            &ac_id,
             &200u32,    // late_penalty_bps
             &oracle,
             &10_000u32, // max_position_bps = 100% (allow full single-investor funding)
+            &0u64, // grace_period
             &dispute_resolution,
         );
+
+        // Fund the SME so repayments can transfer tokens.
+        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&sme, &100_000_000_000i128);
 
         // 3. Deploy fractionalizer
         let frac_id = env.register_contract(None, kora_fractionalizer::FractionalizerContract);
         let frac = FractionalizerContractClient::new(&env, &frac_id);
-        frac.initialize(&admin, &pool_id, &ac);
+        frac.initialize(&admin, &pool_id, &ac_id);
 
         // Wire NFT authorized callers so the pool may update invoice state
         nft.set_authorized_callers(&admin, &marketplace, &pool_id);
@@ -155,6 +161,8 @@ mod fractionalizer_e2e {
             &50u32,
             &None,
         );
+        t.nft.set_authorized_callers(&t.admin, &t.marketplace, &t.pool.address);
+        t.nft.set_listed(&t.marketplace, &invoice_id);
         t.pool.release_funds(&t.marketplace, &invoice_id, &t.token);
         invoice_id
     }
@@ -200,7 +208,7 @@ mod fractionalizer_e2e {
         // Repay invoice fully to close pool
         t.pool.repay(&t.sme, &invoice_id, &t.token, &REPAY_AMOUNT);
 
-        let pool_data = t.pool.get_pool(&invoice_id).expect("pool must exist");
+        let pool_data = t.pool.get_pool(&invoice_id);
         assert!(pool_data.is_closed, "Pool must be closed after full repayment");
         assert_eq!(pool_data.repaid_amount, REPAY_AMOUNT);
 
@@ -330,7 +338,7 @@ mod fractionalizer_e2e {
         });
         t.pool.mark_default(&t.admin, &invoice_id, &t.token);
 
-        let pool_data = t.pool.get_pool(&invoice_id).expect("pool must exist");
+        let pool_data = t.pool.get_pool(&invoice_id);
         assert!(pool_data.is_closed, "Pool must be closed after mark_default");
         // repaid_amount stays 0 after default (no repayment was made)
         assert_eq!(pool_data.repaid_amount, 0, "repaid_amount must be 0 after default");
@@ -366,7 +374,7 @@ mod fractionalizer_e2e {
         // Complete repayment closes the pool
         t.pool.repay(&t.sme, &invoice_id, &t.token, &remainder);
 
-        let pool_data = t.pool.get_pool(&invoice_id).expect("pool must exist");
+        let pool_data = t.pool.get_pool(&invoice_id);
         assert!(pool_data.is_closed, "Pool must be closed after complete repayment");
         assert_eq!(pool_data.repaid_amount, face, "Full repaid_amount must be recorded");
 
@@ -409,7 +417,7 @@ mod fractionalizer_e2e {
         // Repay fully
         t.pool.repay(&t.sme, &invoice_id, &t.token, &total);
 
-        let pool_data = t.pool.get_pool(&invoice_id).expect("pool must exist");
+        let pool_data = t.pool.get_pool(&invoice_id);
         assert!(pool_data.is_closed, "Pool must be closed");
 
         // Settle both wraps

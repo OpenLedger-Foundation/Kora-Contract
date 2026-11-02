@@ -10,6 +10,7 @@
 //! The enumeration is parameterised so CI can run it quickly (small bounds)
 //! while a longer local run uses larger bounds for deeper assurance.
 
+use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 use super::model::{
     run_partial_repay_scenario, run_scenario, run_multi_asset_scenario,
     BPS_DENOM, MAX_FACE_VALUE, MAX_INVESTORS, MIN_FACE_VALUE, TOKEN_DECIMALS, ALT_TOKEN_DECIMALS,

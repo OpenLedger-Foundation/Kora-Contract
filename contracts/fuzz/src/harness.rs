@@ -14,11 +14,13 @@ use kora_access_control::{AccessControlContract, AccessControlContractClient};
 use kora_financing_pool::{FinancingPoolContract, FinancingPoolContractClient};
 use kora_invoice_nft::{InvoiceNftContract, InvoiceNftContractClient};
 use kora_marketplace::{MarketplaceContract, MarketplaceContractClient};
+use kora_parameter_registry::{ParameterRegistryContract, ParameterRegistryContractClient};
 use kora_price_oracle::{PriceOracleContract, PriceOracleContractClient};
 use kora_risk_registry::{RiskRegistryContract, RiskRegistryContractClient};
 use kora_treasury::{TreasuryContract, TreasuryContractClient};
 
 pub mod dispute;
+pub mod pool;
 
 pub struct Protocol<'a> {
     pub env: Env,
@@ -71,6 +73,7 @@ impl Protocol<'static> {
         let treasury_id = env.register_contract(None, TreasuryContract);
         let rr_id = env.register_contract(None, RiskRegistryContract);
         let oracle_id = env.register_contract(None, PriceOracleContract);
+        let registry_id = env.register_contract(None, ParameterRegistryContract);
 
         let access_control = AccessControlContractClient::new(&env, &ac_id);
         let invoice_nft = InvoiceNftContractClient::new(&env, &nft_id);
@@ -96,11 +99,13 @@ impl Protocol<'static> {
         let _ = treasury.try_initialize(&admin, &50u32);
         let _ = treasury.try_whitelist_token(&admin, &token);
         let _ = risk_registry.try_initialize(&admin, &nft_id, &token, &1_000_000i128, &5_000u32);
+        let registry = ParameterRegistryContractClient::new(&env, &registry_id);
+        let _ = registry.try_initialize(&admin, &None);
         let _ = pool.try_initialize(
             &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &86_400u64, &Address::generate(&env),
         );
         let _ = marketplace.try_initialize(
-            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &50u32, &0u32,
+            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &registry_id, &50u32, &0u32,
         );
         let _ = marketplace.try_propose_token_whitelist(&admin, &token);
         let _ = invoice_nft.try_set_authorized_callers(&admin, &mp_id, &pool_id);

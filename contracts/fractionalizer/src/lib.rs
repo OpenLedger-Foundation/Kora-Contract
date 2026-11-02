@@ -52,6 +52,10 @@ pub struct WrapRecord {
     pub outstanding_shares: u64,
     /// The contributed amount from the underlying position
     pub contributed: i128,
+    /// The position's share in bps at wrap time (fixed snapshot; the pool
+    /// holds a single position per holder so re-reading later collides
+    /// when several investors wrap into this contract).
+    pub share_bps: u32,
     /// The pool token address
     pub token: Address,
     /// Total payout received from pool (set when pool closes)
@@ -131,6 +135,7 @@ impl FractionalizerContract {
             total_shares,
             outstanding_shares: total_shares,
             contributed: position.contributed,
+            share_bps: position.share_bps,
             token: pool.token,
             total_payout: 0,
             settled: false,
@@ -218,16 +223,13 @@ impl FractionalizerContract {
         }
 
         // The financing_pool already distributed yield to position holders.
-        // The payout this contract received = repaid_amount * (contributed / total_funded).
-        // We compute it as: repaid_amount * share_bps / 10_000 using the position's share_bps.
-        // Since we now own the position, read it back.
-        let position: Position = pool_client.get_position(&invoice_id, &env.current_contract_address());
-
-        // payout = repaid_amount * contributed / total_funded
-        // Use share_bps for precision: payout = repaid_amount * share_bps / 10_000
+        // The payout this wrap is entitled to = repaid_amount * share_bps / 10_000
+        // using the share snapshot taken at wrap time (the pool holds a single
+        // position per holder, so re-reading after several wraps collide).
+        // payout = repaid_amount * share_bps / 10_000
         let payout = pool
             .repaid_amount
-            .checked_mul(position.share_bps as i128)
+            .checked_mul(wrap.share_bps as i128)
             .and_then(|v| v.checked_div(10_000))
             .ok_or(FractionalizerError::ArithmeticOverflow)?;
 
@@ -281,26 +283,22 @@ impl FractionalizerContract {
             return Err(FractionalizerError::NotShareHolder);
         }
 
-        // Pro-rata: payout_per_share = total_payout / total_shares
-        // holder_payout = holder_shares * total_payout / total_shares
+        // Pro-rata against the REMAINING payout and REMAINING shares: each
+        // redeem shrinks both sides proportionally, so later redeemers get
+        // the same per-share value as earlier ones (no dilution).
+        // holder_payout = holder_shares * remaining_payout / outstanding_shares
         let base_payout = (wrap.total_payout as u128)
             .checked_mul(holder_shares as u128)
-            .and_then(|v| v.checked_div(wrap.total_shares as u128))
+            .and_then(|v| v.checked_div(wrap.outstanding_shares as u128))
             .ok_or(FractionalizerError::ArithmeticOverflow)? as i128;
 
-        // Dust: remaining after all integer divisions goes to first redeemer
-        // (outstanding_shares == total_shares means this is the first claim)
+        // Dust: integer division can leave up to a stroop unassigned; the last
+        // redeemer (whose shares equal all outstanding shares) takes the exact
+        // remainder so nothing is stranded.
         let is_last = wrap.outstanding_shares == holder_shares;
         let payout = if is_last {
             // Last redeemer gets whatever is left (handles dust)
             wrap.total_payout
-                .checked_sub(
-                    (wrap.total_payout as u128)
-                        .checked_mul((wrap.total_shares - holder_shares) as u128)
-                        .and_then(|v| v.checked_div(wrap.total_shares as u128))
-                        .ok_or(FractionalizerError::ArithmeticOverflow)? as i128,
-                )
-                .ok_or(FractionalizerError::ArithmeticOverflow)?
         } else {
             base_payout
         };

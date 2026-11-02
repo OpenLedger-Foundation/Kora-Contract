@@ -21,7 +21,7 @@ struct ListArgs {
 
 #[derive(Arbitrary, Debug)]
 enum Op {
-    Initialize { admin: u8, nft: u8, pool: u8, treasury: u8, ac: u8, rr: u8, fee: u32, ftag: u8 },
+    Initialize { admin: u8, nft: u8, pool: u8, treasury: u8, ac: u8, rr: u8, preg: u8, fee: u32, ftag: u8 },
     SetMinFundingBuffer { admin: u8, secs: u64, stag: u8 },
     SetReferrerSplitBps { admin: u8, bps: u32, btag: u8 },
     SetFeeBps { admin: u8, bps: u32, btag: u8, update: bool },
@@ -53,7 +53,7 @@ pub fn run(data: &[u8]) {
         let c = &p.marketplace;
         let env = &p.env;
         match op {
-            Op::Initialize { admin, nft, pool, treasury, ac, rr, fee, ftag } => {
+            Op::Initialize { admin, nft, pool, treasury, ac, rr, preg, fee, ftag } => {
                 let _ = c.try_initialize(
                     &p.actor(admin),
                     &p.actor(nft),
@@ -62,6 +62,7 @@ pub fn run(data: &[u8]) {
                     &p.actor(ac),
                     &p.price_oracle.address,
                     &p.actor(rr),
+                    &p.actor(preg),
                     &gen::small_u32(fee, ftag),
                     &0u32,
                 );
