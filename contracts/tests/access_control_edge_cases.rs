@@ -10,8 +10,9 @@
 
 #[cfg(test)]
 mod access_control_edge_cases {
-    use kora_access_control::{AccessControlContractClient, AccessControlContract, Role};
-    use kora_shared::errors::KoraError;
+    use kora_access_control::{
+        AccessControlContract, AccessControlContractClient, AccessControlError, Role,
+    };
     use soroban_sdk::{
         testutils::Address as _,
         Address, Env,
@@ -44,7 +45,7 @@ mod access_control_edge_cases {
         let target = Address::generate(&t.env);
 
         let result = t.client.try_grant_role(&t.admin, &target, &Role::Admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
     }
 
     #[test]
@@ -53,7 +54,7 @@ mod access_control_edge_cases {
         let target = Address::generate(&t.env);
 
         let result = t.client.try_grant_role(&t.admin, &target, &Role::None);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
     }
 
     #[test]
@@ -62,7 +63,7 @@ mod access_control_edge_cases {
 
         // Try to grant role to the current admin address
         let result = t.client.try_grant_role(&t.admin, &t.admin, &Role::Operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
     }
 
     #[test]
@@ -96,7 +97,7 @@ mod access_control_edge_cases {
         let target = Address::generate(&t.env);
 
         let result = t.client.try_grant_role(&non_admin, &target, &Role::Operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 
     #[test]
@@ -122,7 +123,7 @@ mod access_control_edge_cases {
 
         // User has no role assigned
         let result = t.client.try_revoke_role(&t.admin, &user);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::RoleNotAssigned);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::RoleNotAssigned);
     }
 
     #[test]
@@ -131,7 +132,7 @@ mod access_control_edge_cases {
 
         // Cannot revoke admin's own role
         let result = t.client.try_revoke_role(&t.admin, &t.admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
     }
 
     #[test]
@@ -167,7 +168,7 @@ mod access_control_edge_cases {
         t.client.grant_role(&t.admin, &operator, &Role::Operator);
 
         let result = t.client.try_revoke_role(&non_admin, &operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 
     // ── Admin Transfer Edge Cases ─────────────────────────────────────────────
@@ -175,8 +176,8 @@ mod access_control_edge_cases {
     #[test]
     fn test_cannot_transfer_admin_to_self() {
         let t = setup();
-        let result = t.client.try_propose_admin(&t.admin, &t.admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidAddress);
+        let result = t.client.try_transfer_admin(&t.admin, &t.admin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::InvalidAddress);
     }
 
     #[test]
@@ -194,8 +195,7 @@ mod access_control_edge_cases {
         let t = setup();
         let new_admin = Address::generate(&t.env);
 
-        t.client.propose_admin(&t.admin, &new_admin);
-        t.client.accept_admin(&new_admin);
+        t.client.transfer_admin(&t.admin, &new_admin);
 
         assert_eq!(t.client.get_admin(), new_admin);
         assert_eq!(t.client.get_role(&new_admin), Role::Admin);
@@ -208,8 +208,8 @@ mod access_control_edge_cases {
         let non_admin = Address::generate(&t.env);
         let new_admin = Address::generate(&t.env);
 
-        let result = t.client.try_propose_admin(&non_admin, &new_admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        let result = t.client.try_transfer_admin(&non_admin, &new_admin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 
     #[test]
@@ -218,13 +218,12 @@ mod access_control_edge_cases {
         let new_admin = Address::generate(&t.env);
         let old_admin = t.admin.clone();
 
-        t.client.propose_admin(&old_admin, &new_admin);
-        t.client.accept_admin(&new_admin);
+        t.client.transfer_admin(&old_admin, &new_admin);
 
         // Old admin cannot grant roles
         let target = Address::generate(&t.env);
         let result = t.client.try_grant_role(&old_admin, &target, &Role::Operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
 
         // New admin can grant roles
         let result = t.client.try_grant_role(&new_admin, &target, &Role::Operator);
@@ -240,8 +239,8 @@ mod access_control_edge_cases {
         t.client.grant_role(&t.admin, &operator, &Role::Operator);
 
         // Try to propose admin to that operator (must fail)
-        let result = t.client.try_propose_admin(&t.admin, &operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::Unauthorized);
+        let result = t.client.try_transfer_admin(&t.admin, &operator);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::Unauthorized);
     }
 
     #[test]
@@ -263,7 +262,7 @@ mod access_control_edge_cases {
         assert!(t.client.is_paused());
 
         let result = t.client.try_pause(&t.admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::AlreadyPaused);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::AlreadyPaused);
     }
 
     #[test]
@@ -273,7 +272,7 @@ mod access_control_edge_cases {
         assert!(!t.client.is_paused());
 
         let result = t.client.try_unpause(&t.admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotPaused);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotPaused);
     }
 
     #[test]
@@ -295,7 +294,7 @@ mod access_control_edge_cases {
         let non_admin = Address::generate(&t.env);
 
         let result = t.client.try_pause(&non_admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 
     #[test]
@@ -306,7 +305,7 @@ mod access_control_edge_cases {
         t.client.pause(&t.admin);
 
         let result = t.client.try_unpause(&non_admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 
     // ── Role Query Edge Cases ─────────────────────────────────────────────────
@@ -357,7 +356,7 @@ mod access_control_edge_cases {
 
         let new_admin = Address::generate(&t.env);
         let result = t.client.try_initialize(&new_admin);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::AlreadyInitialized);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::AlreadyInitialized);
     }
 
     #[test]
@@ -402,6 +401,6 @@ mod access_control_edge_cases {
 
         // User tries to grant role to themselves (should fail due to not being admin)
         let result = t.client.try_grant_role(&user, &user, &Role::Operator);
-        assert_eq!(result.unwrap_err().unwrap(), KoraError::NotAdmin);
+        assert_eq!(result.unwrap_err().unwrap(), AccessControlError::NotAdmin);
     }
 }
