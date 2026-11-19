@@ -92,6 +92,9 @@ build whenever you touch settlement or secondary-market logic.
 
 ### Before you touch code
 
+For incident-response work, start with the [incident response template index](incident-response-templates/README.md)
+and keep internal records separate from external-safe communications.
+
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) covers commit conventions, branching
   (`feat/<name>` off `develop`), the PR template, and the changelog process —
   read it once, it's not optional.

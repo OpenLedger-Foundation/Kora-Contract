@@ -474,6 +474,7 @@ After executing rotation:
 - `contracts/access_control/src/lib.rs` — Multi-sig rotation implementation
 - `contracts/risk_registry/src/lib.rs` — Verifier rotation implementation
 - `docs/INCIDENT_RESPONSE.md` — Emergency procedures
+- `docs/incident-response-templates/README.md` — Internal and external-safe incident messages
 - `docs/MULTISIG_OPERATIONS.md` — Day-to-day multi-sig operations
 
 ---

@@ -19,6 +19,8 @@ This document covers:
 
 The underlying pause mechanism and its enforcement matrix are defined in
 [docs/SECURITY.md](SECURITY.md) and [docs/INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md).
+Use the [incident-response templates](incident-response-templates/README.md) for
+internal and external-safe communications.
 This document adds the operational layer — tooling, runbook, and drill results —
 that makes the theory executable under pressure.
 
