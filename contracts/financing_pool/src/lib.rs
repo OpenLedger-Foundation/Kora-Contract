@@ -662,6 +662,10 @@ impl FinancingPoolContract {
     /// Returns the current treasury split for late penalties.
     ///
     /// **Returns:** BPS value (0–10 000) representing the treasury's share.
+    /// Returns the effective late-penalty rate for parameter-registry bootstrap.
+    pub fn get_late_penalty_bps(env: Env) -> u32 {
+        Self::late_penalty_bps(&env)
+    }
     pub fn get_late_penalty_split(env: Env) -> u32 {
         env.storage()
             .instance()
