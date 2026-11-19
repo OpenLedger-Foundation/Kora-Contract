@@ -1,0 +1,9 @@
+{
+  "name": "@kora/reconciler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Persistent ledger-gap reconciliation and alert delivery service",
+  "scripts": { "build": "tsc", "start": "node dist/index.js", "dev": "ts-node src/index.ts" },
+  "dependencies": { "better-sqlite3": "9.4.3", "pino": "9.1.0" },
+  "devDependencies": { "@types/better-sqlite3": "7.6.10", "@types/node": "20.12.12", "ts-node": "10.9.2", "typescript": "5.4.5" }
+}

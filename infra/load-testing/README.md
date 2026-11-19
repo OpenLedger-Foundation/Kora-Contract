@@ -68,3 +68,20 @@ When a threshold is breached, the report identifies the **bottleneck component**
 | `K6_API_KEY` | No | — | Bearer token for authenticated endpoints |
 | `K6_INDEXER_URL` | No | same as BASE_URL | Separate indexer URL if different |
 | `K6_SCENARIO` | No | `combined` | Which scenario to run |
+
+## Keeper and indexer query scenarios
+
+| Scenario | File | Purpose |
+|---|---|---|
+| Keeper metrics scrape | `scenarios/keeper-metrics-scrape.js` | Bounded concurrent GET load against keeper `/metrics`; verifies Prometheus output and p95/error thresholds. |
+| Indexer query storm | `scenarios/indexer-query-storm.js` | Exercises bounded status filters and pagination against listings without unbounded query cardinality. |
+
+Run locally against staging only:
+
+```bash
+K6_BASE_URL=http://localhost:3000 K6_KEEPER_URL=http://localhost:8080 k6 run scenarios/keeper-metrics-scrape.js
+K6_BASE_URL=http://localhost:3000 k6 run scenarios/indexer-query-storm.js --out json=results/indexer-query-storm.json
+node scripts/report.js results/indexer-query-storm.json
+```
+
+Both scenarios inherit the production guard from `lib/common.js`. They must use local or staging endpoints, never production URLs.
