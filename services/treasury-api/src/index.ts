@@ -32,7 +32,9 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse) {
     if (match) {
       const kind = match[1] === "fee-sweeps" ? "fee-sweeps" : match[1] === "grants" ? "grants" : "governance";
       if (match[2]) {
-        const row = await source.byTxHash(decodeURIComponent(match[2]));
+        const row = kind === "fee-sweeps"
+          ? await source.byTxHash(decodeURIComponent(match[2]))
+          : await source.byId(kind, decodeURIComponent(match[2]));
         return row ? json(res, 200, scrub(row)) : json(res, 404, { error: "Record not found" });
       }
       const result = await source.events(kind, url.searchParams);

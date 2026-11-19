@@ -144,4 +144,10 @@ export class TreasuryDataSource {
     const page = await this.indexer(`/events?contract=treasury&tx_hash=${encodeURIComponent(txHash)}&limit=1`);
     return (page.rows || page.data || [])[0] || null;
   }
+
+  async byId(kind: "grants" | "governance", id: string) {
+    const eventType = kind === "grants" ? "grant" : "governance";
+    const page = await this.indexer(`/events?contract=treasury&event_type=${eventType}&id=${encodeURIComponent(id)}&limit=1`);
+    return (page.rows || page.data || [])[0] || null;
+  }
 }
