@@ -17,10 +17,10 @@
  *   5. Asserts the API returns 200 with the same data as the baseline
  *      within the recovery window.
  *
- * Gap surfaced: if the API serves cached/stale data during the partition
- * and returns 200, this test will fail because the response status will be
- * 200 when we expect 5xx.  That gap should be filed as a follow-up:
- * "API must not serve stale cached data silently during DB partition."
+ * GAP-1 status: closed. The gateway now marks the store degraded, invalidates
+ * read-through cache entries, and fails data reads with 503/Retry-After until
+ * the store health check recovers. Cache-hit metrics therefore fall during
+ * the outage instead of masking the partition.
  */
 
 import {

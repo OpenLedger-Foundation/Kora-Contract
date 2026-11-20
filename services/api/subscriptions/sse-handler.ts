@@ -24,7 +24,8 @@ const KEEPALIVE_MS = 15_000;
 export function handleSseConnection(
   req: IncomingMessage,
   res: ServerResponse,
-  authenticatedAs: string | undefined
+  authenticatedAs: string | undefined,
+  health?: () => boolean,
 ): void {
   const url = new URL(req.url ?? "/", "http://localhost");
   const topic = (url.searchParams.get("topic") ?? "") as SubscriptionTopic;
@@ -65,6 +66,15 @@ export function handleSseConnection(
 
   // Keep-alive ping so proxies don't time out idle connections.
   const ping = setInterval(() => {
+    if (health && !health()) {
+      // Do not leave clients attached to a stream backed by an unavailable
+      // indexer. A reconnect lets the caller obtain a fresh cursor/state.
+      res.write(`event: degraded\ndata: ${JSON.stringify({ retryAfterSeconds: 5 })}\n\n`);
+      clearInterval(ping);
+      EventBus.instance.unsubscribe(subscriptionId);
+      res.end();
+      return;
+    }
     res.write(": ping\n\n");
   }, KEEPALIVE_MS);
 

@@ -375,6 +375,15 @@ Upgrade to v0.1.4 immediately. No user action required for existing positions.
 
 **Tool:** `scripts/triage_vulnerability.py`
 
+The local operator workflow may use the encrypted database and a configured
+GPG recipient. CI must use only the non-interactive plaintext SQLite override
+with synthetic fixture data; it must never receive the production database,
+GPG key, or production report contents. The smoke wrapper is
+`scripts/triage_vulnerability_ci_smoke.sh` and creates an ephemeral database.
+For CI-style local runs, pass `--db-path /tmp/triage.db --plain`; `init` accepts
+`--force`, duplicate report IDs fail closed, and severity/status/report IDs are
+validated before writes. All generated timestamps are UTC.
+
 **Purpose:** Log and track vulnerability reports in encrypted local database (not committed to git).
 
 **Usage:**

@@ -1,0 +1,17 @@
+name: Bounty triage smoke
+on:
+  pull_request:
+    paths:
+      - scripts/triage_vulnerability.py
+      - scripts/triage_vulnerability_ci_smoke.sh
+      - .github/workflows/bounty-triage-smoke.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run synthetic non-interactive smoke
+        run: ./scripts/triage_vulnerability_ci_smoke.sh
