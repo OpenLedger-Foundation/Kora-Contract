@@ -56,6 +56,10 @@ name = "secondary_market_fee_routing"
 path = "secondary_market_fee_routing.rs"
 
 [[test]]
+name = "price_oracle_adversarial_pack"
+path = "price_oracle_adversarial_pack.rs"
+
+[[test]]
 name = "marketplace_fx_manipulation"
 path = "marketplace_fx_manipulation.rs"
 
