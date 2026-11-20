@@ -4,7 +4,7 @@ This document outlines WASM size budgets, optimization guidelines, and the appro
 
 ## Per-Contract WASM Size Budgets
 
-Soroban enforces strict upper bounds on deployed WASM size. To avoid late-stage rework, Kora enforces committed per-contract size budgets in CI (`.github/workflows/wasm-size.yml` & `wasm-budgets.json`):
+Soroban enforces strict upper bounds on deployed WASM size. To avoid late-stage rework, Kora enforces committed per-contract size budgets in CI (the `wasm-size` job in `.github/workflows/ci.yml` running `scripts/check-wasm-size.sh` with budgets from `wasm-budgets.json`):
 
 | Contract | Size Budget | Purpose / Description |
 |---|---|---|
@@ -21,18 +21,24 @@ Soroban enforces strict upper bounds on deployed WASM size. To avoid late-stage 
 | `governance` | 120 KB (122,880 B) | Protocol upgrade proposals |
 | `governance_voting` | 120 KB (122,880 B) | Governance ballots and quorum |
 | `parameter_registry` | 120 KB (122,880 B) | Governed protocol parameters |
+| `debtor_attestation` | 120 KB (122,880 B) | Debtor PII attestation & KYB gate |
+| `secondary_market` | 120 KB (122,880 B) | Secondary position trading |
+| `referral_rewards` | 120 KB (122,880 B) | SME referral attribution & rewards |
+| `verifier_nomination` | 120 KB (122,880 B) | Verifier nomination & rotation |
+| `fractionalizer` | 120 KB (122,880 B) | Invoice position fractionalization |
+| `vesting` | 120 KB (122,880 B) | Token vesting schedule management |
 
 The JSON keys omit the `kora_` artifact prefix: `dispute_escrow` gates
 `kora_dispute_escrow.optimized.wasm`, falling back to the release `.wasm`.
-The escrow and governance limits start at the existing 120 KiB default to
-leave room for SDK overhead and contract growth. They are provisional caps,
-not measured headroom: no builds or measurements were run for #911/#912.
-Record optimized release sizes from CI before ratcheting these caps downward.
-The other limits reproduce the existing documented budgets above.
+All limits start at the 120 KiB default to leave room for SDK overhead and
+contract growth. They are provisional caps, not measured headroom — record
+optimized release sizes from CI before ratcheting caps downward.
+Non-deployable workspace crates (`shared`, `tests`, `xtask`, `fuzz`) are
+intentionally excluded; they produce no WASM artifacts.
 
 CI sets `REQUIRE_ALL_WASMS=1` for `scripts/check-wasm-size.sh` so a missing
-artifact fails independently of budget overrides. Local callers may leave it
-unset to inspect a partial build. `SIZE_THRESHOLD_BYTES` retains the separate
+artifact fails independently of budget overrides. Local callers may omit it to
+inspect a partial build. `SIZE_THRESHOLD_BYTES` controls the separate
 main-branch growth threshold in the workflow.
 
 ---

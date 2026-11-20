@@ -382,3 +382,77 @@ jobs:
 
       - name: Validate TTL keeper script
         run: ./scripts/test-ttl-keeper.sh
+
+  # ── WASM size budget gate ─────────────────────────────────────────────────
+  #
+  # Verifies that every deployable contract has a row in wasm-budgets.json
+  # and that docs/PERFORMANCE.md, config/wasm-budgets.json, and the root
+  # wasm-budgets.json stay in sync. The full build-and-check job lives in
+  # .github/workflows/wasm-size.yml; this lighter gate runs the test harness
+  # (scripts/test-wasm-size-gate.sh) to catch structural issues without
+  # requiring a complete WASM build.
+  wasm-budget-gate:
+    name: WASM budget config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify all contracts have budget rows
+        run: |
+          # Every deployable contract name must appear in wasm-budgets.json.
+          CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool \
+                     marketplace price_oracle tranche dispute_resolution dispute_escrow \
+                     governance governance_voting parameter_registry debtor_attestation \
+                     secondary_market referral_rewards verifier_nomination fractionalizer vesting"
+          failed=0
+          for c in $CONTRACTS; do
+            if ! python3 -c "import json,sys; d=json.load(open('wasm-budgets.json')); sys.exit(0 if '$c' in d['budgets'] else 1)"; then
+              echo "ERROR: Contract '$c' has no entry in wasm-budgets.json"
+              failed=1
+            fi
+            if ! python3 -c "import json,sys; d=json.load(open('config/wasm-budgets.json')); sys.exit(0 if '$c' in d['budgets'] else 1)"; then
+              echo "ERROR: Contract '$c' has no entry in config/wasm-budgets.json"
+              failed=1
+            fi
+            if ! grep -q "\`${c}\`" docs/PERFORMANCE.md; then
+              echo "ERROR: Contract '$c' has no row in docs/PERFORMANCE.md"
+              failed=1
+            fi
+            if ! grep -q "$c" scripts/check-wasm-size.sh; then
+              echo "ERROR: Contract '$c' is not in scripts/check-wasm-size.sh CONTRACTS list"
+              failed=1
+            fi
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "FAILED: One or more contracts are missing budget configuration."
+            echo "Add a row to wasm-budgets.json, config/wasm-budgets.json, docs/PERFORMANCE.md,"
+            echo "and scripts/check-wasm-size.sh for each missing contract."
+            exit 1
+          fi
+          echo "✓ All 19 contracts have budget rows in every required location."
+
+      - name: Verify root and config budget files are in sync
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          root   = json.load(open("wasm-budgets.json"))["budgets"]
+          config = json.load(open("config/wasm-budgets.json"))["budgets"]
+          drift  = []
+          for k, v in root.items():
+              if k not in config:
+                  drift.append(f"  MISSING in config/: {k}")
+              elif config[k] != v:
+                  drift.append(f"  MISMATCH for {k}: root={v}, config={config[k]}")
+          for k in config:
+              if k not in root:
+                  drift.append(f"  MISSING in root/: {k}")
+          if drift:
+              print("ERROR: wasm-budgets.json and config/wasm-budgets.json are out of sync:")
+              print("\n".join(drift))
+              sys.exit(1)
+          print(f"✓ Budget files are in sync ({len(root)} contracts).")
+          EOF
+
+      - name: Run wasm-size-gate test harness (structural checks)
+        run: ./scripts/test-wasm-size-gate.sh
