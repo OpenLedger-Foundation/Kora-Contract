@@ -2,8 +2,34 @@
   "name": "@kora/reconciler",
   "version": "1.0.0",
   "private": true,
-  "description": "Persistent ledger-gap reconciliation and alert delivery service",
-  "scripts": { "build": "tsc", "start": "node dist/index.js", "dev": "ts-node src/index.ts" },
-  "dependencies": { "better-sqlite3": "9.4.3", "pino": "9.1.0" },
-  "devDependencies": { "@types/better-sqlite3": "7.6.10", "@types/node": "20.12.12", "ts-node": "10.9.2", "typescript": "5.4.5" }
+  "description": "Kora Protocol — Ledger-gap reconciler with persistent alert queue (Closes #1094)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest --coverage --coverageThreshold='{\"global\":{\"lines\":90,\"branches\":80,\"functions\":90,\"statements\":90}}'",
+    "test:watch": "jest --watch",
+    "lint": "eslint src tests --ext .ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "9.4.3",
+    "pino": "9.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.10",
+    "@types/jest": "29.5.12",
+    "@types/node": "20.12.12",
+    "jest": "29.7.0",
+    "ts-jest": "29.1.4",
+    "typescript": "5.4.5"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testTimeout": 15000,
+    "testMatch": ["**/tests/**/*.test.ts"],
+    "collectCoverageFrom": ["src/**/*.ts", "!src/index.ts"]
+  }
 }
