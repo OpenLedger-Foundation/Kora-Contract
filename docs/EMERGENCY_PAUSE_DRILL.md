@@ -19,6 +19,11 @@ This document covers:
 
 The underlying pause mechanism and its enforcement matrix are defined in
 [docs/SECURITY.md](SECURITY.md) and [docs/INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md).
+The
+[Pause-Semantics Enforcement Matrix](SECURITY.md#pause-semantics-enforcement-matrix)
+lists exactly which entrypoints stop while paused (64 across 9 contracts), which
+critical mutators stay available, and the known repayment gap. Check it during a
+drill to confirm what users will and won't be able to do.
 Use the [incident-response templates](incident-response-templates/README.md) for
 internal and external-safe communications.
 This document adds the operational layer — tooling, runbook, and drill results —

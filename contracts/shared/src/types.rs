@@ -573,6 +573,17 @@ pub enum RegistryParamKey {
     ReserveAllocationBps,
     /// Minimum treasury balance to retain after a grant release (bps of pre-release balance).
     MinReserveRatioBps,
+    // ── Debtor attestation policy ───────────────────────────────────────────
+    /// 0 = optional, 1 = required for AAA-tier invoices.
+    DebtorAttestationAaa,
+    /// 0 = optional, 1 = required for AA-tier invoices.
+    DebtorAttestationAa,
+    /// 0 = optional, 1 = required for A-tier invoices.
+    DebtorAttestationA,
+    /// 0 = optional, 1 = required for B-tier invoices.
+    DebtorAttestationB,
+    /// 0 = optional, 1 = required for C-tier invoices.
+    DebtorAttestationC,
 }
 
 /// A single governed parameter value.

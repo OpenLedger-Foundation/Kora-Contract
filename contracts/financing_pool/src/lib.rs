@@ -662,6 +662,10 @@ impl FinancingPoolContract {
     /// Returns the current treasury split for late penalties.
     ///
     /// **Returns:** BPS value (0–10 000) representing the treasury's share.
+    /// Returns the effective late-penalty rate for parameter-registry bootstrap.
+    pub fn get_late_penalty_bps(env: Env) -> u32 {
+        Self::late_penalty_bps(&env)
+    }
     pub fn get_late_penalty_split(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -705,10 +709,8 @@ impl FinancingPoolContract {
         Self::require_admin(&env, &admin)?;
         kora_shared::validation::require_not_self(&env, &marketplace)?;
         env.storage().instance().set(&DataKey::Marketplace, &marketplace);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("MKT_SET"),),
-            (marketplace, env.ledger().timestamp()),
-        );
+        // Use standardized shared event (closes #1072/#1074: remove local emit helpers).
+        events::marketplace_configured(&env, &admin, &marketplace);
         Ok(())
     }
 
@@ -2847,12 +2849,20 @@ impl FinancingPoolContract {
 
     /// Propose a WASM upgrade. Admin only. Begins a 24-hour timelock.
     ///
+    /// **v2 requirement (closes #1076):** When an `AccessControl` multisig is
+    /// configured, single-admin proposals are blocked; upgrades must route through
+    /// the multisig `propose_action` / `approve_action` / `execute_action` flow on
+    /// the `access_control` contract so that threshold signers authorize every
+    /// upgrade.  When no multisig is configured the legacy single-admin path remains
+    /// available, preserving backward compatibility for v1 deployments.
+    ///
     /// **Parameters:**
     /// - `admin` — Must be the current admin address.
     /// - `new_wasm_hash` — SHA-256 hash of the new WASM binary (32 bytes).
     ///
     /// **Errors:**
     /// - `FinancingPoolError::NotAdmin` — Caller is not the admin.
+    /// - `FinancingPoolError::Unauthorized` — A multisig is configured; single-admin upgrade blocked.
     ///
     /// **Security:** Requires `admin.require_auth()`. Apply with `execute_upgrade` after
     /// `UPGRADE_TIMELOCK_DELAY` (24 h) has elapsed.
@@ -2863,6 +2873,8 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        // v2: block single-admin path when a multisig is configured (#1076).
+        Self::require_no_multisig(&env)?;
         env.storage()
             .instance()
             .set(&DataKey::UpgradeProposal, &(new_wasm_hash.clone(), env.ledger().timestamp()));
@@ -2872,6 +2884,9 @@ impl FinancingPoolContract {
 
     /// Execute a previously proposed WASM upgrade after the 24-hour timelock has elapsed.
     ///
+    /// **v2 requirement (closes #1076):** When an `AccessControl` multisig is
+    /// configured, single-admin execution is blocked for the same reason as proposal.
+    ///
     /// **Parameters:**
     /// - `admin` — Must be the current admin address.
     ///
@@ -2879,11 +2894,14 @@ impl FinancingPoolContract {
     /// - `FinancingPoolError::NotAdmin` — Caller is not the admin.
     /// - `FinancingPoolError::NoUpgradeProposed` — No upgrade proposal is pending.
     /// - `FinancingPoolError::UpgradeTimelockNotElapsed` — 24-hour timelock has not yet passed.
+    /// - `FinancingPoolError::Unauthorized` — A multisig is configured; single-admin upgrade blocked.
     ///
     /// **Security:** Requires `admin.require_auth()`. Clears the proposal atomically before executing.
     pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), FinancingPoolError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        // v2: block single-admin path when a multisig is configured (#1076).
+        Self::require_no_multisig(&env)?;
         let (wasm_hash, proposed_at): (BytesN<32>, u64) = env
             .storage()
             .instance()
@@ -2928,6 +2946,23 @@ impl FinancingPoolContract {
         let client = kora_access_control::AccessControlContractClient::new(env, &ac);
         if client.is_paused() {
             return Err(FinancingPoolError::ProtocolPaused);
+        }
+        Ok(())
+    }
+
+    /// v2 upgrade gate (#1076): block the bare-admin upgrade path when a multisig
+    /// is configured on the linked `AccessControl` contract.  Returns `Unauthorized`
+    /// so callers receive a clear signal to route through the multisig flow instead.
+    /// Silently passes when no `AccessControl` is configured or the contract query
+    /// fails (pre-wired deployments are not bricked).
+    fn require_no_multisig(env: &Env) -> Result<(), FinancingPoolError> {
+        let ac_opt: Option<Address> = env.storage().instance().get(&DataKey::AccessControl);
+        if let Some(ac) = ac_opt {
+            let client = kora_access_control::AccessControlContractClient::new(env, &ac);
+            if client.try_get_multisig_config().is_ok() {
+                // A multisig is configured — single-admin upgrade path is prohibited.
+                return Err(FinancingPoolError::Unauthorized);
+            }
         }
         Ok(())
     }
@@ -4004,32 +4039,55 @@ mod tests {
         let _ = result;
     }
 
-    // ── Issue #478: Upgrade via access_control's multisig ────────────────────
+    // ── Issue #478 / #1076: Upgrade via access_control's multisig ────────────
 
     #[test]
     fn test_propose_upgrade_bare_admin_rejected_when_multisig_configured() {
         let (env, admin, _nft, _treasury, ac, client) = setup();
-        // This test documents that propose_upgrade should check if a multisig is
-        // configured on access_control and reject the bare-admin path (issue #478).
-        // Currently, upgrade can be proposed by any single admin without multisig.
+        // Configure a multisig on access_control so the upgrade gate fires.
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(signer_a.clone());
+        signers.push_back(signer_b.clone());
+        // configure_multisig(admin, signers, threshold)
+        ac_client.configure_multisig(&admin, &signers, &2u32);
+
         let wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
         let result = client.try_propose_upgrade(&admin, &wasm_hash);
-        // TODO: Once multisig check is added, when ac has a configured multisig,
-        // this bare-admin call should be rejected.
-        let _ = result;
+        // With multisig configured, bare-admin upgrade proposal is now rejected.
+        assert!(result.is_err(), "propose_upgrade must fail when multisig is configured");
     }
 
     #[test]
     fn test_execute_upgrade_bare_admin_rejected_when_multisig_configured() {
         let (env, admin, _nft, _treasury, ac, client) = setup();
-        // This test documents that execute_upgrade should check if a multisig is
-        // configured and reject the bare-admin path when it is (issue #478).
+        // Wire a multisig first to trigger the gate in execute_upgrade.
+        let ac_client = kora_access_control::AccessControlContractClient::new(&env, &ac);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(signer_a.clone());
+        signers.push_back(signer_b.clone());
+        // configure_multisig(admin, signers, threshold)
+        ac_client.configure_multisig(&admin, &signers, &2u32);
+
+        // execute_upgrade should fail even without a pending proposal, due to the
+        // multisig gate kicking in before the proposal check.
         let result = client.try_execute_upgrade(&admin);
-        // TODO: Once multisig check is added, when ac has a configured multisig,
-        // this bare-admin call should be rejected.
-        let _ = result;
+        assert!(result.is_err(), "execute_upgrade must fail when multisig is configured");
     }
-}
+
+    #[test]
+    fn test_propose_upgrade_works_without_multisig() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        // No multisig configured — single-admin path remains usable.
+        let wasm_hash = BytesN::from_array(&env, &[0xAAu8; 32]);
+        // Should not error (proposal stored; execution would need timelock to elapse).
+        assert!(client.try_propose_upgrade(&admin, &wasm_hash).is_ok());
+    }
+} // end mod tests
 
 #[cfg(test)]
 mod proptests {

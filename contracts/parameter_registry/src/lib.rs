@@ -18,6 +18,7 @@
 //! | `TierFeeA` | i128 | `0` | Override fee for A risk tier. |
 //! | `TierFeeB` | i128 | `0` | Override fee for B risk tier. |
 //! | `TierFeeC` | i128 | `0` | Override fee for C risk tier. |
+//! | `DebtorAttestationAaa` … `DebtorAttestationC` | i128 | `0,0,0,1,1` | 0 optional, 1 required by risk tier. |
 //!
 //! ## Write path
 //! Parameters are written **only** through a multisig governance proposal:
@@ -51,7 +52,7 @@ use kora_shared::{
     validation::UPGRADE_TIMELOCK_DELAY,
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -226,6 +227,11 @@ impl ParameterRegistryContract {
         Self::write_param(env, admin, now, RegistryParamKey::TreasuryFeeBps, 50, 0, 10_000);
         Self::write_param(env, admin, now, RegistryParamKey::ReserveAllocationBps, 1_000, 0, 5_000);
         Self::write_param(env, admin, now, RegistryParamKey::MinReserveRatioBps, 0, 0, 10_000);
+        Self::write_param(env, admin, now, RegistryParamKey::DebtorAttestationAaa, 0, 0, 1);
+        Self::write_param(env, admin, now, RegistryParamKey::DebtorAttestationAa, 0, 0, 1);
+        Self::write_param(env, admin, now, RegistryParamKey::DebtorAttestationA, 0, 0, 1);
+        Self::write_param(env, admin, now, RegistryParamKey::DebtorAttestationB, 1, 0, 1);
+        Self::write_param(env, admin, now, RegistryParamKey::DebtorAttestationC, 1, 0, 1);
     }
 
     fn write_param(
@@ -274,6 +280,58 @@ impl ParameterRegistryContract {
         Self::apply_param_update(&env, &admin, key, value)
     }
 
+    /// Seed missing economic parameters from the live peer contracts.
+    /// The operation is idempotent: existing governed values are preserved unless
+    /// `force` is true. It is deliberately admin-only and emits one summary event.
+    pub fn bootstrap_from_live_contracts(
+        env: Env,
+        admin: Address,
+        marketplace: Address,
+        financing_pool: Address,
+        treasury: Address,
+        force: bool,
+    ) -> Result<u32, RegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let mut count = 0u32;
+        let mut checksum = Bytes::new(&env);
+        let fee: u32 = env.invoke_contract(&marketplace, &Symbol::new(&env, "get_fee_bps"), ());
+        let late_penalty: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_late_penalty_bps"), ());
+        let max_position: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_max_position_bps"), ());
+        let grace: u64 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_grace_period"), ());
+        let treasury_fee: u32 = env.invoke_contract(&treasury, &Symbol::new(&env, "get_fee_bps"), ());
+        count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::MarketplaceFeeBps, fee as i128, force, &mut checksum)?;
+        count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::LatePenaltyBps, late_penalty as i128, force, &mut checksum)?;
+        count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::MaxPositionBps, max_position as i128, force, &mut checksum)?;
+        count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::GracePeriodSecs, grace as i128, force, &mut checksum)?;
+        count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::TreasuryFeeBps, treasury_fee as i128, force, &mut checksum)?;
+        events::parameter_registry_bootstrap(&env, &admin, count, checksum);
+        Ok(count)
+    }
+
+    fn bootstrap_live_value(
+        env: &Env, admin: &Address, key: RegistryParamKey, value: i128, force: bool,
+        checksum: &mut Bytes,
+    ) -> Result<u32, RegistryError> {
+        if value < 0 { return Err(RegistryError::InvalidParameterValue); }
+        let should_write = force || env.storage().persistent().get::<_, RegistryParam>(&DataKey::Param(key.clone())).is_none();
+        if should_write {
+            let now = env.ledger().timestamp();
+            let (min, max) = Self::parameter_bounds(&key);
+            if value < min || value > max { return Err(RegistryError::ParamValueOutOfBounds); }
+            Self::write_param(env, admin, now, key, value, min, max);
+            checksum.append(&Bytes::from_slice(env, &value.to_be_bytes()));
+            Ok(1)
+        } else { Ok(0) }
+    }
+
+    fn parameter_bounds(key: &RegistryParamKey) -> (i128, i128) {
+        match key {
+            RegistryParamKey::GracePeriodSecs => (0, 90 * 86_400),
+            RegistryParamKey::MaxPositionBps => (1, 10_000),
+            _ => (0, 10_000),
+        }
+    }
     // ── Governance proposal flow ──────────────────────────────────────────────
 
     /// Step 1 — propose a parameter update.  Caller must be a multisig signer.
@@ -749,6 +807,11 @@ impl ParameterRegistryContract {
             RegistryParamKey::TreasuryFeeBps => 16,
             RegistryParamKey::ReserveAllocationBps => 17,
             RegistryParamKey::MinReserveRatioBps => 18,
+            RegistryParamKey::DebtorAttestationAaa => 19,
+            RegistryParamKey::DebtorAttestationAa => 20,
+            RegistryParamKey::DebtorAttestationA => 21,
+            RegistryParamKey::DebtorAttestationB => 22,
+            RegistryParamKey::DebtorAttestationC => 23,
         }
     }
 

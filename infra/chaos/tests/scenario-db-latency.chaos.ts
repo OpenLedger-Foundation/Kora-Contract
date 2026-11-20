@@ -26,6 +26,7 @@
 
 import {
   apiIsHealthy,
+  apiDbRead,
   apiDbReadStatus,
   waitUntil,
   sleep,
@@ -70,38 +71,33 @@ describe("Chaos: Database Latency Spike", () => {
 
       // ── 3. Assert behaviour under latency ─────────────────────────────────
       // Poll the read endpoint several times during the latency window.
-      const statusesUnderLatency: number[] = [];
+      const responsesUnderLatency: Array<{ status: number; data: unknown; retryAfter?: string }> = [];
       const pollCount = 5;
       const pollGapMs = Math.floor(config.failureDurationMs / (pollCount + 1));
 
       for (let i = 0; i < pollCount; i++) {
-        const status = await apiDbReadStatus(DB_READ_ENDPOINT);
-        statusesUnderLatency.push(status);
+        const response = await apiDbRead(DB_READ_ENDPOINT);
+        responsesUnderLatency.push(response);
         logger.info(
-          { attempt: i + 1, status },
+          { attempt: i + 1, status: response.status },
           "chaos[db-latency]: probe under latency",
         );
         await sleep(pollGapMs);
       }
 
       // Every response must be either a successful 200 (if the query completed
-      // within the API's timeout) or a 4xx/5xx/0 (timeout/service unavailable).
-      // A response of 200 with stale data that should not exist is not
-      // distinguishable at the HTTP layer without payload inspection — so we
-      // assert the API does not hang (0) indefinitely, meaning the test itself
-      // would time out (surfacing a gap).
-      for (const status of statusesUnderLatency) {
-        // 0 means the axios client timed out waiting for a response.
-        // This surfaces the gap: the API is not returning 503 on DB timeout.
-        if (status === 0) {
-          logger.warn(
-            "GAP DETECTED: API client timed out waiting for DB response under latency. " +
-              "The API should return 503 with a Retry-After header rather than hanging. " +
-              "Follow-up: configure DB connection pool statement_timeout and pool checkout timeout.",
-          );
+      // within the API's timeout) or a structured service error. A client-side
+      // timeout (0) is a failure: the DB pool should cancel the statement and
+      // map SQLSTATE 57014 to HTTP 503 with code DB_TIMEOUT.
+      for (const response of responsesUnderLatency) {
+        if (response.status === 0) {
+          logger.error({ statementTimeoutMs: config.dbStatementTimeoutMs }, "DB_TIMEOUT gap: API client timed out before the database statement was cancelled");
         }
-        // Valid responses: 200 (query completed) or 4xx/5xx (API surfaced error).
-        expect([0, 200, 503, 504, 408].includes(status) || status >= 400).toBe(true);
+        expect(response.status === 200 || response.status >= 400).toBe(true);
+        if (response.status === 503) {
+          expect((response.data as { code?: string })?.code).toBe("DB_TIMEOUT");
+          expect(response.retryAfter).toBeDefined();
+        }
       }
 
       // ── 4. Remove latency and verify recovery ─────────────────────────────

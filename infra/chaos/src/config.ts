@@ -11,6 +11,7 @@
 
 import * as dotenv from "dotenv";
 dotenv.config({ path: __dirname + "/../.env.chaos" });
+import { positiveMilliseconds } from "./dbTimeout";
 
 function env(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
@@ -63,6 +64,9 @@ export const config = {
 
   /** Artificial DB latency in milliseconds injected via tc-netem. */
   dbLatencyMs: parseInt(env("CHAOS_DB_LATENCY_MS", "2000"), 10),
+
+  /** API PostgreSQL statement timeout; invalid zero/negative values fail startup. */
+  dbStatementTimeoutMs: positiveMilliseconds("DB_STATEMENT_TIMEOUT_MS", "5000"),
 
   /**
    * Name of the mock Stellar RPC container that the indexer talks to.

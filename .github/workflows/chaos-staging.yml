@@ -1,0 +1,92 @@
+name: Staging chaos suite
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/chaos/**'
+      - 'services/api/gateway/**'
+      - 'services/reconciler/**'
+      - '.github/workflows/chaos-staging.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chaos-staging-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  COMPOSE_FILE: infra/blue-green/docker-compose.yml
+  CHAOS_ENV: staging
+  CHAOS_API_URL: http://localhost:80
+  CHAOS_INDEXER_ADMIN_URL: http://localhost:8081
+  CHAOS_KEEPER_ADMIN_URL: http://localhost:8080
+  CHAOS_DOCKER_PROJECT: kora-staging
+  CHAOS_DB_CONTAINER: kora-postgres
+  CHAOS_INDEXER_CONTAINER: kora-indexer-blue
+  CHAOS_API_CONTAINER: kora-api-blue
+  CHAOS_RECONCILER_ALERT_LAG_MS: 15000
+  DB_STATEMENT_TIMEOUT_MS: 5000
+
+jobs:
+  services-image-build:
+    name: prepare staging service images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate staging compose configuration
+        env:
+          DATABASE_URL: ${{ secrets.CHAOS_DATABASE_URL || 'postgres://kora:kora@localhost:5432/kora' }}
+          STELLAR_RPC_URL: ${{ vars.CHAOS_STELLAR_RPC_URL || 'http://localhost:8000' }}
+          STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015'
+        run: docker compose -p kora-staging -f "$COMPOSE_FILE" config --quiet
+      - name: Pull staging service images
+        run: docker compose -p kora-staging -f "$COMPOSE_FILE" pull --ignore-pull-failures
+
+  chaos-staging:
+    name: run staging chaos scenarios
+    needs: services-image-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    continue-on-error: ${{ vars.CHAOS_REQUIRED != 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: infra/chaos/package-lock.json
+      - name: Install chaos harness dependencies
+        working-directory: infra/chaos
+        run: npm ci
+      - name: Start staging composition
+        env:
+          DATABASE_URL: ${{ secrets.CHAOS_DATABASE_URL || 'postgres://kora:kora@localhost:5432/kora' }}
+          STELLAR_RPC_URL: ${{ vars.CHAOS_STELLAR_RPC_URL || 'http://localhost:8000' }}
+          STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015'
+        run: docker compose -p kora-staging -f "$COMPOSE_FILE" up -d
+      - name: Wait for health probes
+        run: |
+          for attempt in $(seq 1 24); do
+            if curl --fail --silent http://localhost:80/health && curl --fail --silent http://localhost:8081/health; then exit 0; fi
+            sleep 5
+          done
+          docker compose -p kora-staging -f "$COMPOSE_FILE" ps
+          exit 1
+      - name: Run chaos suite and write summary
+        working-directory: infra/chaos
+        run: |
+          mkdir -p results
+          npm test -- --runInBand 2>&1 | tee results/chaos-summary.txt
+      - name: Upload chaos summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-staging-${{ github.run_id }}
+          path: infra/chaos/results/chaos-summary.txt
+          if-no-files-found: warn
+      - name: Tear down staging composition
+        if: always()
+        run: docker compose -p kora-staging -f "$COMPOSE_FILE" down -v

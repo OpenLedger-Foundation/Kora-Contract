@@ -125,6 +125,26 @@ Where:
 | `RISK_DEBTOR_SCORE_SET` | debtor_score_set | (verifier, debtor_hash, score, timestamp) | Debtor score set |
 | `RISK_REGISTRY_INIT` | registry_initialized | (admin, invoice_nft) | Contract initialized |
 
+#### Counter increment events (#1079, AUDIT_LOG RR-01)
+
+Every counter that risk_registry increments emits exactly **one** event in the same
+call, so indexers can rebuild risk aggregates from the event log. The on-chain topic
+is the second `SCHEMA_V` topic for shared events, and the first topic for raw events.
+
+| Counter | Entrypoint | On-chain topic | Payload |
+|---|---|---|---|
+| `SmeProfile.total_invoices` | `increment_invoice_count` | `SME_INV` | (sme, new_total, timestamp) |
+| `SmeProfile.defaults` and `DefaultCountTier(tier)` | `record_default` | `SME_DFT` | (admin, sme, new_total_defaults, timestamp) |
+| `TotalScoredCountTier(tier)` | `register_sme` | `SME_REG` | (verifier, sme, risk_score, timestamp); the tier is derived from `risk_score` |
+| `DisputeCount(verifier)` | `raise_dispute` | `DSP_RAIS` (raw) | topics `(DSP_RAIS, verifier, subject)`, data `challenger` |
+
+If an increment would overflow, the call fails with `ArithmeticOverflow`. Soroban
+discards the events and storage writes of a failed invocation, so no event
+dangles. Before this change `raise_dispute` panicked on overflow; it now returns
+the typed error. All of this is pinned by
+`contracts/tests/risk_registry_counter_events.rs`, which fails if any of these
+emissions is removed.
+
 ### Access Control Contract (AC_*)
 
 | Topic | Function | Payload | Description |

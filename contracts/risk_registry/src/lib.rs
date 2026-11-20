@@ -210,6 +210,10 @@ pub enum DataKey {
     BreakerMinSampleSize,
     PausedForDebtor(Bytes),
     PausedForTier(soroban_sdk::Symbol),
+    // ── Authorized caller registry (Issue #1078) ──────────────────────────────
+    /// Contracts/keepers allowed to call the system score mutators
+    /// (`increment_invoice_count`, `record_default`, `record_successful_repayment`).
+    AuthorizedCaller(Address),
 }
 
 // ── Verifier rotation lifecycle (Issue #739) ─────────────────────────────────
@@ -1272,14 +1276,17 @@ impl RiskRegistryContract {
     /// - `RiskRegistryError::SMENotRegistered` — SME has not been registered.
     /// - `RiskRegistryError::ArithmeticOverflow` — Invoice count overflowed (extremely unlikely).
     ///
-    /// **Security:** Requires `caller.require_auth()`. Only `invoice_nft` may call this.
+    /// **Security:** Requires `caller.require_auth()`. Only the `invoice_nft`
+    /// contract or an authorized caller (Issue #1078) may call this.
     pub fn increment_invoice_count(
         env: Env,
         caller: Address,
         sme: Address,
     ) -> Result<(), RiskRegistryError> {
         caller.require_auth();
-        Self::require_invoice_nft(&env, &caller)?;
+        if Self::require_invoice_nft(&env, &caller).is_err() {
+            Self::require_registered_caller(&env, &caller)?;
+        }
 
         let mut profile: SmeProfile = env
             .storage()
@@ -1320,7 +1327,11 @@ impl RiskRegistryContract {
     /// Emits `sme_default_recorded` event.
     pub fn record_default(env: Env, admin: Address, sme: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
-        Self::require_admin(&env, &admin)?;
+        // Issue #1078: the admin or an authorized caller (e.g. financing_pool).
+        match Self::require_admin(&env, &admin) {
+            Err(RiskRegistryError::NotAdmin) => Self::require_registered_caller(&env, &admin)?,
+            other => other?,
+        }
         Self::require_not_paused(&env)?;
         let _guard = ReentrancyGuard::new(&env)?;
 
@@ -1442,7 +1453,11 @@ impl RiskRegistryContract {
     /// **Security:** Requires `admin.require_auth()`. Reputation is capped at 100.
     pub fn record_successful_repayment(env: Env, admin: Address, sme: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
-        Self::require_admin(&env, &admin)?;
+        // Issue #1078: the admin or an authorized caller (e.g. financing_pool).
+        match Self::require_admin(&env, &admin) {
+            Err(RiskRegistryError::NotAdmin) => Self::require_registered_caller(&env, &admin)?,
+            other => other?,
+        }
         Self::require_not_paused(&env)?;
 
         let profile: SmeProfile = env
@@ -1804,6 +1819,52 @@ impl RiskRegistryContract {
             .ok_or(RiskRegistryError::NotInitialized)
     }
 
+    // ── Authorized caller registry (Issue #1078) ──────────────────────────────
+
+    /// Allow `caller` (a contract such as financing_pool, or a keeper) to call the
+    /// system score mutators: `increment_invoice_count`, `record_default` and
+    /// `record_successful_repayment`. Admin only; blocked while the protocol is paused.
+    ///
+    /// **Errors:** `NotAdmin`, `ProtocolPaused`, `InvalidAddress` (the registry itself).
+    /// Emits `(RR_CALLR, caller)` with data `true`.
+    pub fn add_authorized_caller(env: Env, admin: Address, caller: Address) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        Self::require_not_paused(&env)?;
+        kora_shared::validation::require_not_self(&env, &caller)?;
+
+        let key = DataKey::AuthorizedCaller(caller.clone());
+        env.storage().persistent().set(&key, &true);
+        Self::bump_persistent(&env, &key);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("RR_CALLR"), caller), true);
+        Ok(())
+    }
+
+    /// Revoke `caller`. Admin only. Intentionally allowed while paused so a
+    /// compromised integration can be cut off during an incident; later calls
+    /// from the revoked caller fail with `Unauthorized`.
+    /// Emits `(RR_CALLR, caller)` with data `false`.
+    pub fn remove_authorized_caller(env: Env, admin: Address, caller: Address) -> Result<(), RiskRegistryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AuthorizedCaller(caller.clone()));
+        env.events()
+            .publish((soroban_sdk::symbol_short!("RR_CALLR"), caller), false);
+        Ok(())
+    }
+
+    /// Whether `caller` is on the authorized caller registry. Read-only.
+    pub fn is_authorized_caller(env: Env, caller: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AuthorizedCaller(caller))
+            .unwrap_or(false)
+    }
+
     // ── Upgrade ────────────────────────────────────────────────────────────────
 
     /// Propose a WASM upgrade. Admin only. Begins a 24-hour timelock.
@@ -1954,6 +2015,17 @@ impl RiskRegistryContract {
             .get(&DataKey::DisputeWindow)
             .ok_or(RiskRegistryError::SlashingNotConfigured)?;
 
+        // Compute the new counter before any write so an overflow returns a
+        // typed error instead of panicking (#1079).
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeCount(verifier.clone()))
+            .unwrap_or(0);
+        let new_count = count
+            .checked_add(1)
+            .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+
         let dispute = Dispute {
             subject: subject.clone(),
             challenger: challenger.clone(),
@@ -1965,14 +2037,9 @@ impl RiskRegistryContract {
             .persistent()
             .set(&DataKey::ActiveDispute(verifier.clone(), subject.clone()), &dispute);
 
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DisputeCount(verifier.clone()))
-            .unwrap_or(0);
         env.storage()
             .persistent()
-            .set(&DataKey::DisputeCount(verifier.clone()), &(count.checked_add(1).unwrap()));
+            .set(&DataKey::DisputeCount(verifier.clone()), &new_count);
 
         let new_locked = raised_at + dispute_window;
         if new_locked > bond.locked_until {
@@ -2314,6 +2381,16 @@ impl RiskRegistryContract {
             return Err(RiskRegistryError::VerifierSuspended);
         }
         Ok(())
+    }
+
+    /// Issue #1078: caller must be on the authorized caller registry
+    /// (`DataKey::AuthorizedCaller`); otherwise `Unauthorized`.
+    fn require_registered_caller(env: &Env, caller: &Address) -> Result<(), RiskRegistryError> {
+        if Self::is_authorized_caller(env.clone(), caller.clone()) {
+            Ok(())
+        } else {
+            Err(RiskRegistryError::Unauthorized)
+        }
     }
 
     fn require_invoice_nft(env: &Env, caller: &Address) -> Result<(), RiskRegistryError> {

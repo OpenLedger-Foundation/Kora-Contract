@@ -1173,6 +1173,17 @@ pub fn audit_checkpoint(
     );
 }
 
+/// Emitted when the authorized marketplace address is set or updated on the
+/// financing pool. Standardized replacement for the former local `MKT_SET` publish.
+/// Schema: (actor=admin, marketplace, timestamp)
+pub fn marketplace_configured(env: &Env, admin: &Address, marketplace: &Address) {
+    emit(
+        env,
+        symbol_short!("MKT_SET"),
+        (admin.clone(), marketplace.clone(), env.ledger().timestamp()),
+    );
+}
+
 // ── PositionShare Events (#563) ────────────────────────────────────────────────
 
 /// Schema: (invoice_id, original_investor, share_index, amount, new_owner, timestamp)

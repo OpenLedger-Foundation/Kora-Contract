@@ -131,9 +131,9 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `update_sme_score` | **Verifier** | Verifier-of-record only | Reentrancy guarded |
 | `set_credit_limit` | **Verifier** | Verifier-of-record only | Non-negative aggregate limit |
 | `reassign_sme_verifier` | **Admin** | New verifier must be active | Audited reassignment |
-| `increment_invoice_count` | **InvoiceNft Contract** | Caller must be registered invoice_nft address | Cross-contract |
-| `record_default` | **Admin** | Reentrancy guarded | Slashes stake; may trip breaker |
-| `record_successful_repayment` | **Admin** | Caps reputation at 100 | |
+| `increment_invoice_count` | **InvoiceNft Contract** or **AuthorizedCaller** | Registered invoice_nft address or authorized caller registry; otherwise `Unauthorized` | Cross-contract (#1078) |
+| `record_default` | **Admin** or **AuthorizedCaller** | Reentrancy guarded; unknown caller → `Unauthorized`; protocol pause applies | Slashes stake; may trip breaker (#1078) |
+| `record_successful_repayment` | **Admin** or **AuthorizedCaller** | Caps reputation at 100; unknown caller → `Unauthorized`; protocol pause applies | (#1078) |
 | `set_debtor_score` | **Verifier** | Active verifier; 1h cooldown; max 50 attestors | 32-byte debtor hash |
 | `get_sme_profile` | Permissionless | Read-only | |
 | `is_verified_sme` | Permissionless | Read-only | |
@@ -150,6 +150,9 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `get_min_debtor_score` | Permissionless | Read-only | |
 | `is_debtor_verified` | Permissionless | Read-only | Gate check vs average attestation |
 | `get_admin` | Permissionless | Read-only | |
+| `add_authorized_caller` | **Admin** | Blocked while protocol paused; rejects self address | Grants system-mutator access (#1078) |
+| `remove_authorized_caller` | **Admin** | Allowed while paused (incident response) | Revokes immediately (#1078) |
+| `is_authorized_caller` | Permissionless | Read-only | Authorized caller registry lookup (#1078) |
 | `propose_upgrade` | **Admin** | 24h timelock proposal | WASM hash staging |
 | `execute_upgrade` | **Admin** | Timelock elapsed | Applies WASM upgrade |
 | `get_audit_log` | Permissionless | Read-only | Paged, newest first |
