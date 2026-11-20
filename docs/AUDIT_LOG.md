@@ -270,7 +270,10 @@ Source: doc-block removed after remediation (commit `3074b19`).
 `increment_invoice_count` updated `SmeProfile.total_invoices` in persistent storage without
 emitting any event. Indexers watching the event log would miss the state change, making
 audit trails incomplete. Fixed by adding an `events::sme_invoice_count_incremented` call
-immediately after the storage write.
+immediately after the storage write. The remaining counter increment sites
+(`record_default`, `register_sme`, `raise_dispute`) were audited in #1079. Each emits
+exactly one event, and `contracts/tests/risk_registry_counter_events.rs` pins every one
+(see `docs/EVENTS.md` → *Counter increment events*).
 
 **RR-02 — Wrong error variant for empty debtor hash.**
 `set_debtor_score` validated that `debtor_hash` was non-empty but returned

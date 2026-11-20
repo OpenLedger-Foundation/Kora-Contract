@@ -1954,6 +1954,17 @@ impl RiskRegistryContract {
             .get(&DataKey::DisputeWindow)
             .ok_or(RiskRegistryError::SlashingNotConfigured)?;
 
+        // Compute the new counter before any write so an overflow returns a
+        // typed error instead of panicking (#1079).
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeCount(verifier.clone()))
+            .unwrap_or(0);
+        let new_count = count
+            .checked_add(1)
+            .ok_or(RiskRegistryError::ArithmeticOverflow)?;
+
         let dispute = Dispute {
             subject: subject.clone(),
             challenger: challenger.clone(),
@@ -1965,14 +1976,9 @@ impl RiskRegistryContract {
             .persistent()
             .set(&DataKey::ActiveDispute(verifier.clone(), subject.clone()), &dispute);
 
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::DisputeCount(verifier.clone()))
-            .unwrap_or(0);
         env.storage()
             .persistent()
-            .set(&DataKey::DisputeCount(verifier.clone()), &(count.checked_add(1).unwrap()));
+            .set(&DataKey::DisputeCount(verifier.clone()), &new_count);
 
         let new_locked = raised_at + dispute_window;
         if new_locked > bond.locked_until {
