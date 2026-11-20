@@ -55,6 +55,20 @@ Binary seeds live in `contracts/fuzz/corpus/dispute_resolution/`:
   adjudication expires at exactly seven days and timeout refund becomes valid.
 - `pause-and-config`: paused opening, signer removal/reinstatement, repeated
   initialization, and unknown-invoice operations.
+- `outsider-claim-blocked`: outsider (actor 3) attempts `resolve_dispute` on an
+  open escrow with full auth and again with empty auth; both must fail with
+  `Unauthorized` and a raw Soroban auth error respectively. Timeout by outsider
+  is permissionless and returns `TimeoutNotReached` (not a finding).
+- `outsider-resolve-blocked`: outsider attempts `resolve_dispute` on an open
+  resolution dispute; must fail with `NotGovernance` (auth) or a raw Soroban auth
+  error (no auth). No fund movement occurs.
+- `empty-auth-escrow`: escrow open attempted with bit-7 set (empty auth) for
+  both the payer and investor actors; both must produce raw Soroban auth errors
+  before any storage write. A subsequent authenticated open succeeds, confirming
+  the escrow contract state is clean after rejected calls.
+- `paused-outsider-resolution`: protocol paused, then outsider attempts to open a
+  resolution dispute with and without auth; `ProtocolPaused` beats the outsider
+  role check only when auth is present. Unpause restores normal operation.
 
 The normal `kora-fuzz` tests replay these seeds and 32 deterministic random
 walks. The ignored smoke test adds `FUZZ_ITERS` walks (default 10,000).
@@ -68,6 +82,24 @@ cargo +nightly fuzz run fuzz_dispute_resolution ../corpus/dispute_resolution
 ```
 
 ## Coverage gaps and validation status
+
+### Covered (as of #1080)
+
+- **Outsider cannot call `resolve_dispute` on escrow**: `outsider-claim-blocked`
+  asserts `Unauthorized` on authenticated outsider attempt and a Soroban auth
+  error on unauthenticated attempt. Balance conservation invariant confirms no
+  fund movement in either case.
+- **Outsider cannot call `resolve_dispute` on resolution**: `outsider-resolve-blocked`
+  asserts `NotGovernance` on authenticated outsider attempt and a Soroban auth
+  error on unauthenticated attempt.
+- **Empty auth (bit-7 set) on escrow open**: `empty-auth-escrow` exercises both
+  payer and investor actors with no-auth; both must produce raw Soroban auth errors
+  before any storage write. The model confirms the escrow slot remains `None`.
+- **Paused-protocol interaction with outsider**: `paused-outsider-resolution`
+  confirms error ordering — `ProtocolPaused` precedes the outsider role check
+  when auth is present; raw auth error when auth is absent.
+
+### Remaining gaps
 
 - Resolution has `open_dispute`, `submit_evidence`, and `resolve_dispute`;
   there is no `challenge` or `withdraw` entry point. Evidence supplies the
