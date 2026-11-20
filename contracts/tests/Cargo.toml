@@ -73,6 +73,10 @@ name = "timelock_bypass_regression"
 path = "timelock_bypass_regression.rs"
 
 [[test]]
+name = "risk_registry_counter_events"
+path = "risk_registry_counter_events.rs"
+
+[[test]]
 name = "multisig_threshold_manipulation"
 path = "multisig_threshold_manipulation.rs"
 
