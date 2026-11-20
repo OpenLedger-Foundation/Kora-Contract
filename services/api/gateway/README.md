@@ -67,3 +67,13 @@ npm test   # 90% line/branch/function/statement coverage enforced
 
 Covers pagination correctness, filter combinations, rate-limit enforcement and
 reset.
+
+## Database timeout policy
+
+API database adapters must run `configureDbSession()` after acquiring a pooled PostgreSQL connection. The helper issues `SET statement_timeout = ...` using `DB_STATEMENT_TIMEOUT_MS`, which defaults to 5000 ms and rejects zero, negative, or non-integer values at startup. PostgreSQL SQLSTATE `57014` is mapped by `mapDbError()` to HTTP 503 with this body:
+
+```json
+{"code":"DB_TIMEOUT","message":"Database operation timed out; retry the request","retryable":true}
+```
+
+The HTTP adapter should also send `Retry-After` using the returned `retryAfterSeconds` value. Reporting routes that intentionally run longer must use a separately configured pool or an explicit role with a documented timeout exemption; the API pool should never be globally relaxed for exports.

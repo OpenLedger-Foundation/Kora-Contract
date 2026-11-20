@@ -248,11 +248,20 @@ export async function apiIsHealthy(): Promise<boolean> {
  * is healed it must serve correct data again (no stale cache masking errors).
  */
 export async function apiDbReadStatus(path: string): Promise<number> {
+  return (await apiDbRead(path)).status;
+}
+
+/** Probe a DB-backed API read while retaining structured error details. */
+export async function apiDbRead(path: string): Promise<{
+  status: number;
+  data: unknown;
+  retryAfter?: string;
+}> {
   try {
     const res = await api.get(path);
-    return res.status;
+    return { status: res.status, data: res.data, retryAfter: res.headers["retry-after"] };
   } catch {
-    return 0; // network-level failure
+    return { status: 0, data: null };
   }
 }
 

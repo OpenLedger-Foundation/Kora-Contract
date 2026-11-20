@@ -127,6 +127,9 @@ async function main(): Promise<void> {
         "# HELP kora_keeper_ttl_scan_errors_total Failed active-listing TTL scans.",
         "# TYPE kora_keeper_ttl_scan_errors_total counter",
         `kora_keeper_ttl_scan_errors_total ${ttlKeeper.getMetrics().errors}`,
+        "# HELP kora_keeper_metrics_scrape_ready Whether the keeper metrics endpoint is serving.",
+        "# TYPE kora_keeper_metrics_scrape_ready gauge",
+        "kora_keeper_metrics_scrape_ready 1",
       ];
       res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
       res.end(`${metrics.join("\n")}\n`);

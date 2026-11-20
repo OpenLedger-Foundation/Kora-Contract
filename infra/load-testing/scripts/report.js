@@ -107,6 +107,10 @@ printMetric("http_req_failed",   "HTTP Error Rate");
 printMetric("fund_contribution_duration", "Fund Contribution Duration");
 printMetric("listing_load_time", "Listing Load Time");
 printMetric("sse_connect_time",  "SSE Connect Time");
+printMetric("keeper_metrics_scrape_duration", "Keeper Metrics Scrape Duration");
+printMetric("keeper_metrics_scrape_success", "Keeper Metrics Scrape Success");
+printMetric("indexer_query_duration", "Indexer Query Duration");
+printMetric("indexer_query_success", "Indexer Query Success");
 
 // ── Bottleneck Attribution ────────────────────────────────────────────────────
 

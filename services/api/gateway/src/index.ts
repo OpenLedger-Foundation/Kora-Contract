@@ -8,3 +8,4 @@ export * from "./types";
 export * from "./store";
 export * from "./rateLimiter";
 export * from "./gateway";
+export * from "./dbTimeout";

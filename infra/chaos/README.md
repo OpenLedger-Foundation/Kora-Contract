@@ -26,12 +26,12 @@ resilience behaviours claimed by other issues in this wave.
 | Scenario | Status | Notes |
 |---|---|---|
 | RPC outage | PASS | Checkpoint resumed at correct ledger; event count monotonically non-decreasing |
-| DB latency | PASS w/ GAP | API returns 503 under sustained latency. **GAP-2**: connection pool does not set `statement_timeout` — API can hang up to 30 s before timing out (see gap below) |
+| DB latency | PASS | API returns 503 with `DB_TIMEOUT` under sustained latency; positive `DB_STATEMENT_TIMEOUT_MS` is enforced |
 | Keeper crash | PASS | No duplicate dedup_keys in done set; in_flight drained to 0 after restart |
 | Network partition | **FAIL / GAP-1** | API serves stale 200 from read-through cache for ~8 s after partition (see gap below) |
 | Indexer checkpointing | PASS | Post-SIGKILL restart begins at persisted checkpoint ≥ pre-crash value; monotonicity holds across 3 rapid restart cycles |
 | Reconciliation alerting — gap→alert | PASS | Alert fired within 15 s lag window; gaps-detected counter incremented; pending alert queue non-empty |
-| Reconciliation alerting — buffering | **FAIL / GAP-3** | Alert queue empty while sink is down — alerts dropped rather than buffered (see GAP-3 below) |
+| Reconciliation alerting — buffering | PASS | SQLite-backed queue retains alerts during sink outages and drains after acknowledgement |
 
 ---
 
@@ -48,17 +48,17 @@ resilience behaviours claimed by other issues in this wave.
   or disable the cache layer entirely during detected DB unavailability.
 - **Priority:** High — affects data integrity guarantees during incidents.
 
-### GAP-2 — DB connection pool lacks `statement_timeout` (db-latency scenario)
+### GAP-2 — DB connection pool lacks `statement_timeout` (resolved)
 
 - **What happened:** Under 2 s round-trip latency, some API requests hang for
   up to 30 s rather than returning a 503 with `Retry-After`.
 - **Impact:** Client-facing timeouts surface as HTTP client errors rather than
   clean 503 responses with retry guidance.
-- **Proposed fix:** Set `statement_timeout = 5000` on the DB pool and map the
-  timeout error to a 503 in the API middleware.
+- **Resolution:** `services/api/gateway/src/dbTimeout.ts` configures the session
+  timeout and maps SQLSTATE `57014` to a structured 503 `DB_TIMEOUT` response.
 - **Priority:** Medium.
 
-### GAP-3 — Reconciler drops alerts when alert sink is unavailable (reconciliation-alerting scenario)
+### GAP-3 — Reconciler drops alerts when alert sink is unavailable (resolved)
 
 - **What happened:** When the alert sink container is paused, the reconciler's
   alert queue depth stays at 0 — alerts created during the outage are silently
@@ -67,10 +67,9 @@ resilience behaviours claimed by other issues in this wave.
 - **Impact:** Operators receive no notification of ledger gaps that occurred
   during an alerting channel outage, defeating the reconciler's purpose during
   the most critical failure window (when both a gap and a sink outage coincide).
-- **Proposed fix:** Implement a persistent alert queue (e.g. a SQLite/Postgres
-  `pending_alerts` table) in the reconciler.  On each scan cycle, undelivered
-  alerts are retried with exponential back-off.  Only mark an alert "delivered"
-  after the sink acknowledges receipt (HTTP 2xx or message-queue ack).
+- **Resolution:** `services/reconciler` persists `pending_alerts` in SQLite,
+  retries with exponential back-off, and removes an alert only after a 2xx sink
+  acknowledgement. The admin endpoints expose queue depth and pending records.
 - **Priority:** High — this is a single point of failure in the observability stack.
 
 ---
@@ -146,6 +145,10 @@ src/
   probes.ts     — service health and state observation via HTTP (indexer, keeper, API,
                   reconciler status, alert queue)
   logger.ts     — structured logger (pino)
+
+services/reconciler/
+  src/queue.ts  — durable SQLite pending-alert queue
+  src/index.ts  — gap scan, sink delivery, and admin endpoints
 ```
 
 Each scenario follows the same structure:
@@ -167,3 +170,9 @@ Each scenario follows the same structure:
 | Network partition | Last two poll responses during partition are not 200; `apiIsHealthy()` returns true post-reconnect |
 | Indexer checkpointing | `postCheckpoint >= precrashCheckpoint`; checkpoint monotone across rapid cycles |
 | Reconciliation alerting | Alert fired within `CHAOS_RECONCILER_ALERT_LAG_MS`; `alertsFired > preAlertsFired`; queue drained after sink recovery |
+
+## GAP-2 resolution: database statement timeout
+
+The API pool policy now uses `DB_STATEMENT_TIMEOUT_MS=5000` by default. SQLSTATE `57014` is translated to HTTP 503 with `{ "code": "DB_TIMEOUT" }` and a retry hint. Set a positive integer override only for staging diagnostics; zero, negative, and non-integer values are rejected during chaos configuration startup. Long-running reporting exports must use a separate pool or role with an explicit, reviewed timeout policy.
+
+The database-latency scenario no longer accepts an HTTP client timeout (`status 0`) as a valid outcome: slow statements must complete or return a service error before the client deadline.
