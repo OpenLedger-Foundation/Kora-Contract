@@ -902,6 +902,7 @@ dependencies = [
  "kora-shared",
  "kora-treasury",
  "kora-vesting",
+ "proptest",
  "soroban-sdk",
 ]
 

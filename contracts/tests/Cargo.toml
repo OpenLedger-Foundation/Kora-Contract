@@ -113,6 +113,10 @@ path = "risk_registry_authorized_callers.rs"
 name = "fractionalizer_e2e"
 path = "fractionalizer_e2e.rs"
 
+[[test]]
+name = "marketplace_fee_property"
+path = "marketplace_fee_property.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
@@ -131,3 +135,4 @@ kora-vesting = { path = "../vesting" }
 kora-dispute-escrow = { path = "../dispute_escrow" }
 kora-dispute-resolution = { path = "../dispute_resolution" }
 kora-governance-voting = { path = "../governance_voting" }
+proptest = "1.4"
