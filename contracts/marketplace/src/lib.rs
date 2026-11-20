@@ -657,10 +657,8 @@ impl MarketplaceContract {
         // === #743: Circuit Breaker gate ===
         Self::require_circuit_breaker_not_tripped(&env, &invoice.debtor_hash, &invoice.risk_tier)?;
 
-        // === #960: Debtor Attestation gate ===
-        // For high-risk (C-tier) invoices, a valid, non-expired debtor attestation
-        // that binds to the invoice face value is required before listing.
-        // Lower-risk tiers proceed without attestation (optional).
+        // === #962: Tier-gated debtor attestation policy ===
+        // The registry controls whether this invoice tier requires an attestation.
         Self::require_debtor_attestation_if_needed(
             &env,
             invoice_id,
@@ -863,6 +861,9 @@ impl MarketplaceContract {
 
         let config = Self::load_config(&env)?;
 
+        // Re-validate the current tier policy on every funding path. A policy change
+        // after listing takes effect before any investor funds move.
+        Self::require_debtor_attestation_if_needed(env, invoice_id, invoice.amount, &invoice.risk_tier)?;
         // Early load of invoice to determine currency for conversion check
         let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
         let invoice = nft_client.get_invoice(&invoice_id);
@@ -1786,19 +1787,23 @@ impl MarketplaceContract {
         face_value: i128,
         tier: &RiskTier,
     ) -> Result<(), KoraError> {
-        // Only enforce for the highest-risk tier.
-        if *tier != RiskTier::C {
+        let key = match tier {
+            RiskTier::AAA => RegistryParamKey::DebtorAttestationAaa,
+            RiskTier::AA => RegistryParamKey::DebtorAttestationAa,
+            RiskTier::A => RegistryParamKey::DebtorAttestationA,
+            RiskTier::B => RegistryParamKey::DebtorAttestationB,
+            RiskTier::C => RegistryParamKey::DebtorAttestationC,
+        };
+        let required = ParameterRegistryContractClient::new(env, &Self::load_config(env)?.parameter_registry)
+            .get_parameter(&key)
+            .map(|param| param.value == 1)
+            .unwrap_or(true);
+        events::debtor_attestation_policy_decision(env, invoice_id, tier, required);
+        if !required {
             return Ok(());
         }
-        // If no attestation contract is wired, skip (opt-in per deployment).
-        let attestation_addr: Address = match env
-            .storage()
-            .instance()
-            .get(&DataKey::DebtorAttestation)
-        {
-            Some(a) => a,
-            None => return Ok(()),
-        };
+        let attestation_addr: Address = env.storage().instance().get(&DataKey::DebtorAttestation)
+            .ok_or(KoraError::DebtorNotAttested)?;
         let client = DebtorAttestationContractClient::new(env, &attestation_addr);
         // is_confirmed verifies status == Confirmed, amount matches, and not expired.
         let confirmed = client.is_confirmed(&invoice_id, &face_value);

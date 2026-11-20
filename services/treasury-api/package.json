@@ -1,0 +1,13 @@
+{
+  "name": "@kora/treasury-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public, PII-safe treasury transparency API for the Kora dashboard",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

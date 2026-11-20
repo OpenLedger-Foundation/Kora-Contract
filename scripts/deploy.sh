@@ -12,8 +12,8 @@
 #   - Contracts built: make build
 #
 # Dependency order (must match constructor requirements):
-#   access_control → invoice_nft / risk_registry / dispute_resolution / debtor_attestation
-#   → financing_pool → dispute_escrow → marketplace
+#   access_control → parameter_registry → invoice_nft / risk_registry / dispute_resolution / debtor_attestation
+#   → financing_pool → marketplace → treasury consumers wired to registry
 # =============================================================================
 # Environment Variables (all optional — defaults shown)
 # =============================================================================
@@ -171,6 +171,7 @@ echo "  access_control : $ACCESS_CONTROL_ID"
 INVOICE_NFT_ID=$(deploy_contract "invoice_nft" "$WASM_DIR/kora_invoice_nft.wasm")
 echo "  invoice_nft    : $INVOICE_NFT_ID"
 
+PARAMETER_REGISTRY_ID=$(deploy_contract "parameter_registry" "$WASM_DIR/kora_parameter_registry.wasm")
 RISK_REGISTRY_ID=$(deploy_contract "risk_registry" "$WASM_DIR/kora_risk_registry.wasm")
 echo "  risk_registry  : $RISK_REGISTRY_ID"
 
@@ -213,6 +214,8 @@ echo "--- Initializing contracts (dependency order) ---"
 invoke "$ACCESS_CONTROL_ID" initialize --admin "$ADMIN"
 echo "  access_control initialized"
 
+invoke "$PARAMETER_REGISTRY_ID" initialize --admin "$ADMIN" --access_control "$ACCESS_CONTROL_ID"
+echo "  parameter_registry initialized"
 invoke "$INVOICE_NFT_ID" initialize --admin "$ADMIN" --access_control "$ACCESS_CONTROL_ID"
 echo "  invoice_nft initialized"
 
