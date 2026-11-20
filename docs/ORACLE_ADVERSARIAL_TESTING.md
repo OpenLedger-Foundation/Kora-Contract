@@ -1,7 +1,7 @@
 # Price Oracle Adversarial Testing Report
 
-**Last Updated:** 2026-09-28  
-**Test Suite:** `contracts/tests/price_oracle_adversarial.rs`  
+**Last Updated:** 2026-11-20  
+**Test Suites:** `contracts/tests/price_oracle_adversarial.rs` (WASM import) and `contracts/tests/price_oracle_adversarial_pack.rs` (native, runs with `cargo test`, #1081)  
 **Coverage Target:** 90%+ of oracle defense mechanisms
 
 ## Executive Summary
@@ -84,7 +84,7 @@ This document describes the comprehensive adversarial test suite targeting the `
 
 **Implementation:** Per-pair `MaxRateChange` configurable via `set_max_rate_change`. Rejects single-update price changes exceeding configured percentage (e.g., 20%).
 
-**Test:** `test_recommend_max_rate_change_per_update` (currently `#[ignore]` in suite; will be un-ignored after implementation).
+**Tests:** `pack_spike_rejected_by_rate_change_bound`, `pack_spike_must_be_walked_gradually_under_rate_bound`, `pack_stale_feeder_cannot_rejoin_with_spike` (`price_oracle_adversarial_pack.rs`). The older `test_recommend_max_rate_change_per_update` in the WASM suite is still `#[ignore]`.
 
 **Scenario:** Price at 0.50 USDC; attacker tries 1.50 USDC (200% jump) in single update.
 
@@ -237,6 +237,23 @@ RATE_EX: (base, quote, prev_price, new_price, change_bps, max_change_bps, timest
 
 ## Test Coverage Report
 
+### Test File: `contracts/tests/price_oracle_adversarial_pack.rs` (#1081)
+
+9 automated scenarios against the native contract. It is registered as a
+`kora-tests` target, so it runs with
+`cargo test -p kora-tests --test price_oracle_adversarial_pack`:
+
+| Path | Tests |
+|---|---|
+| Spike | `pack_spike_rejected_by_rate_change_bound`, `pack_spike_must_be_walked_gradually_under_rate_bound`, `pack_stale_feeder_cannot_rejoin_with_spike` |
+| Stale / heartbeat failure | `pack_heartbeat_failure_returns_all_feeds_stale`, `pack_heartbeat_failure_served_by_fallback_feed`, `pack_heartbeat_failure_with_stale_fallback_still_refuses`, `pack_per_pair_staleness_tightens_window` |
+| Conflicting sources | `pack_conflicting_sources_single_fresh_outlier_fails_quorum`, `pack_conflicting_sources_median_ignores_outlier` |
+
+> Note: `price_oracle_adversarial.rs` imports a prebuilt WASM
+> (`target/wasm32-unknown-unknown/release/kora_price_oracle.wasm`) and is not
+> registered in `contracts/tests/Cargo.toml`, so it does not run with `cargo test`.
+> The pack above covers the stale and spike paths without that build step.
+
 ### Test File: `contracts/tests/price_oracle_adversarial.rs`
 
 **Total Tests:** 10 adversarial scenarios
@@ -341,7 +358,15 @@ If manipulation detected:
 |--------------|-------------------|-----------|---------|
 | Fresh-but-wrong (reciprocal violation) | Reciprocal consistency (1%) | `test_adversarial_fresh_but_manipulated_rate_caught_by_reciprocal_check` | ✅ PASS |
 | Fresh-but-wrong (peg deviation) | Peg tolerance check | `test_adversarial_fresh_but_wrong_peg_deviation_caught` | ✅ PASS |
-| Fresh-but-wrong (extreme jump) | Rate-change bound **(NEW)** | `test_recommend_max_rate_change_per_update` | ✅ IMPLEMENTED |
+| Fresh-but-wrong (extreme jump) | Rate-change bound | `pack_spike_rejected_by_rate_change_bound` | ✅ PASS (#1081) |
+| Spike walked in small steps | Rate-change bound forces ≥ N visible updates | `pack_spike_must_be_walked_gradually_under_rate_bound` | ✅ PASS (#1081) |
+| Stale feeder rejoins with spike | Rate-change bound keeps last price as reference | `pack_stale_feeder_cannot_rejoin_with_spike` | ✅ PASS (#1081) |
+| Heartbeat failure (all feeders silent) | Staleness guard → `AllFeedsStale` | `pack_heartbeat_failure_returns_all_feeds_stale` | ✅ PASS (#1081) |
+| Heartbeat failure with fallback feed | Fallback feed + `FALLBACK` event | `pack_heartbeat_failure_served_by_fallback_feed` | ✅ PASS (#1081) |
+| Coordinated primary + fallback failure | Stale fallback is not served → `AllFeedsStale` | `pack_heartbeat_failure_with_stale_fallback_still_refuses` | ✅ PASS (#1081) |
+| Volatile pair, tight staleness | Per-pair `set_max_staleness` | `pack_per_pair_staleness_tightens_window` | ✅ PASS (#1081) |
+| Conflicting sources, single fresh outlier | Fresh-feeder quorum → `InsufficientFreshFeeders` + `INSUF_FD` | `pack_conflicting_sources_single_fresh_outlier_fails_quorum` | ✅ PASS (#1081) |
+| Conflicting sources, honest majority | Median aggregation | `pack_conflicting_sources_median_ignores_outlier` | ✅ PASS (#1081) |
 | Rapid oscillation | Median aggregation | `test_adversarial_rapid_oscillation_median_provides_stability` | ✅ PASS |
 | Single fresh feeder | Rate-change bound (partial) | `test_adversarial_all_feeders_stale_except_manipulated_one` | ⚠️ LIMITATION |
 | Majority collusion | Admin governance (operational) | `test_adversarial_majority_feeders_collude` | ⚠️ LIMITATION |
