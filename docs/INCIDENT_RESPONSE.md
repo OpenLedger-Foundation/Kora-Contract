@@ -303,7 +303,7 @@ Within 7 days of incident resolution
 
 ### Publication
 
-- Publish on GitHub as `INCIDENT_YYYY_MM_DD.md`
+- Publish on GitHub as `INCIDENT_YYYY_MM_DD.md` using the [postmortem template](incident-response-templates/postmortem.md)
 - Announce on Discord and Twitter
 - Add to security advisories
 
@@ -461,7 +461,18 @@ governance.create_fast_track_proposal(
 
 ### C. Communication Templates
 
-See `docs/incident-response-templates/` for pre-written messages for common scenarios.
+Pre-written templates for every severity level and common scenario are in
+`docs/incident-response-templates/`. See the
+[template index](incident-response-templates/README.md) for the full list.
+
+| Scenario | Internal | External-safe |
+|---|---|---|
+| Active exploit — protocol paused (Sev-1) | [sev-1-pause-internal.md](incident-response-templates/sev-1-pause-internal.md) | [sev-1-pause-external.md](incident-response-templates/sev-1-pause-external.md) |
+| Exploitable vulnerability, not active (Sev-2) | [sev-2-internal.md](incident-response-templates/sev-2-internal.md) | [sev-2-external.md](incident-response-templates/sev-2-external.md) |
+| Degraded service, no fund loss (Sev-3) | [sev-3-internal.md](incident-response-templates/sev-3-internal.md) | [sev-3-external.md](incident-response-templates/sev-3-external.md) |
+| Key compromise | [key-compromise-internal.md](incident-response-templates/key-compromise-internal.md) | [key-compromise-external.md](incident-response-templates/key-compromise-external.md) |
+| Indexer lag | [indexer-lag-internal.md](incident-response-templates/indexer-lag-internal.md) | [indexer-lag-external.md](incident-response-templates/indexer-lag-external.md) |
+| Bounty disclosure | [bounty-disclosure-internal.md](incident-response-templates/bounty-disclosure-internal.md) | [bounty-disclosure-external.md](incident-response-templates/bounty-disclosure-external.md) |
 
 ---
 

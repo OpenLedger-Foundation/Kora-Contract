@@ -68,12 +68,76 @@ npm test   # 90% line/branch/function/statement coverage enforced
 Covers pagination correctness, filter combinations, rate-limit enforcement and
 reset.
 
-## Database timeout policy
+## Database timeout policy (Closes #1095 — Chaos GAP-2)
 
-API database adapters must run `configureDbSession()` after acquiring a pooled PostgreSQL connection. The helper issues `SET statement_timeout = ...` using `DB_STATEMENT_TIMEOUT_MS`, which defaults to 5000 ms and rejects zero, negative, or non-integer values at startup. PostgreSQL SQLSTATE `57014` is mapped by `mapDbError()` to HTTP 503 with this body:
+### How it works
 
-```json
+Pool adapters call `configureDbSession(connection)` immediately after acquiring
+a connection. This issues `SET statement_timeout = <ms>` so every statement in
+the request lifecycle is bounded, regardless of query complexity or network
+conditions.
+
+PostgreSQL SQLSTATE `57014` (and equivalent driver message patterns) is detected
+by `isDbTimeoutError()` and converted to `DbTimeoutError` by the gateway's
+catch blocks. Transport adapters catch this distinct error class to emit the
+correct HTTP response without swallowing the structured error code.
+
+### Environment variable
+
+| Variable | Default | Validation |
+|---|---:|---|
+| `DB_STATEMENT_TIMEOUT_MS` | `5000` | Must be a positive integer; zero, negative, and non-integer values throw at startup |
+
+### HTTP response contract
+
+A timed-out DB statement produces:
+
+```
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+Content-Type: application/json
+
 {"code":"DB_TIMEOUT","message":"Database operation timed out; retry the request","retryable":true}
 ```
 
-The HTTP adapter should also send `Retry-After` using the returned `retryAfterSeconds` value. Reporting routes that intentionally run longer must use a separately configured pool or an explicit role with a documented timeout exemption; the API pool should never be globally relaxed for exports.
+`Retry-After` is `ceil(DB_STATEMENT_TIMEOUT_MS / 1000)`, minimum 1 second.
+
+### Error class
+
+```ts
+import { DbTimeoutError, DB_TIMEOUT_CODE } from "@kora/api-gateway";
+
+try {
+  const page = gateway.queryInvoices(filter, pageArgs, opts);
+} catch (err) {
+  if (err instanceof DbTimeoutError) {
+    res.setHeader("Retry-After", String(err.retryAfterSeconds));
+    res.status(err.statusCode).json({
+      code: err.code,         // "DB_TIMEOUT"
+      message: err.message,
+      retryable: err.retryable, // true
+    });
+    return;
+  }
+  throw err;
+}
+```
+
+### Pool configuration example
+
+```ts
+import { configureDbSession, readDbStatementTimeout } from "@kora/api-gateway";
+
+// Validate at startup — throws if DB_STATEMENT_TIMEOUT_MS is misconfigured.
+const timeoutMs = readDbStatementTimeout();
+
+pool.on("connect", async (client) => {
+  await configureDbSession(client, timeoutMs);
+});
+```
+
+### Reporting / long-running queries
+
+Reporting routes that run queries longer than the API timeout must use a
+separately configured pool or database role with an explicit, reviewed timeout
+value. The main API pool must never be globally relaxed for export workloads.

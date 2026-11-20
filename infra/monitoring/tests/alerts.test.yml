@@ -4,6 +4,46 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: reconciler gap detected fires warning after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_reconciler_gaps_detected_total{job="kora-reconciler"}'
+        values: "0 5 5 5"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KoraLedgerGapDetected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-2
+            exp_annotations:
+              summary: Kora ledger gap detected
+
+  - name: reconciler queue stuck fires critical after 2m
+    interval: 1m
+    input_series:
+      - series: 'kora_reconciler_oldest_gap_age_seconds{job="kora-reconciler"}'
+        values: "0 400 400 400"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KoraReconcilerAlertQueueStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              tier: sev-1
+            exp_annotations:
+              summary: Kora reconciler alert queue stuck — oldest gap is too old
+
+  - name: reconciler queue stuck does not fire when age is below threshold
+    interval: 1m
+    input_series:
+      - series: 'kora_reconciler_oldest_gap_age_seconds{job="kora-reconciler"}'
+        values: "0 200 200 200"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KoraReconcilerAlertQueueStuck
+        exp_alerts: []
+
   - name: circuit breaker trips page on-call after debounce
     interval: 1m
     input_series:

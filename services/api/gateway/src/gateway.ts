@@ -1,6 +1,7 @@
 import { FieldFilter, InvoiceFilter, InvoiceRecord, ListingFilter, ListingRecord, Page, PageArgs, PositionFilter, PositionRecord, RiskScoreFilter, RiskScoreRecord, SortDir } from "./types";
 import { IndexedStore, markStoreFailure, markStoreRecovered } from "./store";
 import { RateLimiter } from "./rateLimiter";
+import { mapDbError, DbTimeoutError } from "./dbTimeout";
 
 export class RateLimitedError extends Error {
   constructor(public resetAfterMs: number) { super(`RATE_LIMITED: retry after ${resetAfterMs}ms`); }
@@ -43,25 +44,25 @@ export class ApiGateway {
     const cached = this.cache.get(`${kind}:${key}`); if (cached) { this.store.metrics && (this.store.metrics.cacheHits += 1); return cached; }
     this.store.metrics && (this.store.metrics.cacheMisses += 1);
     try { this.store.checkout?.(); markStoreRecovered(this.store); return undefined; }
-    catch (cause) { markStoreFailure(this.store); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
+    catch (cause) { markStoreFailure(this.store); const mapped = mapDbError(cause); if (mapped) throw new DbTimeoutError(mapped.retryAfterSeconds, cause); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
   }
   private finish<T>(kind: QueryKind, key: string, page: Page<T>): Page<T> { this.cache.set(`${kind}:${key}`, page); return page; }
   invalidateReadCache(): void { this.cache.clear(); this.store.metrics && (this.store.metrics.cacheInvalidations += 1); this.store.invalidateCache?.(); }
   get health() { return this.store.health ?? { available: true, degraded: false, consecutiveFailures: 0 }; }
   queryInvoices(filter: InvoiceFilter = {}, page: PageArgs = {}, opts: QueryOptions): Page<InvoiceRecord> {
     const key = JSON.stringify([filter, page, opts.sortBy, opts.sortDir]); const cached = this.beginRead(opts.apiKey, "invoices", key); if (cached) return cached as Page<InvoiceRecord>;
-    try { return this.finish("invoices", key, paginate(sortBy(this.store.invoices.filter(i => matches(i.sme, filter.sme) && matches(i.status, filter.status) && matches(i.riskTier, filter.riskTier) && matches(i.riskScore, filter.riskScore) && matches(i.currency, filter.currency)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
+    try { return this.finish("invoices", key, paginate(sortBy(this.store.invoices.filter(i => matches(i.sme, filter.sme) && matches(i.status, filter.status) && matches(i.riskTier, filter.riskTier) && matches(i.riskScore, filter.riskScore) && matches(i.currency, filter.currency)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); const mapped = mapDbError(cause); if (mapped) throw new DbTimeoutError(mapped.retryAfterSeconds, cause); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
   }
   queryListings(filter: ListingFilter = {}, page: PageArgs = {}, opts: QueryOptions): Page<ListingRecord> {
     const key = JSON.stringify([filter, page, opts.sortBy, opts.sortDir]); const cached = this.beginRead(opts.apiKey, "listings", key); if (cached) return cached as Page<ListingRecord>;
-    try { return this.finish("listings", key, paginate(sortBy(this.store.listings.filter(l => matches(l.seller, filter.seller) && matches(l.token, filter.token) && (filter.isActive === undefined || l.isActive === filter.isActive)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
+    try { return this.finish("listings", key, paginate(sortBy(this.store.listings.filter(l => matches(l.seller, filter.seller) && matches(l.token, filter.token) && (filter.isActive === undefined || l.isActive === filter.isActive)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); const mapped = mapDbError(cause); if (mapped) throw new DbTimeoutError(mapped.retryAfterSeconds, cause); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
   }
   queryPositions(filter: PositionFilter = {}, page: PageArgs = {}, opts: QueryOptions): Page<PositionRecord> {
     const key = JSON.stringify([filter, page, opts.sortBy, opts.sortDir]); const cached = this.beginRead(opts.apiKey, "positions", key); if (cached) return cached as Page<PositionRecord>;
-    try { return this.finish("positions", key, paginate(sortBy(this.store.positions.filter(p => matches(p.investor, filter.investor) && matches(p.invoiceId, filter.invoiceId)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
+    try { return this.finish("positions", key, paginate(sortBy(this.store.positions.filter(p => matches(p.investor, filter.investor) && matches(p.invoiceId, filter.invoiceId)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); const mapped = mapDbError(cause); if (mapped) throw new DbTimeoutError(mapped.retryAfterSeconds, cause); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
   }
   queryRiskScores(filter: RiskScoreFilter = {}, page: PageArgs = {}, opts: QueryOptions): Page<RiskScoreRecord> {
     const key = JSON.stringify([filter, page, opts.sortBy, opts.sortDir]); const cached = this.beginRead(opts.apiKey, "riskScores", key); if (cached) return cached as Page<RiskScoreRecord>;
-    try { return this.finish("riskScores", key, paginate(sortBy(this.store.riskScores.filter(r => (filter.kind === undefined || r.kind === filter.kind) && matches(r.verifier, filter.verifier) && matches(r.score, filter.score)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
+    try { return this.finish("riskScores", key, paginate(sortBy(this.store.riskScores.filter(r => (filter.kind === undefined || r.kind === filter.kind) && matches(r.verifier, filter.verifier) && matches(r.score, filter.score)), opts.sortBy, opts.sortDir), page, this.store.lastIndexedLedger)); } catch (cause) { markStoreFailure(this.store); this.invalidateReadCache(); const mapped = mapDbError(cause); if (mapped) throw new DbTimeoutError(mapped.retryAfterSeconds, cause); throw new ApiUnavailableError(this.retryAfterSeconds, cause); }
   }
 }
