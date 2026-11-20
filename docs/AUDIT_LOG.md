@@ -263,6 +263,7 @@ Source: doc-block removed after remediation (commit `3074b19`).
 |---|---------|----------|--------|
 | RR-01 | `increment_invoice_count()` modified SME profile without emitting an event | Medium | Fixed |
 | RR-02 | Empty-bytes validation used `EmptyString` error (semantically wrong type) | Low | Fixed |
+| RR-03 | System score mutators had no scoped caller registry (only invoice_nft / admin) | Medium | Fixed (#1078) |
 
 ### Detail
 
@@ -271,6 +272,14 @@ Source: doc-block removed after remediation (commit `3074b19`).
 emitting any event. Indexers watching the event log would miss the state change, making
 audit trails incomplete. Fixed by adding an `events::sme_invoice_count_incremented` call
 immediately after the storage write.
+
+**RR-03 — Authorized caller registry (#1078).**
+The planned v2 "registry of authorized callers" is implemented for risk_registry.
+`increment_invoice_count`, `record_default` and `record_successful_repayment` accept
+their built-in caller (invoice_nft / admin) or an address on the admin-managed
+`AuthorizedCaller` registry, and reject everyone else with `Unauthorized`. Grants are
+blocked while paused; revocation is not. See `docs/risk-registry.md` →
+*Authorized Callers* and `contracts/tests/risk_registry_authorized_callers.rs`.
 
 **RR-02 — Wrong error variant for empty debtor hash.**
 `set_debtor_score` validated that `debtor_hash` was non-empty but returned

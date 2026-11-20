@@ -101,3 +101,10 @@ If any function's pause status has been changed post-merge, update this matrix i
 See [ARCHITECTURE.md § Cross-Contract Authorization Matrix](ARCHITECTURE.md#cross-contract-authorization-matrix) for a detailed table of all cross-contract calls in the protocol, including the authorization required for each call.
 
 Key insight: authorization is transitive. When a user calls `marketplace.fund_invoice()` with their signature, the marketplace contract calls `financing_pool.release_funds()` with its own address (`env.current_contract_address()`), which then calls `invoice_nft.set_funded()` also with the pool's address. This three-level call chain is secure because each step is verified by the callee (via `require_auth()`).
+
+## risk_registry Authorized Caller Registry (#1078)
+
+| Contract | Entrypoint | Paused? | Notes |
+|---|---|---|---|
+| **risk_registry** | `add_authorized_caller` | ✓ YES | New grants are blocked while the protocol is paused |
+| **risk_registry** | `remove_authorized_caller` | ✗ NO | Revocation stays available so a compromised integration can be cut off during an incident |

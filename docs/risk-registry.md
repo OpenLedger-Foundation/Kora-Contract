@@ -218,6 +218,51 @@ activity volume for risk analysis.
 
 ---
 
+## Authorized Callers (Issue #1078)
+
+The system score mutators accept their built-in caller **or** an address on the
+admin-managed authorized caller registry (`DataKey::AuthorizedCaller(Address)`):
+
+| Mutator | Built-in caller | Also allowed |
+|---|---|---|
+| `increment_invoice_count` | `invoice_nft` (set at initialization) | authorized callers |
+| `record_default` | admin | authorized callers |
+| `record_successful_repayment` | admin | authorized callers |
+
+Any other caller is rejected with `RiskRegistryError::Unauthorized`. Verifier score
+mutators (`register_sme`, `update_sme_score`, `set_credit_limit`, `set_debtor_score`)
+remain scoped by the verifier registry and reject unknown callers with `NotVerifier`.
+
+Managing the registry (admin only):
+
+- `add_authorized_caller(admin, caller)`: rejected while the protocol is paused and for
+  the registry's own address. Emits `(RR_CALLR, caller)` → `true`.
+- `remove_authorized_caller(admin, caller)`: allowed while paused, so a compromised
+  integration can be cut off during an incident. The caller's next call fails with
+  `Unauthorized`. Emits `(RR_CALLR, caller)` → `false`.
+- `is_authorized_caller(caller)`: read-only.
+
+Authorized callers are still subject to the protocol pause (`ProtocolPaused`).
+
+### Migrating existing callers
+
+Existing deployments keep working unchanged: `invoice_nft` and the admin are still
+accepted, so no step is required for them. To let a contract or keeper write
+without holding the admin key:
+
+1. Deploy or upgrade risk_registry to a build that includes #1078.
+2. For each integration that records outcomes on-chain (for example `financing_pool`,
+   which calls `record_default` after a default, or an operations keeper), call
+   `add_authorized_caller(admin, <integration address>)`.
+3. Have the integration pass **its own address** as the `caller` / `admin` argument.
+   `financing_pool` currently passes its stored admin address. Switching it to
+   `env.current_contract_address()` is a separate change, and should be done
+   together with step 2.
+4. Verify with `is_authorized_caller(<address>)`. When rotating or decommissioning
+   an integration, call `remove_authorized_caller`.
+
+---
+
 ## Read-Only View Functions
 
 | Function | Returns |
@@ -263,7 +308,8 @@ contract — `is_verified_sme` returns `false` for expired keys.
   creating skin-in-the-game incentives for honest scoring.
 - Only the admin may add or remove verifiers; only verifiers may register or score SMEs.
 - `increment_invoice_count` is callable only by the `invoice_nft` contract address
-  set at initialization — it cannot be spoofed by an arbitrary caller.
+  set at initialization or an admin-approved authorized caller (#1078). It cannot be
+  spoofed by an arbitrary caller.
 - Debtor PII never appears on-chain; only SHA-256 hashes are stored.
 - Reentrancy protection (`ReentrancyGuard`) is applied on `update_sme_score` which
   performs an inter-contract read.

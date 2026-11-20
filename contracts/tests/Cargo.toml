@@ -96,6 +96,10 @@ path = "economic_attack_simulation.rs"
 name = "vesting_lifecycle"
 path = "vesting_lifecycle.rs"
 
+[[test]]
+name = "risk_registry_authorized_callers"
+path = "risk_registry_authorized_callers.rs"
+
 # ── Fractionalizer E2E test suite (issue #913) ────────────────────────────────
 [[test]]
 name = "fractionalizer_e2e"
