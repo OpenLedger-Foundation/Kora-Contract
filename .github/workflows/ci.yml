@@ -182,6 +182,9 @@ jobs:
       - name: cargo run -p kora-xtask --bin check_access_matrix
         run: cargo run -p kora-xtask --bin check_access_matrix
 
+      - name: cargo run -p kora-xtask --bin check_pause_matrix
+        run: cargo run -p kora-xtask --bin check_pause_matrix
+
   # ── Unit & integration tests ──────────────────────────────────────────────
   test:
     name: cargo test
