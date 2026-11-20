@@ -1,0 +1,298 @@
+name: WASM Size Budget
+
+# Runs on every PR targeting main and on every push to main.
+# Builds optimized WASM artifacts, checks them against per-contract budgets
+# in wasm-budgets.json, and posts a size report as a PR comment.
+#
+# REQUIRE_ALL_WASMS=1 — missing artifacts fail independently of overages.
+# SIZE_THRESHOLD_BYTES — additional growth gate vs origin/main baseline.
+# Label override: apply 'wasm-size-increase-approved' to pass a budget
+# overage; missing artifacts are never overrideable.
+
+on:
+  push:
+    branches: ["main", "feature/**", "fix/**"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Maximum byte growth allowed vs the main-branch baseline before the job
+  # fails even when all individual budgets pass. Set to 0 to enforce strict
+  # no-growth on main; PRs typically use a larger allowance.
+  SIZE_THRESHOLD_BYTES: 10240
+
+jobs:
+  wasm-size:
+    name: WASM size budget check
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch the full history so we can compare against origin/main.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-size-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-wasm-size-
+
+      - name: Install Stellar CLI (for contract optimize)
+        run: |
+          cargo install --locked stellar-cli --version 21.0.0 --features opt 2>/dev/null \
+            || cargo install stellar-cli --features opt
+
+      - name: Build all contracts (release, wasm32)
+        run: |
+          cargo build --workspace \
+            --target wasm32-unknown-unknown \
+            --release \
+            --exclude kora-tests \
+            --exclude kora-fuzz \
+            --exclude kora-xtask
+
+      - name: Optimize all WASM artifacts
+        run: make build-optimized
+
+      - name: Check WASM sizes against budgets
+        id: size_check
+        env:
+          REQUIRE_ALL_WASMS: "1"
+        run: |
+          # Capture the full markdown table produced by the script.
+          set +e
+          output=$(bash scripts/check-wasm-size.sh \
+            wasm-budgets.json \
+            target/wasm32-unknown-unknown/release \
+            "${{ join(github.event.pull_request.labels.*.name, ',') }}" 2>&1)
+          exit_code=$?
+          set -e
+
+          echo "$output"
+
+          # Store output for the PR comment step below.
+          {
+            echo 'size_report<<ENDOFBLOCK'
+            echo "$output"
+            echo 'ENDOFBLOCK'
+          } >> "$GITHUB_OUTPUT"
+
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Compute size delta vs origin/main baseline
+        id: size_delta
+        if: github.event_name == 'pull_request'
+        run: |
+          # Fetch the main-branch baseline from wasm-metrics.json (zeroed on
+          # first run; CI will populate it via the update-baseline job below).
+          total_new=0
+          total_baseline=0
+
+          CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool \
+                     marketplace price_oracle tranche dispute_resolution dispute_escrow \
+                     governance governance_voting parameter_registry debtor_attestation \
+                     secondary_market referral_rewards verifier_nomination fractionalizer vesting"
+
+          for c in $CONTRACTS; do
+            wasm="target/wasm32-unknown-unknown/release/kora_${c}.optimized.wasm"
+            [ -f "$wasm" ] || wasm="target/wasm32-unknown-unknown/release/kora_${c}.wasm"
+            if [ -f "$wasm" ]; then
+              sz=$(wc -c < "$wasm" | tr -d ' \n\r')
+              total_new=$((total_new + sz))
+            fi
+
+            baseline_sz=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('baselines/wasm-metrics.json'))
+    print(d['contracts'].get('$c', {}).get('wasm_size_bytes', 0))
+except Exception:
+    print(0)
+")
+            total_baseline=$((total_baseline + baseline_sz))
+          done
+
+          delta=$((total_new - total_baseline))
+          echo "total_new=$total_new"       >> "$GITHUB_OUTPUT"
+          echo "total_baseline=$total_baseline" >> "$GITHUB_OUTPUT"
+          echo "delta=$delta"               >> "$GITHUB_OUTPUT"
+
+          if [ "$total_baseline" -gt 0 ] && [ "$delta" -gt "$SIZE_THRESHOLD_BYTES" ]; then
+            echo "FAILED: Total WASM size grew by ${delta} bytes, exceeding threshold of ${SIZE_THRESHOLD_BYTES} bytes."
+            echo "exceeded_threshold=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exceeded_threshold=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post PR comment with size report
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report    = `${{ steps.size_check.outputs.size_report }}`;
+            const exitCode  = '${{ steps.size_check.outputs.exit_code }}';
+            const delta     = '${{ steps.size_delta.outputs.delta }}';
+            const exceeded  = '${{ steps.size_delta.outputs.exceeded_threshold }}';
+            const threshold = process.env.SIZE_THRESHOLD_BYTES || '10240';
+
+            const status = exitCode === '0' ? '✅ All budgets OK' : '❌ Budget check failed';
+            const deltaLine = delta
+              ? `\n**Total size delta vs baseline:** ${Number(delta) >= 0 ? '+' : ''}${delta} bytes (threshold: ${threshold} B)${exceeded === 'true' ? ' — **EXCEEDED**' : ''}`
+              : '';
+
+            const body = [
+              `## WASM Size Budget Report`,
+              ``,
+              `**Status:** ${status}${deltaLine}`,
+              ``,
+              '```',
+              report,
+              '```',
+              ``,
+              `> To override a budget overage, apply the \`wasm-size-increase-approved\` label and update \`wasm-budgets.json\`.`,
+              `> Missing artifacts always fail and cannot be label-overridden.`,
+            ].join('\n');
+
+            // Update existing comment if one exists, otherwise create a new one.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith('## WASM Size Budget Report'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if budget or threshold exceeded
+        if: steps.size_check.outputs.exit_code != '0' || steps.size_delta.outputs.exceeded_threshold == 'true'
+        run: |
+          echo ""
+          if [ "${{ steps.size_check.outputs.exit_code }}" != "0" ]; then
+            echo "❌ FAILED: WASM size budget check failed (exit ${{ steps.size_check.outputs.exit_code }})."
+          fi
+          if [ "${{ steps.size_delta.outputs.exceeded_threshold }}" = "true" ]; then
+            echo "❌ FAILED: Total WASM size growth exceeds SIZE_THRESHOLD_BYTES=${SIZE_THRESHOLD_BYTES}."
+          fi
+          exit 1
+
+  # Update the size baseline on every successful merge to main.
+  # This keeps baselines/wasm-metrics.json current so delta comparisons
+  # on future PRs reflect actual main-branch sizes.
+  update-baseline:
+    name: Update WASM size baseline
+    runs-on: ubuntu-latest
+    needs: wasm-size
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-baseline-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-wasm-baseline-
+
+      - name: Install Stellar CLI
+        run: |
+          cargo install --locked stellar-cli --version 21.0.0 --features opt 2>/dev/null \
+            || cargo install stellar-cli --features opt
+
+      - name: Build and optimize all contracts
+        run: |
+          cargo build --workspace \
+            --target wasm32-unknown-unknown \
+            --release \
+            --exclude kora-tests \
+            --exclude kora-fuzz \
+            --exclude kora-xtask
+          make build-optimized
+
+      - name: Record sizes into baselines/wasm-metrics.json
+        run: |
+          CONTRACTS="access_control invoice_nft risk_registry treasury financing_pool \
+                     marketplace price_oracle tranche dispute_resolution dispute_escrow \
+                     governance governance_voting parameter_registry debtor_attestation \
+                     secondary_market referral_rewards verifier_nomination fractionalizer vesting"
+
+          python3 - <<'PYEOF'
+          import json, os, datetime
+
+          contracts_dir = "target/wasm32-unknown-unknown/release"
+          names = os.environ.get("CONTRACTS", "").split()
+
+          baseline_path = "baselines/wasm-metrics.json"
+          with open(baseline_path) as f:
+              data = json.load(f)
+
+          data["generated_at"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          for name in names:
+              opt  = os.path.join(contracts_dir, f"kora_{name}.optimized.wasm")
+              raw  = os.path.join(contracts_dir, f"kora_{name}.wasm")
+              path = opt if os.path.exists(opt) else (raw if os.path.exists(raw) else None)
+              sz   = os.path.getsize(path) if path else 0
+              if name not in data["contracts"]:
+                  data["contracts"][name] = {"wasm_size_bytes": 0, "estimated_cost_units": 0, "entrypoints": []}
+              data["contracts"][name]["wasm_size_bytes"] = sz
+
+          with open(baseline_path, "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+
+          print(f"Updated {baseline_path}")
+          PYEOF
+        env:
+          CONTRACTS: "access_control invoice_nft risk_registry treasury financing_pool marketplace price_oracle tranche dispute_resolution dispute_escrow governance governance_voting parameter_registry debtor_attestation secondary_market referral_rewards verifier_nomination fractionalizer vesting"
+
+      - name: Commit updated baseline
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add baselines/wasm-metrics.json
+          if git diff --cached --quiet; then
+            echo "No baseline changes to commit."
+          else
+            git commit -m "chore: update WASM size baseline [skip ci]"
+            git push
+          fi

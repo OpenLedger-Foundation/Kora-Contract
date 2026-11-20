@@ -133,11 +133,20 @@ test_failure_on_regression() {
 # Test 9: Verify all contract names are included
 test_all_contracts_covered() {
   log_test "Checking if all contracts are tracked"
-  # Check for CONTRACTS variable definition with all contract names
-  if grep -q 'CONTRACTS="access_control invoice_nft marketplace financing_pool treasury risk_registry"' "$ROOT_DIR/.github/workflows/wasm-size.yml"; then
-    log_pass "All 6 contracts are tracked in size gate"
-  else
-    log_fail "All contracts should be tracked in CONTRACTS variable"
+  # The script hard-codes a CONTRACTS variable with all 19 deployable contract
+  # names. Verify each one is present in the check script.
+  all_ok=1
+  for c in access_control invoice_nft risk_registry treasury financing_pool \
+            marketplace price_oracle tranche dispute_resolution dispute_escrow \
+            governance governance_voting parameter_registry debtor_attestation \
+            secondary_market referral_rewards verifier_nomination fractionalizer vesting; do
+    if ! grep -q "$c" "$ROOT_DIR/scripts/check-wasm-size.sh"; then
+      log_fail "Contract '$c' is not tracked in scripts/check-wasm-size.sh"
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" -eq 1 ]; then
+    log_pass "All 19 deployable contracts are tracked in scripts/check-wasm-size.sh"
   fi
 }
 
