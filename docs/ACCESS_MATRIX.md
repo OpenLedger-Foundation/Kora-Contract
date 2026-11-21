@@ -515,6 +515,50 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 
 ---
 
+### 11. debtor_attestation (issue #1084)
+
+Consulted by `marketplace.list_invoice` and `marketplace.fund_invoice` to enforce
+per-tier attestation policy. Policy is governed per tier by `parameter_registry`
+(0 = optional, 1 = required; see `docs/debtor-attestation.md`).
+
+| Entrypoint | Required Role | Conditional Authorization | Notes |
+|------------|---------------|---------------------------|-------|
+| `initialize` | None (one-time) | Must not already be initialized | Sets admin and max attestation age |
+| `admin` | Permissionless | Read-only | Returns configured admin address |
+| `set_max_attestation_age` | **Admin** | Admin only | Updates max age; emits max_age event |
+| `max_attestation_age` | Permissionless | Read-only | |
+| `add_relay` | **Admin** | Admin only | Whitelists a relay address |
+| `remove_relay` | **Admin** | Admin only | Removes relay from whitelist |
+| `is_relay` | Permissionless | Read-only | |
+| `attest` | **Debtor (Self)** | `debtor.require_auth()`; nonce must match next-expected | Direct debtor attestation |
+| `attest_via_relay` | **Relay (Self)** | `relay.require_auth()`; relay must be whitelisted; nonce must match | Relay-assisted attestation |
+| `reject` | **Debtor or Relay (Self)** | Caller must be debtor or whitelisted relay | Invalidates attestation |
+| `attestation_status` | Permissionless | Read-only | Returns live status (checks expiry at read time) |
+| `is_confirmed` | Permissionless | Read-only | Returns true only when Confirmed + not expired + amount matches |
+| `get_record` | Permissionless | Read-only | Full attestation record for invoice |
+| `nonce_of` | Permissionless | Read-only | Next expected nonce for debtor |
+
+**Integration Notes:**
+- `is_confirmed(invoice_id, expected_amount)` is the primary gate called by `marketplace.list_invoice`
+  when the tier policy is 1 (required). Returns `false` for Pending, Rejected, Expired, or amount mismatch.
+- `attestation_status` distinguishes Expired from Confirmed at read time — a confirmed attestation past
+  `expires_at` returns `Expired`; the debtor must re-attest.
+- Nonce is monotonically increasing per debtor; replay of an old nonce is rejected with `InvalidNonce`.
+- The `_signature` and `_relay_sig` bytes fields are stored for off-chain audit but are **not**
+  cryptographically re-verified on-chain; Soroban's native `require_auth` is the primary auth mechanism.
+
+**Tier-gated policy (registry keys → marketplace behavior):**
+
+| Registry key | Default | Effect when 0 | Effect when 1 |
+|---|---|---|---|
+| `DebtorAttestationAaa` | 0 | gate skipped | `is_confirmed` must return true |
+| `DebtorAttestationAa` | 0 | gate skipped | `is_confirmed` must return true |
+| `DebtorAttestationA` | 0 | gate skipped | `is_confirmed` must return true |
+| `DebtorAttestationB` | 1 | gate skipped | `is_confirmed` must return true |
+| `DebtorAttestationC` | 1 | gate skipped | `is_confirmed` must return true |
+
+---
+
 ## Conditional Authorization Patterns
 
 ### 1. Protocol Pause

@@ -275,6 +275,8 @@ pub fn run(data: &[u8]) {
                 } else if amount > 100 {
                     Some(EE::InvalidAmount)
                 } else if actor != 1 && actor != 2 {
+                    // Outsider (actor 3) and admin (actor 0) cannot open escrow;
+                    // only the signer/investor (1) and payer (2) are eligible.
                     Some(EE::Unauthorized)
                 } else {
                     None

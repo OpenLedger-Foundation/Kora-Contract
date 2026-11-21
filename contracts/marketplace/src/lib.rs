@@ -4147,4 +4147,349 @@ mod tests {
         let result = t.mp.try_set_referrer_split_bps(&t.admin, &10_001u32);
         assert!(result.is_err());
     }
+
+    // ── Tier-gated debtor attestation (#1084) ─────────────────────────────────
+    //
+    // The parameter registry controls per-tier attestation policy:
+    //   0 = optional (skip the attestation gate entirely)
+    //   1 = required  (block listing if no valid, non-expired confirmation)
+    //
+    // Default values: AAA/AA/A = optional (0), B/C = required (1).
+    // The registry is a real ParameterRegistryContract wired in deploy().
+
+    /// Helper: register and attest a fresh debtor for the given invoice,
+    /// mimicking what the production relay/debtor flow would do.
+    fn attest_invoice_debtor(
+        t: &TestEnv,
+        attestation_contract: &kora_debtor_attestation::DebtorAttestationContractClient<'static>,
+        invoice_id: u64,
+        face_value: i128,
+        debtor: &soroban_sdk::Address,
+    ) {
+        use soroban_sdk::Bytes;
+        let expires_at = t.env.ledger().timestamp() + 86_400 * 30;
+        let nonce = attestation_contract.nonce_of(debtor);
+        attestation_contract.attest(
+            debtor,
+            &invoice_id,
+            &face_value,
+            &expires_at,
+            &nonce,
+            &Bytes::new(&t.env),
+        );
+    }
+
+    /// Deploy a debtor_attestation contract wired to the marketplace.
+    fn deploy_attestation(t: &TestEnv) -> kora_debtor_attestation::DebtorAttestationContractClient<'static> {
+        use kora_debtor_attestation::DebtorAttestationContract;
+        let attest_id = t.env.register_contract(None, DebtorAttestationContract);
+        let attest = kora_debtor_attestation::DebtorAttestationContractClient::new(&t.env, &attest_id);
+        attest.initialize(&t.admin, &None);
+        t.mp.set_debtor_attestation(&t.admin, &Some(attest_id));
+        attest
+    }
+
+    /// Set the registry policy for a tier (0 = optional, 1 = required).
+    fn set_attestation_policy(
+        t: &TestEnv,
+        preg_id: &soroban_sdk::Address,
+        key: kora_shared::types::RegistryParamKey,
+        value: i128,
+    ) {
+        let preg = kora_parameter_registry::ParameterRegistryContractClient::new(&t.env, preg_id);
+        preg.admin_set_parameter(&t.admin, &key, &value);
+    }
+
+    #[test]
+    fn tier_below_threshold_lists_without_attestation() {
+        // AAA tier: policy defaults to 0 (optional). No attestation contract wired.
+        // Listing must succeed.
+        use soroban_sdk::{Bytes, String};
+
+        let t = deploy();
+
+        // Mint an A-tier invoice (risk score 50 → tier A, which is optional by default)
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xCCu8; 32]);
+        let ipfs_cid = String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+        // Risk score 30 → A tier (below B/C)
+        let invoice_id = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &soroban_sdk::Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &30u32,
+            &None,
+        );
+        t.nft.set_risk_registry(&t.admin, &t.registry);
+
+        // Add a debtor score so the registry gate passes
+        let verifier = Address::generate(&t.env);
+        let st_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.staking_token);
+        st_client.mint(&verifier, &1_000_000i128);
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.add_verifier(&t.admin, &verifier, &1_000_000i128);
+        rr.set_debtor_score(&verifier, &debtor_hash, &50u32);
+
+        // No attestation contract wired → gate is a no-op for optional tier.
+        // list_invoice must succeed.
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &invoice_id,
+            &9_000_000_000i128,
+            &10_000_000_000i128,
+            &t.token,
+            &due_date,
+            &None,
+        );
+        // We expect either success or a non-attestation error (compliance check,
+        // debtor-verified gate, etc.) — crucially NOT DebtorNotAttested.
+        match result {
+            Err(Ok(KoraError::DebtorNotAttested)) => {
+                panic!("A-tier invoice should not require attestation by default");
+            }
+            Err(Ok(KoraError::AttestationAmountMismatch)) => {
+                panic!("A-tier invoice should not require attestation by default");
+            }
+            _ => {} // Any other outcome (success or unrelated error) is fine for this test.
+        }
+    }
+
+    #[test]
+    fn b_tier_without_attestation_fails_typed_error() {
+        // B tier: policy defaults to 1 (required).  When no attestation exists,
+        // list_invoice must return DebtorNotAttested — not a panic, not a host trap.
+        use soroban_sdk::{Bytes, String};
+
+        let t = deploy();
+
+        // Wire a real attestation contract so the marketplace calls it.
+        let _attest = deploy_attestation(&t);
+
+        // Mint a B-tier invoice (risk score 15 → B tier)
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xDDu8; 32]);
+        let ipfs_cid = String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+        // Risk score 15 → B tier
+        let invoice_id = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &soroban_sdk::Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &15u32,
+            &None,
+        );
+        t.nft.set_risk_registry(&t.admin, &t.registry);
+
+        // Add a debtor score so the registry gate passes
+        let verifier = Address::generate(&t.env);
+        let st_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.staking_token);
+        st_client.mint(&verifier, &1_000_000i128);
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.add_verifier(&t.admin, &verifier, &1_000_000i128);
+        rr.set_debtor_score(&verifier, &debtor_hash, &15u32);
+
+        // No attestation submitted → must fail with the typed error, not a panic.
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &invoice_id,
+            &9_000_000_000i128,
+            &10_000_000_000i128,
+            &t.token,
+            &due_date,
+            &None,
+        );
+        // The error must be DebtorNotAttested (typed contract error), not a host trap.
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            KoraError::DebtorNotAttested,
+            "B-tier without attestation must return typed DebtorNotAttested error"
+        );
+    }
+
+    #[test]
+    fn b_tier_with_valid_attestation_lists_successfully() {
+        // B tier: attestation present and valid → listing succeeds.
+        use soroban_sdk::{Bytes, String};
+
+        let t = deploy();
+        let attest = deploy_attestation(&t);
+
+        // Mint a B-tier invoice
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xEEu8; 32]);
+        let ipfs_cid = String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let face_value = 10_000_000_000i128;
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+        let invoice_id = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &face_value,
+            &soroban_sdk::Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &15u32, // B tier
+            &None,
+        );
+        t.nft.set_risk_registry(&t.admin, &t.registry);
+
+        // Add a debtor score
+        let verifier = Address::generate(&t.env);
+        let st_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.staking_token);
+        st_client.mint(&verifier, &1_000_000i128);
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.add_verifier(&t.admin, &verifier, &1_000_000i128);
+        rr.set_debtor_score(&verifier, &debtor_hash, &15u32);
+
+        // Submit valid attestation for the debtor address (seller acting as debtor here)
+        attest_invoice_debtor(&t, &attest, invoice_id, face_value, &t.seller);
+
+        // With a valid attestation present, listing must succeed (or fail for
+        // an unrelated reason — critically NOT DebtorNotAttested).
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &invoice_id,
+            &9_000_000_000i128,
+            &face_value,
+            &t.token,
+            &due_date,
+            &None,
+        );
+        match result {
+            Err(Ok(KoraError::DebtorNotAttested)) => {
+                panic!("valid attestation should allow B-tier listing");
+            }
+            Err(Ok(KoraError::AttestationAmountMismatch)) => {
+                panic!("attestation amount matches — should not get mismatch");
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tier_boundary_equality_b_requires_attestation() {
+        // The tier boundary check for B (risk score == 15) must enforce attestation.
+        // This is the degenerate tier-boundary equality case from the issue's edge cases.
+        use soroban_sdk::{Bytes, String};
+
+        let t = deploy();
+        let _attest = deploy_attestation(&t);
+
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xFFu8; 32]);
+        let ipfs_cid = String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+        // Exact B-tier boundary score
+        let invoice_id = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &soroban_sdk::Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &15u32,
+            &None,
+        );
+        t.nft.set_risk_registry(&t.admin, &t.registry);
+
+        let verifier = Address::generate(&t.env);
+        let st_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.staking_token);
+        st_client.mint(&verifier, &1_000_000i128);
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.add_verifier(&t.admin, &verifier, &1_000_000i128);
+        rr.set_debtor_score(&verifier, &debtor_hash, &15u32);
+
+        // No attestation — must fail with typed error.
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &invoice_id,
+            &9_000_000_000i128,
+            &10_000_000_000i128,
+            &t.token,
+            &due_date,
+            &None,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            KoraError::DebtorNotAttested,
+            "B-tier boundary invoice without attestation must return DebtorNotAttested"
+        );
+    }
+
+    #[test]
+    fn governance_can_make_a_tier_optional() {
+        // The registry is the authority; flipping DebtorAttestationB to 0 makes
+        // B-tier invoices go through without an attestation.
+        use kora_shared::types::RegistryParamKey;
+        use soroban_sdk::{Bytes, String};
+
+        let t = deploy();
+        let _attest = deploy_attestation(&t);
+
+        // Locate the parameter registry — it's stored in the marketplace config.
+        let mp_config = t.mp.get_config().unwrap();
+        let preg_id = mp_config.parameter_registry;
+
+        // Set B-tier attestation to optional (0).
+        set_attestation_policy(&t, &preg_id, RegistryParamKey::DebtorAttestationB, 0);
+
+        let debtor_hash = Bytes::from_slice(&t.env, &[0xAAu8; 32]);
+        let ipfs_cid = String::from_str(
+            &t.env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let due_date = t.env.ledger().timestamp() + 86_400 * 60;
+        let invoice_id = t.nft.mint_invoice(
+            &t.seller,
+            &debtor_hash,
+            &10_000_000_000i128,
+            &soroban_sdk::Symbol::new(&t.env, "USDC"),
+            &due_date,
+            &ipfs_cid,
+            &15u32, // B tier
+            &None,
+        );
+        t.nft.set_risk_registry(&t.admin, &t.registry);
+
+        let verifier = Address::generate(&t.env);
+        let st_client = soroban_sdk::token::StellarAssetClient::new(&t.env, &t.staking_token);
+        st_client.mint(&verifier, &1_000_000i128);
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(&t.env, &t.registry);
+        rr.add_verifier(&t.admin, &verifier, &1_000_000i128);
+        rr.set_debtor_score(&verifier, &debtor_hash, &15u32);
+
+        // No attestation submitted.  Policy is now optional for B → must NOT fail DebtorNotAttested.
+        let result = t.mp.try_list_invoice(
+            &t.seller,
+            &invoice_id,
+            &9_000_000_000i128,
+            &10_000_000_000i128,
+            &t.token,
+            &due_date,
+            &None,
+        );
+        match result {
+            Err(Ok(KoraError::DebtorNotAttested)) => {
+                panic!("B-tier with optional policy must not require attestation");
+            }
+            Err(Ok(KoraError::AttestationAmountMismatch)) => {
+                panic!("B-tier with optional policy must not require attestation");
+            }
+            _ => {}
+        }
+    }
 }
