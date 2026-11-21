@@ -117,6 +117,11 @@ path = "fractionalizer_e2e.rs"
 name = "marketplace_fee_property"
 path = "marketplace_fee_property.rs"
 
+# ── Referral rewards E2E: deposit -> repaid -> claim (issue #1089) ────────────
+[[test]]
+name = "referral_rewards_e2e"
+path = "referral_rewards_e2e.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }

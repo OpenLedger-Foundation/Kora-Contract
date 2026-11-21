@@ -3,6 +3,8 @@ target/
 *.wasm
 .env
 .env.*
+# Committed configuration examples are documentation, not secrets.
+!.env.mev.example
 
 # Test snapshots
 test_snapshots/
@@ -35,6 +37,9 @@ coverage/
 *.tsbuildinfo
 npm-debug.log*
 *.log
+
+# MEV ordering observation artifacts
+infra/mev-ordering/results/
 
 .agents/
 skills-lock.json

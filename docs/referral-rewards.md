@@ -20,3 +20,22 @@ After the first invoice is fully repaid, call `claim_referral_reward(sme)`. It c
 For an unattended payout, run an indexer or keeper that reacts to `invoice_repaid` and sends the permissionless claim transaction. Claims are explicit transactions because Soroban events cannot execute another contract by themselves.
 
 Storage entries use the repository's roughly 30-day persistent TTL convention. Operators must maintain/extend contract and storage lifetimes on long-lived deployments; expired attribution or claim storage cannot be reconstructed from this contract alone. Existing deployments also need a backfill/migration policy for SMEs that minted before this feature, since first-mint attribution cannot safely be retroactively asserted.
+
+## Integration test
+
+`contracts/tests/referral_rewards_e2e.rs` (issue #1089) drives the whole multi-contract path with real entrypoints instead of status shortcuts. `set_repaid` is only ever reached by the pool's `repay`, so sequencing bugs across `invoice_nft`, `financing_pool` and `referral_rewards` surface here. The harness reuses the shared `TestWorld` fixture and deploys `AccessControl`, `InvoiceNft`, `FinancingPool` and `ReferralRewards` over a single Stellar Asset Contract whose symbol is also the invoice currency, so the pool's currency conversion is a no-op.
+
+Covered scenarios:
+
+- **Happy path** — mint first invoice with a referrer, list + fund via the pool, repay in full, then a permissionless `claim_referral_reward(sme)` pays the fixed bonus to the referrer exactly once, sets `has_claimed`, moves `paid_total`, and emits the `referral` event.
+- **Unrepaid rejection** — a claim while the invoice is only `Funded` returns `false` and pays nothing; the same claim succeeds once the pool repays.
+- **Double claim** — a second claim returns `false` and leaves both the referrer and contract balances unchanged.
+- **Premature claim** — an unlisted/unfunded first invoice is never eligible.
+- **Self-referral** — `mint_invoice_with_referrer` rejects a self-referral with `InvoiceNftError::InvalidReferrer`, so no first mint and no reward accrue.
+- **Paused protocol** — while the shared `AccessControl` pause is active the `Funded -> Repaid` transition is rejected with `InvoiceNftError::ProtocolPaused` and the reward stays ineligible; unpausing restores the flow.
+
+Run it with:
+
+```
+cargo test -p kora-tests --test referral_rewards_e2e
+```
