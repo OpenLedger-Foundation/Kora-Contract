@@ -2,7 +2,7 @@
 
 **Issue:** #808  
 **Status:** Complete  
-**Last updated:** 2026-09-29
+**Last updated:** 2026-11-23
 
 This document systematically audits every cross-contract call site across all
 Kora contracts for Checks-Effects-Interactions (CEI) ordering violations and
@@ -175,10 +175,28 @@ No new High or Critical findings were identified in this audit pass.
 
 ## CI Guard
 
-The following CI rule is recommended to prevent regression (add to
-`.github/workflows/ci.yml`):
+The `reentrancy-audit-gate` job in `.github/workflows/ci.yml` runs
+`scripts/check_reentrancy_audit.sh` on every push and PR. It enforces:
+
+1. `docs/REENTRANCY_AUDIT.md` has ≥ 27 matrix rows — wholesale deletions are caught.
+2. `contracts/tests/reentrancy_cei_regression.rs` has ≥ 20 `#[test]` functions.
+3. The two open-item regression tests (TR-6 `claim_share`, RR-6 `top_up_stake`) are present.
+4. All six guarded contracts still reference their expected guard type:
+   - `financing_pool` → `RepaymentLock`
+   - `marketplace`, `treasury`, `risk_registry`, `invoice_nft`, `access_control` → `ReentrancyGuard`
+5. Heuristic token-transfer scan: new `.transfer(` call sites not in the allowlist emit a warning and require manual review.
+6. `contracts/shared/src/reentrancy.rs` still defines `ReentrancyGuard` and `acquire_guard`.
+
+**Adding a new cross-contract call site:**
+
+1. Add a row to this document's audit matrix.
+2. Add a regression test in `contracts/tests/reentrancy_cei_regression.rs`.
+3. If the site is intentionally guard-free (documented + CEI correct), add an entry to `REENTRANCY_ALLOWLIST` in `scripts/check_reentrancy_audit.sh` with a one-line justification.
+
+The old ad-hoc CI snippets below are superseded by the script above.
 
 ```yaml
+# Legacy snippet — now covered by scripts/check_reentrancy_audit.sh
 - name: Enforce single KoraError enum
   run: |
     count=$(git grep -c 'pub enum KoraError' contracts/shared/src/errors.rs)
@@ -186,17 +204,6 @@ The following CI rule is recommended to prevent regression (add to
       echo "ERROR: multiple KoraError enums detected in errors.rs"
       exit 1
     fi
-- name: Check brace balance in Rust files
-  run: |
-    failed=0
-    for f in $(git ls-files 'contracts/**/*.rs'); do
-      result=$(awk 'BEGIN{o=0}{for(i=1;i<=length($0);i++){c=substr($0,i,1);if(c=="{")o++;else if(c=="}")o--}}END{if(o!=0)print FILENAME": "o}' "$f")
-      if [ -n "$result" ]; then
-        echo "Unbalanced braces: $result"
-        failed=1
-      fi
-    done
-    if [ "$failed" -ne 0 ]; then exit 1; fi
 ```
 
 ---

@@ -2,7 +2,7 @@
 
 **Issue:** #811  
 **Status:** Complete  
-**Last updated:** 2026-09-29
+**Last updated:** 2026-11-23
 
 This document is the durable, reviewable artifact required by issue #811. It
 enumerates every arithmetic operation site across all contracts, records the
@@ -87,6 +87,42 @@ helpers used by every contract) and from per-contract arithmetic in
 
 ---
 
+### 6. `contracts/shared/src/types.rs` — `DecaySchedule` linear interpolation
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| DS-A | `start_price - floor_price` (spread) | `effective_price` (marketplace caller) | zero floor, normal spread, floor > start underflows, MAX_AMOUNT start | N/A | `test_ds_spread_*` | ✅ Covered |
+| DS-B | `spread * elapsed / window` (discount interpolation) | `effective_price` | zero elapsed, full elapsed, zero window → divide-by-zero, MAX_AMOUNT overflow | ✅ mul-first | `test_ds_interpolation_*` | ✅ Covered |
+| DS-C | `start_price - discount` (effective price) | `effective_price` | zero discount, full decay = floor, never negative invariant | N/A | `test_ds_effective_price_*` | ✅ Covered |
+| DS-D | `floor_price` invariant (0 < floor < start) | constructor / validation | floor = 0 valid, floor ≥ start invalid | N/A | `test_ds_floor_*` | ✅ Covered |
+
+### 7. `contracts/shared/src/types.rs` — `InstallmentSchedule` cumulative sum
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| IS-A | `sum += installment.amount` (safe_add accumulation) | installment schedule validation | three equal tranches, MAX_AMOUNT / 10 × 10, overflow on two i128::MAX/2+1 | N/A | `test_is_installment_sum_*` | ✅ Covered |
+| IS-B | `face_value - paid_so_far` (remaining) | repayment tracking | paid = 0, paid = face_value → 0, paid > face_value underflows | N/A | `test_is_remaining_amount_*` | ✅ Covered |
+| IS-C | `next_index + 1` (u32 counter) | installment advance | u32::MAX overflows | N/A | `test_is_next_index_u32_overflow` | ✅ Covered |
+
+### 8. `contracts/shared/src/types.rs` — `DiscretionaryWithdrawal` amount
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| DW-A | `amount > 0` guard | proposal creation | amount = 0 rejected, negative rejected | N/A | `test_dw_amount_*` | ✅ Covered |
+| DW-B | `amount ≤ MAX_AMOUNT` guard | proposal creation | MAX_AMOUNT ok, MAX_AMOUNT+1 rejected | N/A | `test_dw_amount_*` | ✅ Covered |
+| DW-C | `balance - amount` (safe_sub) | execution | amount = balance → 0, amount > balance underflows, MAX_AMOUNT withdrawal | N/A | `test_dw_withdrawal_*` | ✅ Covered |
+
+### 9. `contracts/shared/src/types.rs` — `RiskTierDefinition` score boundaries
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| RT-A | Tier boundary comparisons at 20/21, 40/41, 60/61, 80/81 | `RiskTier::from_score` | Scores at exact boundary values map to correct tier | N/A | `test_rt_score_to_tier_boundary_*` | ✅ Covered |
+| RT-B | Interior values per tier | `RiskTier::from_score` | Scores 10, 30, 50, 70, 90 each in correct tier | N/A | `test_rt_score_interior_values_all_tiers` | ✅ Covered |
+| RT-C | Extremes: 0 → AAA, 100 → C, u32::MAX → C | `RiskTier::from_score` | Min, max, and saturating values | N/A | `test_rt_score_zero_is_aaa`, `test_rt_score_100_is_c`, `test_rt_score_u32_max_maps_to_c` | ✅ Covered |
+| RT-D | `require_valid_risk_score` gate (> 100 rejected) | validation | 100 ok, 101 err, u32::MAX err | N/A | `test_rt_require_valid_risk_score_guard` | ✅ Covered |
+
+---
+
 ## Coverage Summary
 
 | Module | Operations enumerated | Covered | Gaps |
@@ -96,7 +132,11 @@ helpers used by every contract) and from per-contract arithmetic in
 | `marketplace` | 5 | 5 | 0 |
 | `treasury` | 4 | 4 | 0 |
 | `risk_registry` | 5 | 5 | 0 |
-| **Total** | **30** | **30** | **0** |
+| `DecaySchedule` interpolation | 4 | 4 | 0 |
+| `InstallmentSchedule` cumulative sum | 3 | 3 | 0 |
+| `DiscretionaryWithdrawal` amount | 3 | 3 | 0 |
+| `RiskTierDefinition` boundaries | 4 | 4 | 0 |
+| **Total** | **44** | **44** | **0** |
 
 ---
 

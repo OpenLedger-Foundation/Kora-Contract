@@ -102,6 +102,45 @@ failure or an explicit user decision. Wallet connection state is owned by the
 integrating application; this SDK API provides the on-chain status needed to
 recover its transaction tracker.
 
+## Invoice type — schema v2
+
+The `Invoice` interface tracks the on-chain `kora_shared::types::Invoice` struct at schema version 2. All v2 fields are present:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `bigint` | Monotonically incrementing NFT id |
+| `sme` | `string` | SME account address (hex-encoded Ed25519 key) |
+| `debtorHash` | `Buffer` | SHA-256 of debtor PII — stays off-chain |
+| `amount` | `bigint` | Face value in stroops (7 decimals) |
+| `currency` | `string` | Token symbol, e.g. `"USDC"` |
+| `dueDate` | `bigint` | Unix timestamp |
+| `ipfsCid` | `string` | IPFS CID of full invoice metadata |
+| `metadataHash` | `Buffer` | **v2** — 32-byte SHA-256 content commitment. Empty `Buffer` (length 0) on pre-migration or un-committed records. |
+| `riskScore` | `number` | 0–100 |
+| `riskTier` | `RiskTier` | `"AAA"` \| `"AA"` \| `"A"` \| `"B"` \| `"C"` |
+| `status` | `InvoiceStatus` | `"Created"` \| `"Listed"` \| `"Funded"` \| `"Repaid"` \| `"Defaulted"` |
+| `createdAt` | `bigint` | Unix timestamp |
+| `fundedAt` | `bigint \| null` | `null` until the invoice reaches `Funded` state |
+| `repaidAt` | `bigint \| null` | `null` until repaid |
+| `notes` | `string \| null` | **v2** — optional free-text memo set at mint time. `null` on pre-v2 records. |
+
+### Handling pre-migration (v1) records
+
+Records minted before the v2 migration have both v2 fields in a default state:
+
+- `metadataHash` — empty `Buffer` (`.length === 0`). Check `.length === 32` before treating it as a committed hash.
+- `notes` — `null`. Treat as "no memo" rather than an error.
+
+`decodeInvoice` handles both v1 and v2 records transparently; callers never need to branch on schema version.
+
+### Unknown-field policy
+
+The on-chain `ScVal` map returned by `get_invoice` may contain additional keys in future schema versions. `decodeInvoice` **silently ignores** any key it does not recognise — it never throws on unknown fields. This means:
+
+- Existing SDK consumers are unaffected by additive on-chain schema changes.
+- New required fields added in a future v3 migration will be absent from the decoded object until the SDK is updated. Subscribe to the [changelog](../CHANGELOG.md) for breaking schema changes.
+- If `decodeInvoice` is given a ScVal that is missing a **required** field (e.g. `id`, `amount`, `currency`) it throws a descriptive error: `decodeInvoice: missing field "<key>"`.
+
 ## Contract clients
 
 | Client | Contract |
@@ -218,4 +257,4 @@ In addition to the core 7 contracts, the SDK provides typed clients for extended
 - **`SecondaryMarketClient`** (`contracts/secondary_market`): List investor positions for secondary sale, purchase listed positions, and manage secondary trading fees.
 - **`GovernanceVotingClient`** (`contracts/governance_voting`): Create and vote on governance proposals (Standard and Quadratic voting), manage vote delegation, configure vesting weight sources, and execute proposals.
 
-These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
+These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
