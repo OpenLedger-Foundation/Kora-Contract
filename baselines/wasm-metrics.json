@@ -1,22 +1,13 @@
 {
   "generated_at": "1970-01-01T00:00:00Z",
+  "_note": "All wasm_size_bytes values are 0 until a full release build populates them via `cargo run -p kora-xtask --bin wasm-metrics -- measure-wasm --out baselines/wasm-metrics.json`. Run that command after `make build-optimized` to record real measurements.",
   "contracts": {
     "access_control": {
       "wasm_size_bytes": 0,
       "estimated_cost_units": 0,
       "entrypoints": []
     },
-    "financing_pool": {
-      "wasm_size_bytes": 0,
-      "estimated_cost_units": 0,
-      "entrypoints": []
-    },
     "invoice_nft": {
-      "wasm_size_bytes": 0,
-      "estimated_cost_units": 0,
-      "entrypoints": []
-    },
-    "marketplace": {
       "wasm_size_bytes": 0,
       "estimated_cost_units": 0,
       "entrypoints": []
@@ -27,6 +18,81 @@
       "entrypoints": []
     },
     "treasury": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "financing_pool": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "marketplace": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "price_oracle": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "tranche": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "dispute_resolution": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "dispute_escrow": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "governance": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "governance_voting": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "parameter_registry": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "debtor_attestation": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "secondary_market": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "referral_rewards": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "verifier_nomination": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "fractionalizer": {
+      "wasm_size_bytes": 0,
+      "estimated_cost_units": 0,
+      "entrypoints": []
+    },
+    "vesting": {
       "wasm_size_bytes": 0,
       "estimated_cost_units": 0,
       "entrypoints": []

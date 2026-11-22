@@ -189,12 +189,18 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `set_authorized_callers` | **Admin** | Wires marketplace and financing_pool | Rejects self/distinctness violations |
 | `set_protocol_config` | **Admin** | Validates max risk score | |
 | `get_protocol_config` | Permissionless | Read-only | Zeroed default when unset |
+| `propose_admin` | **Admin** | Rejects new_admin == admin or self address | Stages PendingAdmin; two-step transfer |
+| `accept_admin` | **PendingAdmin** | Caller must equal stored PendingAdmin | Completes handover; clears proposal |
+| `cancel_admin_proposal` | **Admin** | Removes PendingAdmin entry if present | |
 | `set_amount_bounds` | **Admin** | Non-negative ordered amounts | Per-tier bounds |
 | `get_amount_bounds` | Permissionless | Read-only | |
 | `set_mint_rate_limit` | **Admin** | Non-zero max mints and window | Anti-spam protection |
 | `get_mint_rate_limit` | Permissionless | Read-only | |
 | `get_sme_mint_window` | Permissionless | Read-only | Window start and mints used |
 | `mint_invoice` | **SME (Self)** | Rate-limited by mint_rate_limit | Caller must be verified SME |
+| `mint_invoice_with_referrer` | **SME (Self)** | Delegates auth to mint_invoice; referrer must not be sme or contract self; cycle-checked up to 32 hops | First-mint referral attribution |
+| `get_sme_referrer` | Permissionless | Read-only | Returns configured referrer or None |
+| `get_first_mint` | Permissionless | Read-only | Returns first invoice ID or None |
 | `mint_invoices_batch` | **SME (Self)** | Batch size bounded; rate limit per invoice | Atomic batch mint |
 | `amend_invoice` | **SME (Self)** | Owner only; Created status only | Rewrites amount/due/risk |
 | `update_metadata_cid` | **SME (Self)** | Owner only; Created status only | Bounded CID history push |
@@ -229,9 +235,9 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `is_currency_allowed` | Permissionless | Read-only | |
 
 **State Transition Authorization:**
-- Only marketplace can transition `Created → Funded`
-- Only financing_pool can transition `Funded → Repaid`
-- Only admin can transition any state → `Defaulted`
+- Only marketplace can transition `Created → Listed` (via `set_listed`) or `Listed → Created` (via `set_created` relist)
+- Only financing_pool can transition `Listed → Funded` (via `set_funded`) or `Funded → Repaid` (via `set_repaid`)
+- Only admin can mark any `Funded` invoice → `Defaulted` (past due date required)
 
 ---
 
@@ -682,6 +688,58 @@ Run with `--contract <name>` to check a single contract and `--verbose` to dump 
 - Prevents accidental privilege escalation or forgotten authorization checks
 
 ---
+
+## Regenerating and Verifying the Matrix
+
+### Quick reference
+
+```bash
+# Verify the full matrix — exits 0 on clean, 1 on any drift or missing row.
+cargo run -p kora-xtask --bin check_access_matrix
+
+# Scope to a single contract.
+cargo run -p kora-xtask --bin check_access_matrix -- --contract invoice_nft
+
+# Print every parsed entry and per-function result.
+cargo run -p kora-xtask --bin check_access_matrix -- --verbose
+
+# Run the xtask unit tests (parser + detector tests).
+cargo test -p kora-xtask --bin check_access_matrix
+```
+
+### Adding a new entrypoint to `invoice_nft`
+
+The scanner auto-detects authorization by statically inspecting each `pub fn` in the
+`#[contractimpl]` block. When you add a new entrypoint you **must** also add a row to
+the **`### 3. invoice_nft`** table in this file, or CI will fail with
+`UNDOCUMENTED ENTRYPOINTS`.
+
+**Common patterns for `invoice_nft`:**
+
+| Auth pattern in code | Role cell to use |
+|---|---|
+| `admin.require_auth()` + `Self::require_admin` | `**Admin**` |
+| `new_admin.require_auth()` (no `require_admin`) | `**PendingAdmin**` |
+| `sme.require_auth()` | `**SME (Self)**` |
+| `caller.require_auth()` + `require_authorized_caller(&[DataKey::Marketplace])` | `**Marketplace Contract**` |
+| `caller.require_auth()` + `require_authorized_caller(&[DataKey::FinancingPool])` | `**FinancingPool Contract**` |
+| Delegates entirely to `Self::mint_invoice(` (no own `require_auth`) | `**SME (Self)**` |
+| No `require_auth`, read-only view | `Permissionless` |
+
+**Edge cases the scanner handles:**
+
+- `mint_invoice_with_referrer` delegates all authentication to `Self::mint_invoice`
+  and contains no `require_auth()` itself. The scanner detects the `Self::mint_invoice(`
+  call and classifies it as `SelfOwned`. Any future wrapper that similarly delegates to
+  another function **must** either add its own `require_auth()` or be recognized by a
+  corresponding rule in `detect_authorization` in
+  `contracts/xtask/src/bin/check_access_matrix.rs`.
+- `accept_admin` calls `new_admin.require_auth()`. The word-boundary guard in
+  `contains_word` prevents this from matching `admin.require_auth()`, so it correctly
+  classifies as `SelfOwned` (`**PendingAdmin**` in the role cell, which maps via the
+  `"pending"` keyword).
+- Internal `fn` helpers (not `pub fn`) and `#[cfg(test)]` modules are ignored by the
+  scanner.
 
 ## New Entrypoint Checklist
 

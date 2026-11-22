@@ -362,6 +362,17 @@ fn detect_authorization(func: &ImplItemFn) -> Authorization {
         return Authorization::Feeder;
     }
 
+    // Delegation pattern: `mint_invoice_with_referrer` and similar wrappers
+    // that call `Self::mint_invoice(` without containing their own
+    // `require_auth()`. The auth requirement is enforced inside the
+    // delegated function; we classify by the name of the callee.
+    // Currently only `Self::mint_invoice(` delegates SME auth.
+    if !func_body.contains(".require_auth()") {
+        if func_body.contains("Self::mint_invoice(") {
+            return Authorization::SelfOwned;
+        }
+    }
+
     if contains_word(&func_body, "require_auth") {
         // Cross-contract allowlist: `require_authorized_caller(&env, &caller,
         // &[DataKey::Marketplace])`.
@@ -793,5 +804,216 @@ mod tests {
         let fns = extract_public_functions(&file);
         assert_eq!(fns.len(), 1);
         assert_eq!(fns[0].0, "real_fn");
+    }
+
+    // ── invoice_nft transition-caller tests (issue: ACCESS_MATRIX drift) ─────
+
+    /// `mint_invoice_with_referrer` delegates all auth to `Self::mint_invoice`
+    /// and contains no `require_auth()` itself. The scanner must still classify
+    /// it as `SelfOwned` via the delegation-pattern rule.
+    #[test]
+    fn detection_delegates_mint_invoice_to_self_owned() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn mint_invoice_with_referrer(env: Env, sme: Address, referrer: Option<Address>) -> Result<u64, E> {
+                    let id = Self::mint_invoice(env.clone(), sme.clone())?;
+                    Ok(id)
+                }
+            }"#,
+        );
+        assert_eq!(detect_authorization(&func), Authorization::SelfOwned);
+    }
+
+    /// A pure wrapper that calls a *different* self method (not `mint_invoice`)
+    /// must NOT be incorrectly promoted to `SelfOwned`.
+    #[test]
+    fn detection_delegation_only_applies_to_mint_invoice() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn helper_wrapper(env: Env) -> bool {
+                    Self::some_other_helper(&env)
+                }
+            }"#,
+        );
+        // No require_auth and no Self::mint_invoice → Permissionless.
+        assert_eq!(detect_authorization(&func), Authorization::Permissionless);
+    }
+
+    /// `propose_admin` calls `admin.require_auth()` + `Self::require_admin` →
+    /// classified as Admin (not SelfOwned, since the target is the admin).
+    #[test]
+    fn detection_propose_admin_is_admin() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), E> {
+                    admin.require_auth();
+                    Self::require_admin(&env, &admin)?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(detect_authorization(&func), Authorization::Admin);
+    }
+
+    /// `accept_admin` calls `new_admin.require_auth()` with no `require_admin` →
+    /// classified as `SelfOwned` (pending-admin role).
+    /// The word-boundary guard must prevent `new_admin.require_auth()` from
+    /// matching the `admin.require_auth()` pattern.
+    #[test]
+    fn detection_accept_admin_is_self_owned() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), E> {
+                    new_admin.require_auth();
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(detect_authorization(&func), Authorization::SelfOwned);
+    }
+
+    /// `cancel_admin_proposal` calls `admin.require_auth()` + `require_admin` →
+    /// classified as Admin.
+    #[test]
+    fn detection_cancel_admin_proposal_is_admin() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), E> {
+                    admin.require_auth();
+                    Self::require_admin(&env, &admin)?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(detect_authorization(&func), Authorization::Admin);
+    }
+
+    /// `set_created`, `set_listed` → marketplace caller → ContractCaller("marketplace").
+    #[test]
+    fn detection_invoice_nft_transition_callers_marketplace() {
+        let set_created = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn set_created(env: Env, caller: Address, invoice_id: u64) -> Result<(), E> {
+                    caller.require_auth();
+                    Self::require_authorized_caller(&env, &caller, &[DataKey::Marketplace])?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(
+            detect_authorization(&set_created),
+            Authorization::ContractCaller("marketplace".into())
+        );
+        let set_listed = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn set_listed(env: Env, caller: Address, invoice_id: u64) -> Result<(), E> {
+                    caller.require_auth();
+                    Self::require_authorized_caller(&env, &caller, &[DataKey::Marketplace])?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(
+            detect_authorization(&set_listed),
+            Authorization::ContractCaller("marketplace".into())
+        );
+    }
+
+    /// `set_funded`, `set_repaid` → financing_pool caller →
+    /// ContractCaller("financing_pool").
+    #[test]
+    fn detection_invoice_nft_transition_callers_financing_pool() {
+        let set_funded = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn set_funded(env: Env, caller: Address, invoice_id: u64) -> Result<(), E> {
+                    caller.require_auth();
+                    Self::require_authorized_caller(&env, &caller, &[DataKey::FinancingPool])?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(
+            detect_authorization(&set_funded),
+            Authorization::ContractCaller("financing_pool".into())
+        );
+        let set_repaid = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn set_repaid(env: Env, caller: Address, invoice_id: u64) -> Result<(), E> {
+                    caller.require_auth();
+                    Self::require_authorized_caller(&env, &caller, &[DataKey::FinancingPool])?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(
+            detect_authorization(&set_repaid),
+            Authorization::ContractCaller("financing_pool".into())
+        );
+    }
+
+    /// `set_defaulted` → admin + reentrancy → Admin.
+    #[test]
+    fn detection_set_defaulted_is_admin() {
+        let func = parse_fn(
+            r#"#[contractimpl] impl C {
+                pub fn set_defaulted(env: Env, caller: Address, invoice_id: u64) -> Result<(), E> {
+                    caller.require_auth();
+                    Self::require_admin(&env, &caller)?;
+                    Ok(())
+                }
+            }"#,
+        );
+        assert_eq!(detect_authorization(&func), Authorization::Admin);
+    }
+
+    /// invoice_nft matrix rows for the transition callers parse correctly from
+    /// a snippet matching the real ACCESS_MATRIX.md format.
+    #[test]
+    fn parses_invoice_nft_transition_caller_rows() {
+        let md = r#"
+### 3. invoice_nft
+
+| Entrypoint | Required Role | Conditional Authorization | Notes |
+|------------|---------------|---------------------------|-------|
+| `set_created` | **Marketplace Contract** | Caller must be registered marketplace address | Listed to Created relist |
+| `set_listed` | **Marketplace Contract** | Caller must be registered marketplace address | Created to Listed |
+| `set_funded` | **FinancingPool Contract** | Caller must be registered financing_pool address | Listed to Funded |
+| `set_repaid` | **FinancingPool Contract** | Caller must be registered financing_pool address | Funded to Repaid; releases exposure |
+| `set_defaulted` | **Admin** | Funded status; past due date | Manual default marking |
+| `mint_invoice_with_referrer` | **SME (Self)** | Delegates auth to mint_invoice; referrer cycle-checked | First-mint referral attribution |
+| `get_sme_referrer` | Permissionless | Read-only | |
+| `get_first_mint` | Permissionless | Read-only | |
+| `propose_admin` | **Admin** | Rejects new_admin == admin or self address | Two-step transfer |
+| `accept_admin` | **PendingAdmin** | Caller must equal stored PendingAdmin | Completes handover |
+| `cancel_admin_proposal` | **Admin** | Removes pending entry if present | |
+"#;
+        let entries = parse_access_matrix(md).expect("must parse");
+        let by_fn: std::collections::HashMap<_, _> =
+            entries.into_iter().map(|e| (e.function, e.auth)).collect();
+
+        assert_eq!(
+            by_fn["set_created"],
+            Authorization::ContractCaller("marketplace".into())
+        );
+        assert_eq!(
+            by_fn["set_listed"],
+            Authorization::ContractCaller("marketplace".into())
+        );
+        assert_eq!(
+            by_fn["set_funded"],
+            Authorization::ContractCaller("financing_pool".into())
+        );
+        assert_eq!(
+            by_fn["set_repaid"],
+            Authorization::ContractCaller("financing_pool".into())
+        );
+        assert_eq!(by_fn["set_defaulted"], Authorization::Admin);
+        assert_eq!(by_fn["mint_invoice_with_referrer"], Authorization::SelfOwned);
+        assert_eq!(by_fn["get_sme_referrer"], Authorization::Permissionless);
+        assert_eq!(by_fn["get_first_mint"], Authorization::Permissionless);
+        assert_eq!(by_fn["propose_admin"], Authorization::Admin);
+        // **PendingAdmin** contains "pending" → SelfOwned.
+        assert_eq!(by_fn["accept_admin"], Authorization::SelfOwned);
+        assert_eq!(by_fn["cancel_admin_proposal"], Authorization::Admin);
     }
 }
