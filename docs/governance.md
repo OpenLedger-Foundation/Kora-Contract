@@ -219,5 +219,6 @@ To prevent indefinite unreviewed tenure and ensure periodic community oversight:
 - **Council Term Expiry:** Seats are governed by configurable term limits (`configure_council_terms`).
 - **Rotation Elections:** When a term expires, a structured rotation election is conducted (`initiate_council_rotation`, `vote_council_rotation`).
 - **Safe Fallback & Quorum Preservation:** An expiring seat continues to serve during the transition until a successor is confirmed or an automatic grace period extension applies if an election does not produce a confirmed candidate.
+- **Grace-path test coverage:** see [access-control.md — Failed-election grace path](access-control.md#failed-election-grace-path-1103) and `contracts/tests/council_election_grace.rs`.
 - **Credential Handoff:** Integrates with the protocol's secure key-rotation framework for atomic signer replacement.
 

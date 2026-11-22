@@ -98,10 +98,12 @@ env.storage()
     .persistent()
     .remove(&DataKey::Listing(invoice_id, seller.clone()));
 
-// Settle payment: fee to treasury, remainder to seller.
-let fee = bps_of(listing.price, fee_bps)?;
-let seller_proceeds = safe_sub(listing.price, fee)?;
+// Settle payment: fee to treasury, remainder to seller. A whole-position
+// purchase is the exact fill of a single-unit listing.
+let quote = quote_fill(listing.price, 1, 0, 1, fee_bps)?;
 ```
+
+Fill accounting invariants are documented in [secondary-market.md](secondary-market.md).
 
 1. **Atomic execution**: Once `list_position` is in a ledger, `buy_position` can only occur in a subsequent ledger (minimum ~5 seconds)
 2. **No intra-ledger races**: Multiple buyers submitting in the same ledger face deterministic ordering, not miner-controlled ordering
@@ -254,6 +256,31 @@ Stellar Consensus Protocol provides:
 1. **Simulate transactions before submission**: Use Soroban's simulation API to preview execution outcomes
 2. **Avoid stale assumptions**: Don't rely on client-side cached prices - let contracts fetch fresh oracle data
 3. **Fee estimation**: During surge pricing, provide users with fee estimates that increase likelihood of inclusion
+
+### 4.2.1 Surge Pricing Monitor and Fee Hints (#1034)
+
+Items 1 (operators) and 3 (integrators) above are implemented by the
+surge-pricing monitor in `services/fx-ingestion` and the SDK fee-hint helpers:
+
+- **Surge detection threshold:** surge pricing is considered active when the
+  larger p90 of the classic and Soroban inclusion-fee distributions reported by
+  Soroban RPC `getFeeStats` is at least **1.5x the 100-stroop network minimum**
+  (`FEE_HINT_SURGE_THRESHOLD_BPS=15000`). The suggested multiplier is that
+  ratio, clamped to 10x by default (`FEE_HINT_MAX_MULTIPLIER_BPS`).
+- **Monitoring:** `kora_surge_pricing_active` (gauge),
+  `kora_surge_episodes_total`, `kora_fee_hint_multiplier_bps` and
+  `kora_fee_stats_poll_errors_total` are scraped by Prometheus and plotted in
+  the "Stellar surge pricing" row of `infra/monitoring/grafana-dashboard.json`.
+- **Client hints:** `GET /network/fee-hint` returns `base_fee`,
+  `surge_multiplier_bps` and `observed_at`; the SDK applies it to
+  `TransactionBuilder` fees when `KORA_USE_FEE_HINTS=true`
+  (see `sdk/README.md`). When RPC fee stats are unavailable the endpoint keeps
+  answering with a degraded, last-known-good (or 1.0x) hint.
+
+Fee hints are **advisory only**. They raise the probability that a protocol
+transaction is included during congestion; they do not provide, and this
+document does not claim, any consensus, inclusion or ordering guarantee beyond
+the network properties described in §1.
 
 ### 4.3 Future Protocol Changes to Monitor
 

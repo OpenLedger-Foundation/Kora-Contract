@@ -48,6 +48,32 @@
       "targets": [{ "expr": "kora_indexer_lag_seconds", "legendFormat": "ledger lag", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "desc" } }
+    },
+    {
+      "id": 5,
+      "title": "Stellar surge pricing",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "kora_surge_pricing_active", "legendFormat": "surge active", "refId": "A" },
+        { "expr": "increase(kora_surge_episodes_total[1h])", "legendFormat": "episodes / 1h", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 6,
+      "title": "Fee hint multiplier",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "kora_fee_hint_multiplier_bps / 10000", "legendFormat": "suggested multiplier (x)", "refId": "A" },
+        { "expr": "increase(kora_fee_stats_poll_errors_total[15m])", "legendFormat": "fee-stats poll errors / 15m", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
     }
   ]
 }
