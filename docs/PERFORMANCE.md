@@ -21,6 +21,12 @@ Soroban enforces strict upper bounds on deployed WASM size. To avoid late-stage 
 | `governance` | 120 KB (122,880 B) | Protocol upgrade proposals |
 | `governance_voting` | 120 KB (122,880 B) | Governance ballots and quorum |
 | `parameter_registry` | 120 KB (122,880 B) | Governed protocol parameters |
+| `debtor_attestation` | 120 KB (122,880 B) | On-chain debtor identity attestation |
+| `referral_rewards` | 120 KB (122,880 B) | Referrer fee tracking & distribution |
+| `verifier_nomination` | 120 KB (122,880 B) | Community verifier nomination flow |
+| `fractionalizer` | 120 KB (122,880 B) | Position fractionalisation & wrapping |
+| `secondary_market` | 120 KB (122,880 B) | Secondary position sale offers |
+| `vesting` | 120 KB (122,880 B) | Token vesting schedules & claims |
 
 The JSON keys omit the `kora_` artifact prefix: `dispute_escrow` gates
 `kora_dispute_escrow.optimized.wasm`, falling back to the release `.wasm`.
