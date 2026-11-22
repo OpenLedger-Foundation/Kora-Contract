@@ -39,6 +39,7 @@ interface Config {
   retryBackoffMs: number;
   maxNewProposalsPerCycle: number;
   dbPath: string;
+  onDivergence?: (event: ProposalDivergence) => void;
 }
 
 interface DeploymentManifest {
@@ -175,6 +176,70 @@ export interface Proposal {
   quorum_required: number;
 }
 
+export type ProposalPayload = Pick<
+  Proposal,
+  | 'id'
+  | 'proposer'
+  | 'title'
+  | 'description'
+  | 'proposal_type'
+  | 'voting_mode'
+  | 'created_at'
+  | 'expires_at'
+  | 'quorum_required'
+>;
+
+export interface ProposalDivergence {
+  proposalId: number;
+  fields: Array<keyof ProposalPayload>;
+  canonical: ProposalPayload;
+  offchain: ProposalPayload;
+}
+
+export interface GovernanceSyncMetrics {
+  proposalsSynced: number;
+  proposalDivergences: number;
+}
+
+const CANONICAL_PAYLOAD_FIELDS: Array<keyof ProposalPayload> = [
+  'id',
+  'proposer',
+  'title',
+  'description',
+  'proposal_type',
+  'voting_mode',
+  'created_at',
+  'expires_at',
+  'quorum_required',
+];
+
+export function proposalPayload(proposal: Proposal): ProposalPayload {
+  return {
+    id: proposal.id,
+    proposer: proposal.proposer,
+    title: proposal.title,
+    description: proposal.description,
+    proposal_type: proposal.proposal_type,
+    voting_mode: proposal.voting_mode,
+    created_at: proposal.created_at,
+    expires_at: proposal.expires_at,
+    quorum_required: proposal.quorum_required,
+  };
+}
+
+export function detectProposalDivergence(
+  canonical: Proposal,
+  offchain: ProposalPayload,
+): ProposalDivergence | null {
+  const canonicalPayload = proposalPayload(canonical);
+  const fields = CANONICAL_PAYLOAD_FIELDS.filter(
+    (field) => canonicalPayload[field] !== offchain[field],
+  );
+  return fields.length > 0
+    ? { proposalId: canonical.id, fields, canonical: canonicalPayload, offchain }
+    : null;
+}
+
 // On-chain enum discriminants match the declaration order in
 // contracts/governance_voting/src/lib.rs (VotingMode, ProposalType).
 const VOTING_MODE_BY_DISCRIMINANT: Record<number, string> = {
@@ -308,6 +373,7 @@ class ForumClient {
           metadata: {
             proposal_id: proposal.id,
             voting_mode: proposal.voting_mode,
+            proposal_payload: proposalPayload(proposal),
           },
         });
       });
@@ -319,6 +385,31 @@ class ForumClient {
     }
   }
 
+  async getThreadProposal(threadId: string): Promise<ProposalPayload | null> {
+    const response = await this.retryWithBackoff(() => this.api.get(`/threads/${threadId}`));
+    const payload = response.data?.metadata?.proposal_payload;
+    if (payload === undefined || payload === null) return null;
+    if (typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error(`Forum thread ${threadId} has malformed proposal_payload metadata`);
+    }
+
+    const candidate = payload as Partial<ProposalPayload>;
+    if (
+      typeof candidate.id !== 'number'
+      || typeof candidate.proposer !== 'string'
+      || typeof candidate.title !== 'string'
+      || typeof candidate.description !== 'string'
+      || typeof candidate.proposal_type !== 'string'
+      || typeof candidate.voting_mode !== 'string'
+      || typeof candidate.created_at !== 'number'
+      || typeof candidate.expires_at !== 'number'
+      || typeof candidate.quorum_required !== 'number'
+    ) {
+      throw new Error(`Forum thread ${threadId} has incomplete proposal_payload metadata`);
+    }
+    return candidate as ProposalPayload;
+  }
+
   /**
    * Update thread with current vote tallies
    */
@@ -326,6 +417,16 @@ class ForumClient {
     const tallyUpdate = this.formatTallyUpdate(proposal);
 
     try {
+      await this.retryWithBackoff(async () => {
+        await this.api.patch(`/threads/${threadId}`, {
+          title: `[Proposal #${proposal.id}] ${proposal.title}`,
+          metadata: {
+            proposal_id: proposal.id,
+            voting_mode: proposal.voting_mode,
+            proposal_payload: proposalPayload(proposal),
+          },
+        });
+      });
       await this.retryWithBackoff(async () => {
         await this.api.post(`/threads/${threadId}/posts`, {
           body: tallyUpdate,
@@ -389,6 +490,10 @@ ${proposal.description}
 **Vote Tally Update**
 
 **Status:** ${status}
+
+**Canonical Proposal Details (on-chain):** ${proposal.title}
+
+${proposal.description}
 
 - ✅ For: ${proposal.votes_for}
 - ❌ Against: ${proposal.votes_against}
@@ -492,8 +597,12 @@ class GovernanceMonitor {
   private config: Config;
   private db: SyncDatabase;
   private forum: ForumClient;
-  private reader: GovernanceVotingReader;
+  private reader: ProposalReader;
   private lastProcessedProposalId: number = -1;
+  private readonly syncMetrics: GovernanceSyncMetrics = {
+    proposalsSynced: 0,
+    proposalDivergences: 0,
+  };
 
   constructor(config: Config, reader?: ProposalReader) {
     this.config = config;
@@ -503,7 +612,7 @@ class GovernanceMonitor {
     this.reader = reader ?? new GovernanceVotingReader(this.rpc, config.governanceContractId, config.rpcUrl);
   }
 
-  async start(): void {
+  async start(): Promise<void> {
     logger.info('Starting governance-forum sync service...');
 
     // Main polling loop
@@ -575,6 +684,28 @@ class GovernanceMonitor {
     }
 
     if (existing) {
+      const offchainProposal = await this.forum.getThreadProposal(existing.forum_thread_id);
+      if (offchainProposal) {
+        const divergence = detectProposalDivergence(proposal, offchainProposal);
+        if (divergence) {
+          this.syncMetrics.proposalDivergences += 1;
+          logger.error(
+            {
+              alert: 'governance_proposal_divergence',
+              proposal_id: proposalId,
+              fields: divergence.fields,
+              canonical_source: 'on-chain',
+            },
+            'Off-chain proposal diverges from canonical on-chain proposal; correcting forum thread',
+          );
+          try {
+            this.config.onDivergence?.(divergence);
+          } catch (error) {
+            logger.error({ error, proposal_id: proposalId }, 'Divergence alert handler failed');
+          }
+        }
+      }
+
       // Update existing thread with fresh tallies
       await this.forum.updateThread(existing.forum_thread_id, proposal);
       const current = this.db.getSyncRecord(proposalId)!;
@@ -600,7 +731,12 @@ class GovernanceMonitor {
       );
     }
 
+    this.syncMetrics.proposalsSynced += 1;
     return proposal;
+  }
+
+  getMetrics(): GovernanceSyncMetrics {
+    return { ...this.syncMetrics };
   }
 
   private sleep(ms: number): Promise<void> {
@@ -660,4 +796,9 @@ if (require.main === module) {
   });
 }
 
-export { GovernanceMonitor, ForumClient, SyncDatabase, GovernanceErrorCode, GovernanceSyncError, decodeProposal };
+export {
+  GovernanceMonitor,
+  ForumClient,
+  SyncDatabase,
+  decodeProposal,
+};

@@ -7,6 +7,7 @@ Syncs on-chain governance proposals from the `governance_voting` contract with a
 - **Automatic Thread Creation**: New proposals automatically get forum threads
 - **Live Vote Tallies**: Threads display current vote counts from chain
 - **Idempotent Sync**: Keyed by proposal ID to prevent duplicate threads
+- **Canonical Conflict Resolution**: Detects proposal-payload changes in forum metadata and refreshes the thread from on-chain state
 - **Retry with Backoff**: Handles forum API downtime gracefully
 - **Read-Only**: One-way sync (chain → forum), no forum-triggered actions
 
@@ -129,7 +130,19 @@ CREATE TABLE sync_records (
 The forum platform must provide:
 
 - `POST /threads` - Create new thread
+- `GET /threads/{id}` - Return the thread's `metadata.proposal_payload`
+- `PATCH /threads/{id}` - Update its title and canonical proposal metadata
 - `POST /threads/{id}/posts` - Add post to thread
+
+New threads store the authoring payload as `metadata.proposal_payload`. On every
+refresh, the service compares that payload's proposer, title, description,
+proposal type, voting mode, timestamps, and quorum with the contract. A mismatch
+emits a structured `governance_proposal_divergence` alert and increments
+`proposalDivergences` in `GovernanceMonitor.getMetrics()`. The on-chain record is
+always canonical: the service posts the on-chain title and description alongside
+the current tally and updates the thread title/metadata from chain. Existing
+threads without `proposal_payload` metadata cannot be compared until their
+forum metadata is backfilled; the first successful refresh then fills it in.
 
 Request format:
 
@@ -140,7 +153,18 @@ Request format:
   "tags": ["governance", "financial"],
   "metadata": {
     "proposal_id": 123,
-    "voting_mode": "Standard"
+    "voting_mode": "Standard",
+    "proposal_payload": {
+      "id": 123,
+      "proposer": "G...",
+      "title": "Example Proposal",
+      "description": "Proposal details",
+      "proposal_type": "Financial",
+      "voting_mode": "Standard",
+      "created_at": 1700000000,
+      "expires_at": 1700600000,
+      "quorum_required": 100
+    }
   }
 }
 ```
@@ -186,6 +210,7 @@ Tests cover:
 - Retry on forum downtime
 - Tally freshness within bounds
 - Database sync record management
+- Fixture-based detection of divergent proposal payloads and on-chain canonical correction
 
 ## Security
 

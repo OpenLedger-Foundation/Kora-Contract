@@ -1,0 +1,66 @@
+# packaging/docker-compose.yml
+# Batteries-included local/community deployment: indexer + Postgres.
+#
+# Usage:
+#   cp packaging/.env.example .env   # then fill in CONTRACT_* addresses
+#   docker compose -f packaging/docker-compose.yml up -d
+#
+# The indexer connects to Postgres on the internal `kora` network; expose
+# port 3000 on the host for health-check / API access.
+#
+# Environment variables are loaded from a .env file at the project root.
+# Required variables (no defaults):
+#   STELLAR_NETWORK, SOROBAN_RPC_URL, CONTRACT_INVOICE_NFT,
+#   CONTRACT_MARKETPLACE, CONTRACT_FINANCING_POOL, CONTRACT_RISK_REGISTRY,
+#   CONTRACT_PRICE_ORACLE, CONTRACT_GOVERNANCE, CONTRACT_ACCESS_CONTROL
+# See packaging/.env.example for a full template.
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kora
+      POSTGRES_PASSWORD: kora
+      POSTGRES_DB: kora_indexer
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kora
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kora -d kora_indexer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  indexer:
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      # Override the SQLite default baked into the image with the Postgres URL.
+      DATABASE_URL: postgresql://kora:kora@postgres:5432/kora_indexer
+    ports:
+      - "3000:3000"
+    networks:
+      - kora
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  kora:
+    driver: bridge
+
+volumes:
+  postgres_data:

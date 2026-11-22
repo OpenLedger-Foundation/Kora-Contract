@@ -6,9 +6,39 @@ This directory contains packaging and deployment automation for community-run Ko
 
 - **`kora-indexer.service`** — systemd service definition for production deployment
 - **`deploy-indexer.sh`** — Automated deployment script (requires sudo)
-- **Docker support** — Coming soon (track issue #XXX)
+- **`Dockerfile`** — Multi-stage Docker image for the indexer binary
+- **`docker-compose.yml`** — Docker Compose stack (indexer + Postgres)
+- **`.env.example`** — Environment variable template for both deployment paths
 
 ## Quick Start
+
+### Docker Compose (recommended)
+
+The fastest way to run a community indexer with a local Postgres database.
+
+```bash
+# 1. Copy and edit the env template
+cp packaging/.env.example .env
+# Fill in STELLAR_NETWORK, SOROBAN_RPC_URL, and CONTRACT_* addresses
+
+# 2. Start the stack
+docker compose -f packaging/docker-compose.yml up -d
+
+# 3. Tail logs
+docker compose -f packaging/docker-compose.yml logs -f indexer
+```
+
+Health check: `curl http://localhost:3000/api/v1/health`
+
+### Docker (standalone)
+
+```bash
+# Build the image from the workspace root
+docker build -t kora-indexer:latest -f packaging/Dockerfile .
+
+# Run with an external Postgres or SQLite
+docker run --env-file .env -p 3000:3000 kora-indexer:latest
+```
 
 ### Automated Deployment (Ubuntu/Debian)
 

@@ -1,5 +1,5 @@
 {
-  "_description": "Per-contract WASM size budgets in bytes. Enforced in CI via scripts/check-wasm-size.sh (invoked by the wasm-size job in .github/workflows/ci.yml). The canonical budget file is wasm-budgets.json at the workspace root; this copy must stay in sync with it.",
+  "_description": "Per-contract WASM size budgets in bytes. Enforced in CI via .github/workflows/wasm-size.yml",
   "budgets": {
     "access_control": 122880,
     "invoice_nft": 122880,
@@ -15,10 +15,10 @@
     "governance_voting": 122880,
     "parameter_registry": 122880,
     "debtor_attestation": 122880,
-    "secondary_market": 122880,
     "referral_rewards": 122880,
     "verifier_nomination": 122880,
     "fractionalizer": 122880,
+    "secondary_market": 122880,
     "vesting": 122880
   },
   "default_budget_bytes": 122880

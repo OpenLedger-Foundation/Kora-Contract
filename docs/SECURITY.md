@@ -21,11 +21,16 @@ listed. For incident procedure, see [EMERGENCY_PAUSE_DRILL.md](EMERGENCY_PAUSE_D
 `financing_pool`, `fractionalizer`, `invoice_nft`, `marketplace`, `price_oracle`,
 `risk_registry`, `secondary_market`, `treasury`). 10 contracts are N/A.
 
+**Extended in #1038:** Contracts `governance`, `referral_rewards`, `debtor_attestation`,
+`dispute_escrow`, and `parameter_registry` were previously marked N/A with no rationale.
+Each is now audited below; none calls `require_not_paused`, but their exemption
+rationale and risk profile are documented per entrypoint.
+
 | Contract | Entrypoint | Paused? | Notes |
 |---|---|---|---|
 | **access_control** | — | N/A | Hosts the pause itself (`pause` / `unpause` / `emergency_pause_by_guardian`). Role and multisig management must keep working during an incident |
-| **debtor_attestation** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
-| **dispute_escrow** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
+| **debtor_attestation** | — | N/A | Audited in #1038: no `require_not_paused` call found in any entrypoint. `attest` and `attest_via_relay` write attestation records but do not move protocol funds; they are outside the economic-activity pause scope. `add_relay` / `remove_relay` are admin-only configuration; must stay available during an incident so a compromised relay can be cut off. All read-only views (`attestation_status`, `is_confirmed`, `get_record`, `nonce_of`) are always permissionless. **Risk:** if a future version adds a fund-moving entrypoint it must be pause-guarded; the `check_pause_matrix` CI gate will catch the drift. |
+| **dispute_escrow** | — | N/A | Audited in #1038: no `require_not_paused` call found. `open_dispute` locks escrow funds, but allowing dispute escalation during a pause is intentional — a user must be able to protect their stake even when the protocol is paused. `resolve_dispute` / `resolve_timeout` release funds and must remain available. No fund-moving mutator should be blocked while disputes are pending. |
 | **dispute_resolution** | `open_dispute` | ✓ YES |  |
 | **dispute_resolution** | `resolve_dispute` / `submit_evidence` | ✗ NO | Open disputes can still be progressed and closed |
 | **financing_pool** | `accept_early_settlement` | ✓ YES |  |
@@ -47,8 +52,8 @@ listed. For incident procedure, see [EMERGENCY_PAUSE_DRILL.md](EMERGENCY_PAUSE_D
 | **fractionalizer** | `unwrap` | ✓ YES |  |
 | **fractionalizer** | `wrap` | ✓ YES |  |
 | **fractionalizer** | `redeem` / `settle` / `transfer_shares` | ✗ NO | Outbound / settlement paths |
-| **governance** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
-| **governance_voting** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
+| **governance** | — | N/A | Audited in #1038: no `require_not_paused` call found. Governance (proposal creation, voting, execution) must remain operational during a pause — it is the mechanism by which the protocol recovers from an incident. Blocking governance entrypoints during a pause would prevent the multisig from unpausing the protocol. All entrypoints intentionally exempt. |
+| **governance_voting** | — | N/A | No `require_not_paused` in this contract; voting weight management is governance infrastructure and must stay available during an incident. |
 | **invoice_nft** | `amend_invoice` | ✓ YES |  |
 | **invoice_nft** | `commit_metadata_hash` | ✓ YES |  |
 | **invoice_nft** | `flag_metadata_mismatch` | ✓ YES |  |
@@ -72,10 +77,10 @@ listed. For incident procedure, see [EMERGENCY_PAUSE_DRILL.md](EMERGENCY_PAUSE_D
 | **marketplace** | `cancel_listing` / `withdraw_listing` / `request_cancellation` | ✗ NO | Sellers can always withdraw a listing |
 | **marketplace** | `claim_refund` | ✗ NO | Investors can always recover funds from expired listings |
 | **marketplace** | `set_fee_bps` / `update_fee_bps` | ✗ NO | Admin configuration |
-| **parameter_registry** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
+| **parameter_registry** | — | N/A | Audited in #1038: no `require_not_paused` call found. `admin_set_parameter` and governance-gated `propose/approve/execute_param_update` modify protocol parameters; blocking them during a pause would prevent operators from adjusting risk settings as part of an incident response. `get_value` / `get_values_batch` are read-only and always permissionless. **Risk:** if a future entrypoint moves funds it must be pause-guarded. |
 | **price_oracle** | `set_price` | ✓ YES | No price updates during a pause |
 | **price_oracle** | `add_feeder` / `remove_feeder` / `clear_peg_flag` | ✗ NO | Admin feed management; removing a compromised feeder must work while paused |
-| **referral_rewards** | — | N/A | No `require_not_paused` in this contract; it is outside the protocol pause scope. Review before adding fund-moving entrypoints |
+| **referral_rewards** | — | N/A | Audited in #1038: no `require_not_paused` call found. `deposit` loads the reward pool (admin-only, no user funds moved from user wallet during a pause). `claim_referral_reward` is permissionless and pays out from an isolated contract balance — allowing claims during a pause is intentional so referrers are not disadvantaged by an incident they did not cause. `has_claimed` / `paid_total` are read-only. No entrypoint warrants a pause gate under the current implementation. |
 | **risk_registry** | `add_sub_account` | ✓ YES |  |
 | **risk_registry** | `add_verifier` | ✓ YES |  |
 | **risk_registry** | `cancel_verifier_removal` | ✓ YES |  |

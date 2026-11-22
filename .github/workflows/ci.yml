@@ -304,6 +304,19 @@ jobs:
           FUZZ_ITERS: "100"
         run: cargo test -p kora-fuzz --test smoke fuzz_dispute_resolution -- --ignored
 
+  # ── deploy.sh parameter_registry order guard (issue #1083) ──────────────
+  #
+  # Parses scripts/deploy.sh at the text level and asserts that
+  # parameter_registry is deployed and initialized before marketplace and
+  # financing_pool. Cheap and CI-fast — no Rust compile needed.
+  deploy-order-guard:
+    name: deploy.sh dependency order
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check parameter_registry precedes dependents
+        run: bash scripts/check_deploy_order.sh
+
   # ── Code coverage gate (issue #643) ──────────────────────────────────────
   #
   # Measures code coverage using cargo-tarpaulin with a minimum threshold
