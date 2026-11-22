@@ -98,3 +98,72 @@ export interface ExportJob {
   requestedAt: number;
   completedAt?: number;
 }
+
+// ── Treasury Transparency Types (Issue #1099) ─────────────────────────────────
+
+/** A treasury fee/inflow event. */
+export interface TreasuryInflow {
+  id: string;
+  asset: string;
+  amount: string;          // stroops as decimal string (7 decimal places)
+  source: string;
+  invoiceId?: string;
+  txHash: string;
+  ledgerSequence: number;
+  timestamp: number;       // Unix seconds
+}
+
+/** A treasury withdrawal/outflow event. */
+export interface TreasuryOutflow {
+  id: string;
+  asset: string;
+  amount: string;          // stroops as decimal string
+  recipient: string;
+  reason?: string;
+  txHash: string;
+  ledgerSequence: number;
+  timestamp: number;       // Unix seconds
+}
+
+/** Per-token treasury balance summary. */
+export interface TreasuryBalance {
+  asset: string;
+  balance: string;         // stroops as decimal string
+  totalInflows: string;
+  totalOutflows: string;
+  reserveBalance?: string;
+}
+
+/** Indexer sync status for treasury transparency responses. */
+export interface TreasuryIndexerStatus {
+  lastIndexedLedger: number;
+  latestChainLedger?: number;
+  partial: boolean;
+  lagWarning?: string;
+}
+
+/** Query options for treasury inflows/outflows endpoints. */
+export interface TreasuryQueryOptions {
+  asset?: string;
+  fromTs?: number;
+  toTs?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** Response envelope for GET /treasury/balances. */
+export interface TreasuryBalancesResponse extends TreasuryIndexerStatus {
+  balances: TreasuryBalance[];
+}
+
+/** Response envelope for GET /treasury/inflows. */
+export interface TreasuryInflowsResponse extends TreasuryIndexerStatus {
+  inflows: TreasuryInflow[];
+  total: number;
+}
+
+/** Response envelope for GET /treasury/outflows. */
+export interface TreasuryOutflowsResponse extends TreasuryIndexerStatus {
+  outflows: TreasuryOutflow[];
+  total: number;
+}

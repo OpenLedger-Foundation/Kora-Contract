@@ -159,6 +159,21 @@ Persistent entries are TTL-bumped to ~31 days (535,680 ledgers) on every write.
 
 ---
 
+## Events
+
+All vesting contract events are emitted using the shared `kora_shared::events` schema with topics `("SCHEMA_V", <event_topic>, EVENT_SCHEMA_VERSION)`:
+
+| Topic | Trigger | Payload |
+|-------|---------|---------|
+| `VEST_INIT` | `initialize` | `(admin, token, timestamp)` |
+| `VEST_GRANT` | `create_grant` | `(admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp)` |
+| `VEST_REL` | `release` | `(beneficiary, amount, timestamp)` |
+| `VEST_REV` | `revoke_grant` | `(admin, beneficiary, revoked_at, timestamp)` |
+| `UPG_PROP` | `propose_upgrade` | `(admin, wasm_hash, timestamp)` |
+| `UPG_EXEC` | `execute_upgrade` | `(admin, wasm_hash, timestamp)` |
+
+---
+
 ## Security Analysis
 
 ### Threat: Premature voting weight

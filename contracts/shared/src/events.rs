@@ -1525,3 +1525,67 @@ pub fn param_updated(env: &Env, executor: &Address, key: u32, old_value: i128, n
     );
 }
 
+// ── Vesting Events ──────────────────────────────────────────────────────────
+
+/// Schema: (actor=admin, token, timestamp)
+pub fn vesting_initialized(env: &Env, admin: &Address, token: &Address) {
+    emit(
+        env,
+        symbol_short!("VEST_INIT"),
+        (admin.clone(), token.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp)
+pub fn vesting_grant_created(
+    env: &Env,
+    admin: &Address,
+    beneficiary: &Address,
+    total_amount: i128,
+    start_time: u64,
+    cliff_duration: u64,
+    vesting_duration: u64,
+) {
+    emit(
+        env,
+        symbol_short!("VEST_GRANT"),
+        (
+            admin.clone(),
+            beneficiary.clone(),
+            total_amount,
+            start_time,
+            cliff_duration,
+            vesting_duration,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (actor=beneficiary, amount, timestamp)
+pub fn vesting_tokens_released(env: &Env, beneficiary: &Address, amount: i128) {
+    emit(
+        env,
+        symbol_short!("VEST_REL"),
+        (beneficiary.clone(), amount, env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, beneficiary, revoked_at, timestamp)
+pub fn vesting_grant_revoked(
+    env: &Env,
+    admin: &Address,
+    beneficiary: &Address,
+    revoked_at: u64,
+) {
+    emit(
+        env,
+        symbol_short!("VEST_REV"),
+        (
+            admin.clone(),
+            beneficiary.clone(),
+            revoked_at,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+

@@ -459,3 +459,52 @@ Prior to fix #343, `KoraError::Reentrancy` shared discriminant 95 with another v
 6. `withdraw`/`emergency_withdraw` recipients must always be on the matured allowlist.
 7. `ReserveBalance(token)` never exceeds the live token balance, and is never reduced by `withdraw`/`emergency_withdraw`.
 8. When an `access_control` multisig with `threshold > 1` is linked, `withdraw`, `emergency_withdraw`, `set_fee_bps`, and `propose_upgrade` are unreachable except via an executed, quorum-approved `TreasuryProposal`.
+
+---
+
+## Treasury Transparency REST API (`services/reporting`)
+
+For the `apps/web` treasury dashboard (Issue #1099), `services/reporting` exposes public, read-only `GET` endpoints. See `docs/openapi-treasury.yaml` for the full OpenAPI 3.0 specification.
+
+### Public Authentication
+
+All `/treasury/*` endpoints bypass `authenticate()` and do **not** require an `X-Api-Key` or `Authorization` header.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/treasury/balances` | Per-token net balances, total inflows, and total outflows |
+| `GET` | `/treasury/inflows` | Paginated fee/inflow events |
+| `GET` | `/treasury/outflows` | Paginated withdrawal/outflow events |
+
+#### Query Parameters (`/treasury/inflows` & `/treasury/outflows`)
+
+- `asset` (string, optional): Filter by asset symbol or token address (e.g., `USDC`).
+- `fromTs` / `from_ts` (number, optional): Inclusive start Unix timestamp (seconds).
+- `toTs` / `to_ts` (number, optional): Inclusive end Unix timestamp (seconds).
+- `limit` (number, optional): Maximum number of records to return.
+- `offset` (number, optional): Number of records to skip.
+
+#### Response Envelopes & Indexer Lag
+
+Every response includes indexer sync metadata:
+
+```json
+{
+  "balances": [
+    {
+      "asset": "USDC",
+      "balance": "2450000000",
+      "totalInflows": "3000000000",
+      "totalOutflows": "550000000"
+    }
+  ],
+  "lastIndexedLedger": 51200000,
+  "latestChainLedger": 51200000,
+  "partial": false
+}
+```
+
+- **Partial Indexer Lag:** When the indexer is behind the chain tip (`latestChainLedger - lastIndexedLedger > 10`), `partial` is set to `true` and `lagWarning` describes the ledger gap.
+- **Empty Treasury:** When no treasury events exist, `balances`, `inflows`, and `outflows` return empty arrays (`[]`) and `total` is `0` with HTTP `200`.

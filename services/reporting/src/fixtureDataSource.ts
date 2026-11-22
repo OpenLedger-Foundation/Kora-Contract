@@ -8,7 +8,16 @@
  */
 
 import { ReportingDataSource } from "./exportJobQueue";
-import { UserStatement, ProtocolStatement } from "./types";
+import {
+  UserStatement,
+  ProtocolStatement,
+  TreasuryBalancesResponse,
+  TreasuryInflowsResponse,
+  TreasuryOutflowsResponse,
+  TreasuryQueryOptions,
+  TreasuryInflow,
+  TreasuryOutflow,
+} from "./types";
 
 export class FixtureReportingDataSource implements ReportingDataSource {
   async getUserStatement(
@@ -74,6 +83,122 @@ export class FixtureReportingDataSource implements ReportingDataSource {
       totalInvoicesRepaid: 38,
       totalInvoicesDefaulted: 2,
       summaryByAsset: [],
+    };
+  }
+
+  async getTreasuryBalances(): Promise<TreasuryBalancesResponse> {
+    return {
+      balances: [
+        {
+          asset: "USDC",
+          balance: "2450000000",
+          totalInflows: "3000000000",
+          totalOutflows: "550000000",
+          reserveBalance: "250000000",
+        },
+        {
+          asset: "EURC",
+          balance: "1200000000",
+          totalInflows: "1200000000",
+          totalOutflows: "0",
+          reserveBalance: "100000000",
+        },
+      ],
+      lastIndexedLedger: 51200000,
+      latestChainLedger: 51200000,
+      partial: false,
+    };
+  }
+
+  async getTreasuryInflows(
+    options: TreasuryQueryOptions = {}
+  ): Promise<TreasuryInflowsResponse> {
+    const all: TreasuryInflow[] = [
+      {
+        id: "fixture-inflow-001",
+        asset: "USDC",
+        amount: "1500000000",
+        source: "marketplace_fee",
+        invoiceId: "fixture-inv-001",
+        txHash: "0xfixture_inflow_001",
+        ledgerSequence: 51199800,
+        timestamp: 1700000000,
+      },
+      {
+        id: "fixture-inflow-002",
+        asset: "USDC",
+        amount: "1500000000",
+        source: "marketplace_fee",
+        invoiceId: "fixture-inv-002",
+        txHash: "0xfixture_inflow_002",
+        ledgerSequence: 51199900,
+        timestamp: 1700086400,
+      },
+      {
+        id: "fixture-inflow-003",
+        asset: "EURC",
+        amount: "1200000000",
+        source: "marketplace_fee",
+        invoiceId: "fixture-inv-003",
+        txHash: "0xfixture_inflow_003",
+        ledgerSequence: 51199950,
+        timestamp: 1700172800,
+      },
+    ];
+
+    const filtered = all.filter((item) => {
+      if (options.asset && item.asset !== options.asset) return false;
+      if (options.fromTs !== undefined && item.timestamp < options.fromTs) return false;
+      if (options.toTs !== undefined && item.timestamp > options.toTs) return false;
+      return true;
+    });
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
+    return {
+      inflows: paged,
+      total: filtered.length,
+      lastIndexedLedger: 51200000,
+      latestChainLedger: 51200000,
+      partial: false,
+    };
+  }
+
+  async getTreasuryOutflows(
+    options: TreasuryQueryOptions = {}
+  ): Promise<TreasuryOutflowsResponse> {
+    const all: TreasuryOutflow[] = [
+      {
+        id: "fixture-outflow-001",
+        asset: "USDC",
+        amount: "550000000",
+        recipient: "GFIXTURE_TREASURY_OPS_RECIPIENT",
+        reason: "withdrawal",
+        txHash: "0xfixture_outflow_001",
+        ledgerSequence: 51199980,
+        timestamp: 1700100000,
+      },
+    ];
+
+    const filtered = all.filter((item) => {
+      if (options.asset && item.asset !== options.asset) return false;
+      if (options.fromTs !== undefined && item.timestamp < options.fromTs) return false;
+      if (options.toTs !== undefined && item.timestamp > options.toTs) return false;
+      return true;
+    });
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? filtered.length;
+    const paged = filtered.slice(offset, offset + limit);
+
+    return {
+      outflows: paged,
+      total: filtered.length,
+      lastIndexedLedger: 51200000,
+      latestChainLedger: 51200000,
+      partial: false,
     };
   }
 }

@@ -71,7 +71,7 @@ All event topic symbols follow the pattern:
 ```
 
 Where:
-- `<CONTRACT>`: 3-letter contract identifier (INV, POOL, MKTPL, TREAS, RISK, AC)
+- `<CONTRACT>`: 3-letter contract identifier (INV, POOL, MKTPL, TREAS, RISK, AC, VEST)
 - `<ACTION>`: 3-6 letter action verb (CREATED, LISTED, FUNDED, UPDATED, etc.)
 
 **Limit:** Soroban `symbol_short!()` supports up to 32 characters per topic. All our symbols stay well under this limit (8-14 chars).
@@ -161,6 +161,17 @@ emissions is removed.
 | `AC_ACTION_PROPOSED` | action_proposed | (proposal_id, proposer, timestamp) | Multisig action proposed |
 | `AC_ACTION_APPROVED` | action_approved | (proposal_id, approver, approval_count, timestamp) | Multisig approval |
 | `AC_ACTION_EXECUTED` | action_executed | (proposal_id, executor, timestamp) | Multisig action executed |
+
+### Vesting Contract (VEST_*)
+
+| Topic | Function | Payload | Description |
+|-------|----------|---------|-------------|
+| `VEST_INIT` | vesting_initialized | (admin, token, timestamp) | Vesting contract initialized |
+| `VEST_GRANT` | vesting_grant_created | (admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp) | Vesting grant created |
+| `VEST_REL` | vesting_tokens_released | (beneficiary, amount, timestamp) | Vested tokens released |
+| `VEST_REV` | vesting_grant_revoked | (admin, beneficiary, revoked_at, timestamp) | Vesting grant revoked |
+| `UPG_PROP` | upgrade_proposed | (admin, wasm_hash, timestamp) | Upgrade proposed |
+| `UPG_EXEC` | upgrade_executed | (admin, wasm_hash, timestamp) | Upgrade executed |
 
 ### Shared / Cross-Contract Events (PROTOCOL_*)
 
