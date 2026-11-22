@@ -263,6 +263,40 @@ Stellar Consensus Protocol provides:
 - Relaxation of 1-tx-per-account-per-ledger constraint
 - Addition of validator-controlled transaction ordering
 
+These are exactly the regressions §4.4 is designed to catch automatically.
+
+### 4.4 Transaction-Ordering Observation Harness
+
+The ordering guarantees this document relies on are observed continuously rather
+than assumed. `infra/mev-ordering/` submits controlled competing transactions on
+a mock chain or testnet and compares the observed execution order against the
+policy stated in §1.1 and §4.1:
+
+| Round | Documented expectation | Failure severity |
+|---|---|---|
+| `fee_ladder` | Higher fees execute first during surge (§1.1) | advisory (`MEV_EXPECT_FEE_PRIORITY=true` promotes to hard) |
+| `same_account_burst` | One transaction per source account per ledger (§1.1) | hard |
+| `equal_fee` | Equal fees execute in arrival order (§4.1) | advisory (`MEV_STRICT_ARRIVAL_ORDER=true` promotes to hard) |
+
+Fee priority only binds while a ledger is congested (surge pricing); a probe-sized
+burst on an idle ledger cannot exceed capacity, so a fee-order mismatch is
+reported as advisory unless `MEV_EXPECT_FEE_PRIORITY=true` asserts congestion.
+
+Each run records the RPC-reported `applicationOrder` of every submitted
+transaction and writes a JSON artifact (`mev-ordering-latest.json`) that answers
+"what order did the network actually use?". Hard deviations fail the run, so a
+regression in per-account serialization is flagged instead of being discovered
+later. Transactions that never settle before the observation deadline (RPC lag)
+and rejected submissions are recorded as advisory deviations so a slow RPC cannot
+masquerade as an ordering regression.
+
+The harness runs nightly against testnet via
+`.github/workflows/mev-ordering-nightly.yml` (03:00 UTC) and on demand with
+`npm run harness:testnet`. It only reads RPC state and submits side-effect-free
+`manageData` probes, so no protocol state is modified. Thresholds, environment
+variables and result interpretation are documented in
+`infra/mev-ordering/README.md`.
+
 ---
 
 ## 5. Conclusion
@@ -281,11 +315,13 @@ All identified scenarios have been validated through:
 1. **Code review**: Confirmed atomic operations and checks-effects-interactions patterns
 2. **Existing test coverage**: `contracts/tests/marketplace_edge_cases.rs`, `issue_471_secondary_market_settlement.rs`
 3. **Live testnet observation**: No MEV-style attacks observed during testing waves
+4. **Ordering observation harness** (§4.4): `infra/mev-ordering/` re-checks fee priority, arrival order and per-account serialization on every nightly testnet run
 
 **Related Test Files:**
 - `contracts/tests/marketplace_edge_cases.rs` - Fee tier boundaries, concentration caps
 - `contracts/tests/issue_471_secondary_market_settlement.rs` - Atomic settlement
 - `contracts/tests/timelock_bypass_regression.rs` - Governance timelock enforcement
+- `infra/mev-ordering/` - Nightly transaction-ordering observation harness (policy checks in `src/policy.ts`)
 
 **Coverage:** Existing test suite provides >90% coverage of identified sensitive flows (verified via `cargo tarpaulin` in CI).
 
