@@ -51,41 +51,40 @@ export class FlagStore {
   // ── Write ─────────────────────────────────────────────────────────────────
 
   upsert(flag: Omit<FeatureFlag, "createdAt" | "updatedAt"> & { createdAt?: string }): FeatureFlag {
-    const now = new Date().toISOString();
-    const existing = this.getByName(flag.name);
-    const createdAt = flag.createdAt ?? existing?.createdAt ?? now;
-
-    const full: FeatureFlag = {
-      ...flag,
-      createdAt,
-      updatedAt: now,
-    };
-
-    this.db
-      .prepare(
-        `INSERT INTO feature_flags (name, description, enabled, rules_json, created_at, updated_at, updated_by)
-         VALUES (@name, @description, @enabled, @rules_json, @created_at, @updated_at, @updated_by)
-         ON CONFLICT(name) DO UPDATE SET
-           description = excluded.description,
-           enabled     = excluded.enabled,
-           rules_json  = excluded.rules_json,
-           updated_at  = excluded.updated_at,
-           updated_by  = excluded.updated_by`
-      )
-      .run({
-        name: full.name,
-        description: full.description,
-        enabled: full.enabled ? 1 : 0,
-        rules_json: JSON.stringify(full.rules),
-        created_at: full.createdAt,
-        updated_at: full.updatedAt,
-        updated_by: full.updatedBy,
-      });
+    const full = this.toFull(flag, new Date().toISOString());
+    this.upsertStatement().run(toRow(full));
 
     this.invalidateCache();
     this.notifyChange(full);
     logger.info({ flag: full.name, enabled: full.enabled }, "Flag upserted");
     return full;
+  }
+
+  /**
+   * Atomically upsert several flags in a single SQLite transaction (#1116).
+   * Either every flag is written or none is; change notifications fire only
+   * after the transaction commits, so listeners never observe a partial batch.
+   */
+  upsertMany(
+    flags: Array<Omit<FeatureFlag, "createdAt" | "updatedAt"> & { createdAt?: string }>
+  ): FeatureFlag[] {
+    const now = new Date().toISOString();
+    const fulls = flags.map((flag) => this.toFull(flag, now));
+    const stmt = this.upsertStatement();
+    const writeAll = this.db.transaction((rows: FeatureFlag[]) => {
+      for (const row of rows) stmt.run(toRow(row));
+    });
+
+    try {
+      writeAll(fulls);
+    } finally {
+      // Re-read from disk either way: a rolled-back batch leaves the DB untouched.
+      this.invalidateCache();
+    }
+
+    for (const full of fulls) this.notifyChange(full);
+    logger.info({ flags: fulls.map((f) => f.name) }, "Flags upserted (batch)");
+    return fulls;
   }
 
   /**
@@ -170,6 +169,31 @@ export class FlagStore {
     this.cacheLoadedAt = 0;
   }
 
+  private toFull(
+    flag: Omit<FeatureFlag, "createdAt" | "updatedAt"> & { createdAt?: string },
+    now: string
+  ): FeatureFlag {
+    const existing = this.getByName(flag.name);
+    return {
+      ...flag,
+      createdAt: flag.createdAt ?? existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+  }
+
+  private upsertStatement(): Database.Statement {
+    return this.db.prepare(
+      `INSERT INTO feature_flags (name, description, enabled, rules_json, created_at, updated_at, updated_by)
+       VALUES (@name, @description, @enabled, @rules_json, @created_at, @updated_at, @updated_by)
+       ON CONFLICT(name) DO UPDATE SET
+         description = excluded.description,
+         enabled     = excluded.enabled,
+         rules_json  = excluded.rules_json,
+         updated_at  = excluded.updated_at,
+         updated_by  = excluded.updated_by`
+    );
+  }
+
   private notifyChange(flag: FeatureFlag): void {
     for (const cb of this.changeCallbacks) {
       try {
@@ -179,4 +203,16 @@ export class FlagStore {
       }
     }
   }
+}
+
+function toRow(flag: FeatureFlag): Record<string, unknown> {
+  return {
+    name: flag.name,
+    description: flag.description,
+    enabled: flag.enabled ? 1 : 0,
+    rules_json: JSON.stringify(flag.rules),
+    created_at: flag.createdAt,
+    updated_at: flag.updatedAt,
+    updated_by: flag.updatedBy,
+  };
 }

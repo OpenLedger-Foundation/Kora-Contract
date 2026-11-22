@@ -304,6 +304,85 @@ Example:
 
 ## Testing Rotation
 
+### Rehearsal (Dry-Run Script)
+
+`scripts/key-rotation-dry-run.sh` rehearses admin and oracle-feeder rotations
+before anything is signed. It is **dry-run by default**: it validates the
+current and next keys, reads the on-chain role holder with a read-only
+simulation (`stellar contract invoke --send=no`), prints the ordered plan with
+the signer of each step, and appends an audit trail. No transaction is
+submitted unless `--execute` is passed explicitly.
+
+```bash
+# Admin rotation rehearsal (treasury, two-step propose/accept)
+./scripts/key-rotation-dry-run.sh --env testnet --role admin \
+    --contract treasury --current G...OLD --next G...NEW
+
+# Oracle feeder rotation rehearsal (add new feeder before removing old one)
+./scripts/key-rotation-dry-run.sh --env testnet --role oracle \
+    --contract price_oracle --signer G...ORACLE_ADMIN \
+    --current G...OLD_FEEDER --next G...NEW_FEEDER
+```
+
+Supported contracts and the entrypoints the plan uses:
+
+| Contract | On-chain check | Step signed by current key | Step signed by next key |
+|---|---|---|---|
+| `access_control` | `get_admin` | `rotate_admin` | — (single step) |
+| `treasury` | `get_admin` | `propose_admin` | `accept_admin` |
+| `parameter_registry` | `get_admin` | `propose_admin` | `accept_admin` |
+| `risk_registry` | `get_admin` | `transfer_admin` | `accept_admin` |
+| `price_oracle` (admin) | none exposed | `transfer_admin` | — |
+| `price_oracle` (oracle feeder) | none exposed | `add_feeder` then `remove_feeder` (oracle admin) | — |
+
+When `access_control` has a multisig configured, `rotate_admin` is rejected
+on-chain (`DirectCallProhibited`); use the multi-sig flow above instead.
+
+**Validation performed:**
+
+- Both keys must be well-formed Stellar public keys (`G...`) and distinct.
+  A secret key (`S...`) passed by mistake is rejected and never echoed or logged.
+- For contracts with an admin getter, the on-chain admin must equal `--current`.
+  A **mismatched on-chain role** exits with code `2` and logs
+  `"status":"mismatch"` — stop and establish who actually holds the role
+  (a half-finished earlier rotation, wrong contract ID, or wrong network are the
+  usual causes) before continuing.
+- Contracts without a getter are reported as `unverified`; `--execute` then
+  also requires `--accept-unverified` after manual confirmation.
+
+**Mainnet guard:** any run with `--env mainnet` (including dry-runs) is refused
+with exit code `3` unless
+`KORA_MAINNET_ROTATION_CONFIRM=I_UNDERSTAND_MAINNET_ROTATION` is set, and
+`STELLAR_RPC_URL` must be set explicitly.
+
+**Execute mode:** `--execute` submits only the steps signed by the current key
+(or the oracle admin for feeder rotations) using `ROTATION_SIGNER_SECRET`,
+after checking that the secret derives to the expected address. Steps that the
+next key must sign (`accept_admin`) are printed for the new key holder to run
+from their own machine — the script never handles both keys.
+
+| Variable | Purpose |
+|---|---|
+| `STELLAR_RPC_URL` | Soroban RPC endpoint (required for mainnet) |
+| `NETWORK_PASSPHRASE` | Overrides the passphrase derived from `--env` |
+| `ROTATION_SIGNER_SECRET` | Signing secret, read only in `--execute` mode |
+| `KORA_MAINNET_ROTATION_CONFIRM` | Must be `I_UNDERSTAND_MAINNET_ROTATION` for mainnet |
+| `<NAME>_CONTRACT` | Contract ID fallback, e.g. `TREASURY_CONTRACT` (see `scripts/contracts.env.example`) |
+
+**Audit log format:** one JSON object per line appended to
+`logs/key-rotation.log` (override with `--log-file`). Every validation result,
+plan step and submission is recorded under a shared `run_id`:
+
+```json
+{"ts":"2026-11-22T10:00:00Z","run_id":"rot-20261122T100000Z-4242","env":"testnet","mode":"dry-run","role":"admin","contract":"treasury","contract_id":"C...","current":"G...OLD","next":"G...NEW","step":"plan-step-1","status":"planned","detail":"propose_admin --admin G...OLD --new_admin G...NEW [CURRENT]"}
+```
+
+Exit codes: `0` ok, `1` input error, `2` on-chain mismatch, `3` mainnet
+refused, `4` execute refused/failed.
+
+Fixture tests (stubbed `stellar` CLI, no network) live in
+`scripts/tests/test-key-rotation-dry-run.sh`.
+
 ### Pre-Production Testing
 
 Always test rotation on testnet before mainnet:
@@ -454,6 +533,7 @@ Before executing any rotation:
 - [ ] Rollback plan prepared
 - [ ] Monitoring configured for new key
 - [ ] Post-rotation verification script ready
+- [ ] `scripts/key-rotation-dry-run.sh` run against the target network with no mismatch
 
 After executing rotation:
 
@@ -470,6 +550,7 @@ After executing rotation:
 
 ## Related Documentation
 
+- `scripts/key-rotation-dry-run.sh` — Rotation rehearsal / dry-run script
 - `contracts/shared/src/key_rotation.rs` — Rotation framework code
 - `contracts/access_control/src/lib.rs` — Multi-sig rotation implementation
 - `contracts/risk_registry/src/lib.rs` — Verifier rotation implementation
