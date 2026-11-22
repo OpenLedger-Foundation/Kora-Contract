@@ -41,6 +41,47 @@ groups:
           summary: Keeper has jobs requiring operator review
           description: '{{ $value }} keeper jobs are in the dead-letter state.'
 
+  - name: kora-reconciler
+    rules:
+      - alert: KoraLedgerGapDetected
+        expr: increase(kora_reconciler_gaps_detected_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          tier: sev-2
+        annotations:
+          summary: Kora ledger gap detected
+          description: >
+            The reconciler detected a ledger gap in the last five minutes.
+            Gap age is {{ $value }} ledgers behind the RPC head.
+            Inspect /reconciler/status and /reconciler/alerts/pending.
+
+      - alert: KoraReconcilerAlertQueueStuck
+        expr: kora_reconciler_oldest_gap_age_seconds > 300
+        for: 2m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Kora reconciler alert queue stuck — oldest gap is too old
+          description: >
+            The oldest undelivered alert in the reconciler queue has been
+            pending for {{ $value | humanizeDuration }}.  The alert sink may
+            be unreachable or the reconciler may have stopped scanning.
+            Follow the Sev-1 incident runbook.
+
+      - alert: KoraReconcilerDown
+        expr: up{job="kora-reconciler"} == 0
+        for: 3m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora reconciler metrics endpoint unreachable
+          description: >
+            The reconciler metrics scrape has been failing for at least three
+            minutes.  Ledger gaps may be going undetected.
+
   - name: kora-onchain-events
     rules:
       - alert: KoraCircuitBreakerTripped

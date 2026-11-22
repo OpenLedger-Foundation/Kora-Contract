@@ -1,0 +1,6 @@
+{
+  "secret": "kyb-test-webhook-secret",
+  "timestamp": "1760000000",
+  "rawBody": "{\"event\":\"application.updated\",\"id\":\"app-123\"}",
+  "signature": "88f35b34ffb7f4203578c33ec84e1724fa1618bb018de7fb293561ba0e9a25ed"
+}

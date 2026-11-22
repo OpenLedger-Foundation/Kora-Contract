@@ -1,10 +1,72 @@
 # Kora Chaos Engineering Suite
 
+[![Staging chaos suite](https://github.com/OpenLedger-Foundation/Kora-Contract/actions/workflows/chaos-staging.yml/badge.svg)](https://github.com/OpenLedger-Foundation/Kora-Contract/actions/workflows/chaos-staging.yml)
+
 Deliberately injects failures into the **staging** deployment to verify the
 resilience behaviours claimed by other issues in this wave.
 
 > **This suite must never run against production.**
 > The `global-setup.ts` pre-flight guard enforces this via `CHAOS_ENV`.
+
+---
+
+## GitHub Actions CI
+
+The workflow at [`.github/workflows/chaos-staging.yml`](../../.github/workflows/chaos-staging.yml)
+runs the full chaos suite automatically and on demand.
+
+### Triggers
+
+| Trigger | When |
+|---|---|
+| `schedule` | Every Monday at 02:00 UTC |
+| `workflow_dispatch` | Manual — from the [Actions tab](https://github.com/OpenLedger-Foundation/Kora-Contract/actions/workflows/chaos-staging.yml) |
+
+### `workflow_dispatch` inputs
+
+| Input | Default | Description |
+|---|---|---|
+| `scenario` | _(empty — full suite)_ | Run a single scenario by name: `rpc-outage`, `db-latency`, `keeper-crash`, `network-partition`, `indexer-checkpointing`, `reconciliation-alerting` |
+| `alert_lag_ms` | `15000` | Override `CHAOS_RECONCILER_ALERT_LAG_MS` for slower environments |
+| `dry_run` | `false` | Print the Jest command without executing — useful for validating inputs |
+
+### Secrets and variables
+
+Configure these in the **`staging`** GitHub environment (Settings → Environments):
+
+| Name | Kind | Required | Description |
+|---|---|---|---|
+| `CHAOS_DATABASE_URL` | Secret | **Yes** | Postgres DSN for the staging database (`postgres://user:pass@host:5432/db`) |
+| `CHAOS_STELLAR_RPC_URL` | Variable | No | Stellar RPC base URL (default: `http://localhost:8000`) |
+| `CHAOS_RECONCILER_ALERT_LAG_MS` | Variable | No | Alert lag window override in ms (default: `15000`) |
+| `CHAOS_REQUIRED` | Variable | No | Set to `false` **only** when triaging a known transient environment failure. Omit or set to `true` to enforce failures (default behaviour). |
+
+#### Missing credentials behaviour
+
+If `CHAOS_DATABASE_URL` is absent the job fails immediately with:
+
+```
+error: Missing secret — CHAOS_DATABASE_URL is not set.
+Configure the secret in the 'staging' GitHub environment.
+See infra/chaos/.env.chaos.example for the full variable reference.
+```
+
+No containers are started and no failure is injected.
+
+### Artifacts
+
+Each run uploads `infra/chaos/results/chaos-summary.txt` as an artifact named
+`chaos-staging-<run-id>`.  The last 40 lines are also written to the
+[job summary](https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary)
+for quick inspection without downloading the artifact.
+
+### Invariant enforcement
+
+The job exits non-zero whenever any Jest test fails.  The `tee` pipeline in the
+run step uses `${PIPESTATUS[0]}` to propagate the Jest exit code, ensuring that
+a piped summary never masks a failure.  `continue-on-error` defaults to `false`;
+it can only be relaxed by explicitly setting `CHAOS_REQUIRED=false` in the
+repository/environment variables.
 
 ---
 
@@ -56,7 +118,13 @@ resilience behaviours claimed by other issues in this wave.
   clean 503 responses with retry guidance.
 - **Resolution:** `services/api/gateway/src/dbTimeout.ts` configures the session
   timeout and maps SQLSTATE `57014` to a structured 503 `DB_TIMEOUT` response.
-- **Priority:** Medium.
+  `readDbStatementTimeout()` validates `DB_STATEMENT_TIMEOUT_MS` at startup and
+  rejects zero, negative, or non-integer values.  The gateway throws
+  `DbTimeoutError` (distinct from the generic `ApiUnavailableError`) so
+  transport adapters can emit `HTTP 503` + `Retry-After: <seconds>` with the
+  exact body `{ "code": "DB_TIMEOUT", "retryable": true }`.
+  Closes #1095.
+- **Priority:** Medium (resolved).
 
 ### GAP-3 — Reconciler drops alerts when alert sink is unavailable (resolved)
 

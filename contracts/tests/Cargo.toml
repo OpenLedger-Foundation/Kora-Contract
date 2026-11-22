@@ -122,6 +122,11 @@ path = "marketplace_fee_property.rs"
 name = "referral_rewards_e2e"
 path = "referral_rewards_e2e.rs"
 
+# ── Referral deposit → repaid → claim integration test (Issue #1036) ─────────
+[[test]]
+name = "referral_deposit_to_claim"
+path = "referral_deposit_to_claim.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }

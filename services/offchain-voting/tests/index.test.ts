@@ -1,4 +1,11 @@
-import { OffchainVotingService, MemoryVoteStore, voteMessage, GovernanceSource, Tally } from '../src';
+import {
+  EncryptedMemoryVoteStore,
+  OffchainVotingService,
+  MemoryVoteStore,
+  voteMessage,
+  GovernanceSource,
+  Tally,
+} from '../src';
 
 const keypair = require('@stellar/stellar-sdk').Keypair.random();
 const rules = { quorum: 1n, thresholdBps: 5000, votingEndsAt: 100, executeFromResult: true };
@@ -33,12 +40,54 @@ test('refuses a simultaneous on-chain path and rejects duplicate votes', async (
 
 test('anchors the result and executes only when the shared quorum and threshold pass', async () => {
   const store = new MemoryVoteStore();
-  const service = new OffchainVotingService('testnet', source, store, () => 101);
+  let now = 10;
+  const service = new OffchainVotingService('testnet', source, store, () => now);
   const sig = keypair.sign(voteMessage('testnet', 'p', keypair.publicKey(), 'for')).toString('base64');
   await service.cast('p', keypair.publicKey(), 'for', sig);
+  now = 101;
   const { summary, hash } = await service.finalize('p');
   expect(summary.passed).toBe(true);
   expect(hash).toHaveLength(64);
   expect(source.anchorResult).toHaveBeenCalled();
   expect(source.executeGovernanceProposal).toHaveBeenCalledWith('p', hash);
+});
+
+test('ballots remain available for open polls during key rotation and after overlap ends', async () => {
+  const store = new EncryptedMemoryVoteStore({ id: 'v1', key: Buffer.alloc(32, 1) });
+  const service = new OffchainVotingService('testnet', source, store, () => 10);
+  const signature = keypair.sign(voteMessage('testnet', 'open-poll', keypair.publicKey(), 'for'))
+    .toString('base64');
+  await service.cast('open-poll', keypair.publicKey(), 'for', signature);
+  const entries = (store as unknown as {
+    entries: Map<string, { keyId: string; ciphertext: string; choice?: string }>;
+  }).entries;
+  expect(Array.from(entries.values())[0]).toMatchObject({ keyId: 'v1' });
+  expect(Array.from(entries.values())[0]).not.toHaveProperty('choice');
+
+  store.rotateKey({ id: 'v2', key: Buffer.alloc(32, 2) });
+
+  expect(await store.votes('open-poll')).toMatchObject([
+    { proposalId: 'open-poll', voter: keypair.publicKey(), choice: 'for', weight: 10n },
+  ]);
+  expect(await store.reserveMode('open-poll', 'offchain')).toBe(true);
+  const overlappingSignature = keypair
+    .sign(voteMessage('testnet', 'overlap-poll', keypair.publicKey(), 'against'))
+    .toString('base64');
+  await service.cast('overlap-poll', keypair.publicKey(), 'against', overlappingSignature);
+
+  store.finishRotation();
+  expect(await store.votes('open-poll')).toHaveLength(1);
+  const nextSignature = keypair.sign(voteMessage('testnet', 'another-poll', keypair.publicKey(), 'against'))
+    .toString('base64');
+  await service.cast('another-poll', keypair.publicKey(), 'against', nextSignature);
+  expect(await store.votes('another-poll')).toHaveLength(1);
+  expect(await store.votes('overlap-poll')).toHaveLength(1);
+});
+
+test('encrypted ballot store rejects invalid key material and duplicate key ids', () => {
+  expect(() => new EncryptedMemoryVoteStore({ id: 'bad', key: Buffer.alloc(16) }))
+    .toThrow('32 bytes');
+  const store = new EncryptedMemoryVoteStore({ id: 'v1', key: Buffer.alloc(32, 1) });
+  expect(() => store.rotateKey({ id: 'v1', key: Buffer.alloc(32, 2) }))
+    .toThrow('already exists');
 });

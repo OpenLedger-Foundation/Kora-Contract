@@ -17,6 +17,8 @@ upload(PinRequest)
   ├─ require piiHandled (PII hashed/encrypted before pinning)
   ├─ hash-verify SHA-256 BEFORE pinning (reject INTEGRITY_MISMATCH)
   ├─ pin via PinProvider[] (≥2 backends: e.g. Pinata + web3.storage)
+  │    ├─ retry transient errors with bounded exponential backoff
+  │    └─ persist non-retryable provider errors in SQLite DLQ
   └─ persist PinStatusRecord (SQLite) ──► PinVerifier.verifyOnce() (periodic)
                                             ├─ isPinned per provider
                                             ├─ repin from cache on failure
@@ -52,6 +54,28 @@ const res = await svc.upload({
 | `allowedContentTypes` | pdf/json/png/jpeg | MIME allowlist |
 | `allowedExtensions` | `.pdf .json .png .jpg .jpeg` | Extension allowlist |
 | `minSuccesses` | `1` | Minimum provider pins; total failure throws |
+| `pinRetryAttempts` | `3` | Total attempts per provider, including the first |
+| `pinRetryBackoffMs` | `250 ms` | Initial retry delay; doubles per retry |
+| `pinRetryMaxBackoffMs` | `5,000 ms` | Maximum retry delay |
+
+HTTP 408, 425, 429, and 5xx responses and network errors are retryable.
+Other HTTP 4xx responses are permanent and create a pending `pin_dead_letters`
+entry. The DLQ stores the CID, provider, failure, and replay state, but never
+stores file bytes.
+
+## DLQ operations and metrics
+
+`PinningService.getMetrics()` reports retry, permanent-failure, and replay
+counters plus pending DLQ depth. `metricsText()` exports the same values as
+Prometheus text, including `kora_ipfs_pin_dead_letter_pending`.
+
+To replay a pending entry, inspect `PinStore.listDeadLetters()` (or fetch one by
+ID), retrieve the corresponding document through the approved protected source,
+and call `await pinningService.replayDeadLetter(id, content)`. Replay verifies
+that SHA-256(content) matches the recorded CID before retrying only the failed
+provider. A successful replay marks the entry resolved; a failed replay
+increments its attempt count and leaves it pending. Never add document bytes
+to the DLQ as an operational shortcut.
 
 ## Testing
 
@@ -60,8 +84,9 @@ npm install
 npm test   # 90% line/branch/function/statement coverage enforced
 ```
 
-Covers dual-provider success, partial-failure degradation, integrity-mismatch
-rejection, and periodic re-pin-on-failure + alerting.
+Covers dual-provider success, partial-failure degradation, transient retries,
+permanent-failure DLQ/replay, integrity-mismatch rejection, and periodic
+re-pin-on-failure + alerting.
 
 ## REST API surface (consumed by `apps/web` — Issue #1001)
 

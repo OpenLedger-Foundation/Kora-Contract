@@ -9,7 +9,17 @@
     "marketplace": 153600,
     "price_oracle": 102400,
     "tranche": 102400,
-    "dispute_resolution": 122880
+    "dispute_resolution": 122880,
+    "dispute_escrow": 122880,
+    "governance": 122880,
+    "governance_voting": 122880,
+    "parameter_registry": 122880,
+    "debtor_attestation": 122880,
+    "referral_rewards": 122880,
+    "verifier_nomination": 122880,
+    "fractionalizer": 122880,
+    "secondary_market": 122880,
+    "vesting": 122880
   },
   "default_budget_bytes": 122880
 }

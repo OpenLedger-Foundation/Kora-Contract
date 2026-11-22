@@ -1,5 +1,10 @@
-import { sha256Hex, PinningService } from "../src/service";
-import { InMemoryPinProvider } from "../src/providers";
+import { DEFAULT_PINNING_CONFIG, sha256Hex, PinningService } from "../src/service";
+import {
+  HttpPinProvider,
+  InMemoryPinProvider,
+  PinProvider,
+  PinProviderError,
+} from "../src/providers";
 import { PinStore } from "../src/store";
 import { PinVerifier } from "../src/verifier";
 
@@ -35,6 +40,7 @@ describe("ipfs-pinning (issue #754)", () => {
     const svc = new PinningService(
       [new InMemoryPinProvider("a"), new InMemoryPinProvider("b", { failPin: true })],
       store,
+      { ...DEFAULT_PINNING_CONFIG, pinRetryAttempts: 1 },
     );
     const res = await svc.upload(req('{"invoice":2}'));
     expect(res.degraded).toBe(true);
@@ -51,9 +57,104 @@ describe("ipfs-pinning (issue #754)", () => {
         new InMemoryPinProvider("b", { failPin: true }),
       ],
       store,
+      { ...DEFAULT_PINNING_CONFIG, pinRetryAttempts: 1 },
     );
     await expect(svc.upload(req('{"invoice":3}'))).rejects.toThrow(/PIN_FAILED/);
     store.close();
+  });
+
+  test("retries transient provider failures with capped exponential backoff", async () => {
+    const store = new PinStore();
+    const transient = {
+      id: "transient",
+      pin: jest.fn()
+        .mockRejectedValueOnce(new Error("network timeout"))
+        .mockRejectedValueOnce(new Error("network timeout"))
+        .mockResolvedValue(undefined),
+      isPinned: jest.fn().mockResolvedValue(true),
+      repin: jest.fn().mockResolvedValue(undefined),
+    } satisfies PinProvider;
+    const delays: number[] = [];
+    const svc = new PinningService(
+      [transient, new InMemoryPinProvider("healthy")],
+      store,
+      {
+        ...DEFAULT_PINNING_CONFIG,
+        pinRetryAttempts: 3,
+        pinRetryBackoffMs: 100,
+        pinRetryMaxBackoffMs: 150,
+      },
+      async (ms) => { delays.push(ms); },
+    );
+
+    await svc.upload(req('{"invoice":"retry"}'));
+
+    expect(transient.pin).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([100, 150]);
+    expect(svc.getMetrics()).toMatchObject({ pinAttempts: 4, pinRetries: 2 });
+    store.close();
+  });
+
+  test("stores permanent provider failures in the DLQ and supports verified replay", async () => {
+    const store = new PinStore();
+    const permanent = {
+      id: "permanent",
+      pin: jest.fn()
+        .mockRejectedValueOnce(new PinProviderError("HTTP 400", false, 400))
+        .mockResolvedValue(undefined),
+      isPinned: jest.fn().mockResolvedValue(true),
+      repin: jest.fn().mockResolvedValue(undefined),
+    } satisfies PinProvider;
+    const svc = new PinningService(
+      [permanent, new InMemoryPinProvider("healthy")],
+      store,
+      { ...DEFAULT_PINNING_CONFIG, pinRetryAttempts: 3 },
+      async () => undefined,
+    );
+    const upload = req('{"invoice":"dlq"}');
+    const result = await svc.upload(upload);
+    const [deadLetter] = store.listDeadLetters();
+
+    expect(result.degraded).toBe(true);
+    expect(deadLetter).toMatchObject({
+      cid: result.cid,
+      providerId: "permanent",
+      status: "pending",
+      attempts: 0,
+    });
+    await expect(svc.replayDeadLetter(deadLetter.id, new TextEncoder().encode("wrong")))
+      .rejects.toThrow("INTEGRITY_MISMATCH");
+    const replayed = await svc.replayDeadLetter(deadLetter.id, upload.content);
+
+    expect(replayed).toMatchObject({ id: deadLetter.id, status: "resolved", attempts: 1 });
+    expect(svc.getMetrics()).toMatchObject({
+      permanentFailures: 1,
+      deadLetterEntries: 1,
+      deadLetterReplayAttempts: 1,
+      deadLetterReplaySuccesses: 1,
+      pendingDeadLetters: 0,
+    });
+    expect(svc.metricsText()).toContain("kora_ipfs_pin_dead_letter_pending 0");
+    store.close();
+  });
+
+  test("classifies HTTP 4xx responses as permanent and 5xx responses as retryable", async () => {
+    const permanent = new HttpPinProvider(
+      "permanent",
+      "https://pins.example",
+      "token",
+      jest.fn().mockResolvedValue({ ok: false, status: 400 } as Response),
+    );
+    const transient = new HttpPinProvider(
+      "transient",
+      "https://pins.example",
+      "token",
+      jest.fn().mockResolvedValue({ ok: false, status: 503 } as Response),
+    );
+    await expect(permanent.pin("cid", new Uint8Array()))
+      .rejects.toMatchObject({ retryable: false, statusCode: 400 });
+    await expect(transient.pin("cid", new Uint8Array()))
+      .rejects.toMatchObject({ retryable: true, statusCode: 503 });
   });
 
   test("integrity-hash mismatch is rejected before pinning", async () => {

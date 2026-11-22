@@ -63,7 +63,7 @@ struct MatrixEntry {
 /// markdown writes `**InvoiceNft Contract**`, which lowercases to
 /// `invoicenft contract` (no underscores). Canonical order is used when
 /// joining multi-contract `ContractCaller` roles (e.g. "financing_pool_or_marketplace").
-const KNOWN_CONTRACTS: [(&str, &str); 7] = [
+const KNOWN_CONTRACTS: [(&str, &str); 11] = [
     ("financing_pool", "financingpool"),
     ("marketplace", "marketplace"),
     ("invoice_nft", "invoicenft"),
@@ -71,6 +71,11 @@ const KNOWN_CONTRACTS: [(&str, &str); 7] = [
     ("access_control", "accesscontrol"),
     ("price_oracle", "priceoracle"),
     ("risk_registry", "riskregistry"),
+    // Extended in #1037 to cover invoice_nft transition callers and new crates
+    ("governance", "governance"),
+    ("debtor_attestation", "debtorattestation"),
+    ("dispute_escrow", "disputeescrow"),
+    ("parameter_registry", "parameterregistry"),
 ];
 
 /// Map a `Required Role` cell (plus its `Conditional Authorization` cell) to an
@@ -510,10 +515,31 @@ fn main() {
     let mut drift_found: Vec<Drift> = Vec::new();
     let mut undocumented: Vec<(ContractName, FunctionName)> = Vec::new();
 
-    // Scan each contract directory
-    let contract_dirs = ["access_control", "risk_registry", "invoice_nft", "marketplace",
-                         "financing_pool", "price_oracle", "dispute_resolution", "treasury",
-                         "secondary_market", "vesting"];
+    // Scan each contract directory.
+    // invoice_nft transition entrypoints (set_listed, set_created, set_funded,
+    // set_repaid, set_defaulted) and their authorised callers (marketplace,
+    // financing_pool, admin) are now included via the full invoice_nft entry and
+    // the matching ACCESS_MATRIX.md rows so drift fails CI (#1037).
+    let contract_dirs = [
+        "access_control",
+        "risk_registry",
+        "invoice_nft",
+        "marketplace",
+        "financing_pool",
+        "price_oracle",
+        "dispute_resolution",
+        "treasury",
+        "secondary_market",
+        "vesting",
+        // The contracts below were previously omitted; adding them ensures that
+        // any new entrypoints they gain are caught by drift detection (#1037).
+        "governance",
+        "governance_voting",
+        "referral_rewards",
+        "debtor_attestation",
+        "dispute_escrow",
+        "parameter_registry",
+    ];
 
     for contract_name in &contract_dirs {
         if let Some(filter) = filter_contract {
