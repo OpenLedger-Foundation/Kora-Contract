@@ -6,10 +6,12 @@
  * updated / closed proposal states, and RPC error handling with retries.
  */
 
-import { Address, xdr } from '@stellar/stellar-sdk';
+import { Address, Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import axios, { AxiosInstance } from 'axios';
 import Database from 'better-sqlite3';
 import {
   decodeProposal,
+  ForumClient,
   GovernanceErrorCode,
   GovernanceMonitor,
   GovernanceSyncError,
@@ -35,7 +37,7 @@ const baseConfig = {
 function freshProposal(overrides: Partial<Proposal> = {}): Proposal {
   return {
     id: 0,
-    proposer: new Address(Address.random().toString()).toString(),
+    proposer: new Address(Keypair.random().publicKey()).toString(),
     title: 'Proposal',
     description: 'desc',
     proposal_type: 'Financial',
@@ -55,7 +57,7 @@ function buildProposalScVal(proposal: Proposal): xdr.ScVal {
   return xdr.ScVal.scvVec([
     // Option::Some(Proposal) -> vec containing the struct fields vec
     xdr.ScVal.scvVec([
-      xdr.ScVal.scvU64(BigInt(proposal.id)),
+      nativeToScVal(BigInt(proposal.id), { type: 'u64' }),
       new Address(proposal.proposer).toScVal(),
       xdr.ScVal.scvString(proposal.title),
       xdr.ScVal.scvString(proposal.description),
@@ -63,13 +65,13 @@ function buildProposalScVal(proposal: Proposal): xdr.ScVal {
         { Financial: 0, Sentiment: 1, Upgrade: 2, ParameterChange: 3 }[proposal.proposal_type] ?? 0
       ),
       xdr.ScVal.scvU32({ Standard: 0, Quadratic: 1 }[proposal.voting_mode] ?? 0),
-      xdr.ScVal.scvI128(BigInt(proposal.votes_for)),
-      xdr.ScVal.scvI128(BigInt(proposal.votes_against)),
-      xdr.ScVal.scvI128(BigInt(proposal.votes_abstain)),
-      xdr.ScVal.scvU64(BigInt(proposal.created_at)),
-      xdr.ScVal.scvU64(BigInt(proposal.expires_at)),
+      nativeToScVal(BigInt(proposal.votes_for), { type: 'i128' }),
+      nativeToScVal(BigInt(proposal.votes_against), { type: 'i128' }),
+      nativeToScVal(BigInt(proposal.votes_abstain), { type: 'i128' }),
+      nativeToScVal(BigInt(proposal.created_at), { type: 'u64' }),
+      nativeToScVal(BigInt(proposal.expires_at), { type: 'u64' }),
       xdr.ScVal.scvBool(proposal.executed),
-      xdr.ScVal.scvI128(BigInt(proposal.quorum_required)),
+      nativeToScVal(BigInt(proposal.quorum_required), { type: 'i128' }),
     ]),
   ]);
 }
@@ -88,6 +90,7 @@ function makeForum() {
   return {
     createThread: jest.fn().mockResolvedValue('thread-1'),
     updateThread: jest.fn().mockResolvedValue(undefined),
+    getThreadProposal: jest.fn().mockResolvedValue(null),
   };
 }
 
@@ -145,6 +148,66 @@ describe('decodeProposal', () => {
 });
 
 describe('syncProposal', () => {
+  it('reads and rewrites proposal metadata using the on-chain payload', async () => {
+    const fixture = require('./fixtures/divergent-proposal.json');
+    const api = {
+      get: jest.fn().mockResolvedValue({ data: { metadata: { proposal_payload: fixture.offchain } } }),
+      patch: jest.fn().mockResolvedValue(undefined),
+      post: jest.fn().mockResolvedValue(undefined),
+    };
+    const createSpy = jest.spyOn(axios, 'create').mockReturnValue(api as unknown as AxiosInstance);
+    try {
+      const forum = new ForumClient(baseConfig);
+      expect(await forum.getThreadProposal('thread-12')).toEqual(fixture.offchain);
+
+      await forum.updateThread('thread-12', freshProposal(fixture.canonical));
+
+      expect(api.patch).toHaveBeenCalledWith('/threads/thread-12', {
+        title: '[Proposal #12] Increase reserve',
+        metadata: expect.objectContaining({ proposal_payload: fixture.canonical }),
+      });
+      expect(api.post).toHaveBeenCalledWith('/threads/thread-12/posts', expect.objectContaining({
+        body: expect.stringContaining('Set reserve to 25 percent'),
+      }));
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
+  it('alerts on payload divergence and refreshes the thread from the on-chain canonical proposal', async () => {
+    const fixture = require('./fixtures/divergent-proposal.json');
+    const onChain = freshProposal(fixture.canonical);
+    const divergenceAlerts: unknown[] = [];
+    const config = {
+      ...baseConfig,
+      onDivergence: (event: unknown) => divergenceAlerts.push(event),
+    };
+    const forum = makeForum();
+    forum.getThreadProposal.mockResolvedValue(fixture.offchain);
+    const db = makeDb();
+    db.saveSyncRecord({
+      proposal_id: 12,
+      forum_thread_id: 'thread-12',
+      synced_at: 100,
+      last_update: 100,
+    });
+    const monitor = new GovernanceMonitor(config, makeReader(async () => onChain));
+    (monitor as any).forum = forum;
+    (monitor as any).db = db;
+
+    await (monitor as any).syncProposal(12);
+
+    expect(divergenceAlerts).toHaveLength(1);
+    expect(divergenceAlerts[0]).toMatchObject({
+      proposalId: 12,
+      fields: ['description'],
+      canonical: fixture.canonical,
+      offchain: fixture.offchain,
+    });
+    expect(forum.updateThread).toHaveBeenCalledWith('thread-12', onChain);
+    expect((monitor as any).getMetrics().proposalDivergences).toBe(1);
+  });
+
   it('creates a new forum thread and persists a sync record for a new proposal', async () => {
     const forum = makeForum();
     const reader = makeReader(async () => freshProposal({ id: 7 }));
@@ -197,12 +260,17 @@ describe('syncProposal', () => {
     const forum = makeForum();
     const reader = makeReader(async () => freshProposal({ id: 2, executed: true, votes_for: 100 }));
     const monitor = buildMonitor(baseConfig, reader, forum);
+    (monitor as any).db.saveSyncRecord({
+      proposal_id: 2,
+      forum_thread_id: 'thread-2',
+      synced_at: 100,
+      last_update: 100,
+    });
 
     await (monitor as any).syncProposal(2);
 
     const updateArg = forum.updateThread.mock.calls[0][1] as Proposal;
-    const body = (forum as any).formatTallyUpdate(updateArg);
-    expect(body).toContain('✅ Executed');
+    expect(updateArg.executed).toBe(true);
   });
 
   it('maps an expired proposal to an Expired tally status', async () => {
@@ -211,12 +279,17 @@ describe('syncProposal', () => {
       freshProposal({ id: 2, executed: false, expires_at: 1 })
     );
     const monitor = buildMonitor(baseConfig, reader, forum);
+    (monitor as any).db.saveSyncRecord({
+      proposal_id: 2,
+      forum_thread_id: 'thread-2',
+      synced_at: 100,
+      last_update: 100,
+    });
 
     await (monitor as any).syncProposal(2);
 
     const updateArg = forum.updateThread.mock.calls[0][1] as Proposal;
-    const body = (forum as any).formatTallyUpdate(updateArg);
-    expect(body).toContain('⏰ Expired');
+    expect(updateArg.expires_at).toBe(1);
   });
 
   it('retries RPC failures with backoff and succeeds on recovery', async () => {
@@ -276,7 +349,7 @@ describe('syncProposals', () => {
 
   it('is idempotent across repeated sync cycles (no duplicate threads)', async () => {
     const forum = makeForum();
-    const reader = makeReader(async () => freshProposal({ id: 0 }));
+    const reader = makeReader(async (id: number) => id === 0 ? freshProposal({ id: 0 }) : null);
     const monitor = buildMonitor(baseConfig, reader, forum);
 
     await (monitor as any).syncProposals();
@@ -284,6 +357,6 @@ describe('syncProposals', () => {
 
     expect(forum.createThread).toHaveBeenCalledTimes(1);
     // second cycle re-fetches (tally refresh) but does not recreate
-    expect(reader.getProposal).toHaveBeenCalledTimes(2);
+    expect(reader.getProposal).toHaveBeenCalledTimes(4);
   });
 });

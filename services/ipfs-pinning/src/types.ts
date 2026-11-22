@@ -52,6 +52,17 @@ export interface PinStatusRecord {
   consecutiveFailures: number;
 }
 
+export interface PinDeadLetter {
+  id: number;
+  cid: string;
+  providerId: string;
+  error: string;
+  attempts: number;
+  status: "pending" | "resolved";
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface PinningServiceConfig {
   /** Hard cap per file; uploads above are rejected before pinning. */
   maxFileSizeBytes: number;
@@ -61,6 +72,12 @@ export interface PinningServiceConfig {
   allowedExtensions: string[];
   /** Minimum successful provider pins required (default 1; 2 = full redundancy). */
   minSuccesses?: number;
+  /** Total pin attempts per provider, including the first attempt. */
+  pinRetryAttempts?: number;
+  /** Initial exponential retry delay (ms). */
+  pinRetryBackoffMs?: number;
+  /** Maximum delay between pin attempts (ms). */
+  pinRetryMaxBackoffMs?: number;
 }
 
 export interface VerifierConfig {

@@ -1,0 +1,24 @@
+{
+  "canonical": {
+    "id": 12,
+    "proposer": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "title": "Increase reserve",
+    "description": "Set reserve to 25 percent",
+    "proposal_type": "Financial",
+    "voting_mode": "Standard",
+    "created_at": 1000,
+    "expires_at": 2000,
+    "quorum_required": 100
+  },
+  "offchain": {
+    "id": 12,
+    "proposer": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "title": "Increase reserve",
+    "description": "Set reserve to 5 percent",
+    "proposal_type": "Financial",
+    "voting_mode": "Standard",
+    "created_at": 1000,
+    "expires_at": 2000,
+    "quorum_required": 100
+  }
+}

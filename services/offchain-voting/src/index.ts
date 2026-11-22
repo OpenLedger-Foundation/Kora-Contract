@@ -1,5 +1,5 @@
 import { Keypair } from '@stellar/stellar-sdk';
-import { createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 export type VoteChoice = 'for' | 'against';
 export type Vote = { proposalId: string; voter: string; choice: VoteChoice; weight: bigint; signature: string };
@@ -19,6 +19,135 @@ export interface VoteStore {
   reserveMode(proposalId: string, mode: 'onchain' | 'offchain'): Promise<boolean>;
   recordVoteIfAbsent(vote: Vote): Promise<boolean>;
   votes(proposalId: string): Promise<Vote[]>;
+}
+
+export interface BallotEncryptionKey {
+  id: string;
+  key: Buffer;
+}
+
+interface EncryptedBallot {
+  keyId: string;
+  iv: string;
+  authTag: string;
+  ciphertext: string;
+}
+
+/**
+ * In-memory encrypted VoteStore for local use and tests. Production VoteStore
+ * adapters can use the same key-id/envelope format with durable storage.
+ */
+export class EncryptedMemoryVoteStore implements VoteStore {
+  private readonly modes = new Map<string, 'onchain' | 'offchain'>();
+  private readonly entries = new Map<string, EncryptedBallot>();
+  private activeKeyId: string;
+  private readonly keys = new Map<string, Buffer>();
+
+  constructor(activeKey: BallotEncryptionKey, acceptedPreviousKeys: BallotEncryptionKey[] = []) {
+    this.validateKey(activeKey);
+    this.activeKeyId = activeKey.id;
+    this.keys.set(activeKey.id, Buffer.from(activeKey.key));
+    for (const previous of acceptedPreviousKeys) {
+      this.validateKey(previous);
+      if (this.keys.has(previous.id)) throw new Error(`Duplicate ballot encryption key id: ${previous.id}`);
+      this.keys.set(previous.id, Buffer.from(previous.key));
+    }
+  }
+
+  async reserveMode(proposalId: string, mode: 'onchain' | 'offchain'): Promise<boolean> {
+    const existing = this.modes.get(proposalId);
+    if (existing && existing !== mode) return false;
+    this.modes.set(proposalId, mode);
+    return true;
+  }
+
+  async recordVoteIfAbsent(vote: Vote): Promise<boolean> {
+    const id = this.entryId(vote.proposalId, vote.voter);
+    if (this.entries.has(id)) return false;
+    this.entries.set(id, this.encrypt(vote, this.activeKeyId, this.keys.get(this.activeKeyId)!));
+    return true;
+  }
+
+  async votes(proposalId: string): Promise<Vote[]> {
+    const found: Vote[] = [];
+    for (const [id, entry] of this.entries) {
+      const vote = this.decrypt(entry, id);
+      if (vote.proposalId === proposalId) found.push(vote);
+    }
+    return found;
+  }
+
+  /**
+   * Starts the dual-key window and re-encrypts existing ballots before the
+   * active key changes. The previous key remains accepted until finishRotation.
+   */
+  rotateKey(newActiveKey: BallotEncryptionKey): void {
+    this.validateKey(newActiveKey);
+    if (this.keys.has(newActiveKey.id)) throw new Error(`Ballot encryption key id already exists: ${newActiveKey.id}`);
+
+    const nextKeys = new Map(this.keys);
+    nextKeys.set(newActiveKey.id, Buffer.from(newActiveKey.key));
+    const rewritten = new Map<string, EncryptedBallot>();
+    for (const [id, entry] of this.entries) {
+      const vote = this.decryptWithKeys(entry, id, this.keys);
+      rewritten.set(id, this.encrypt(vote, newActiveKey.id, nextKeys.get(newActiveKey.id)!));
+    }
+
+    for (const [id, entry] of rewritten) this.entries.set(id, entry);
+    this.keys.clear();
+    for (const [id, key] of nextKeys) this.keys.set(id, key);
+    this.activeKeyId = newActiveKey.id;
+  }
+
+  /** Ends the overlap after all durable replicas have been re-encrypted. */
+  finishRotation(): void {
+    const activeKey = this.keys.get(this.activeKeyId)!;
+    this.keys.clear();
+    this.keys.set(this.activeKeyId, activeKey);
+  }
+
+  private entryId(proposalId: string, voter: string): string {
+    return JSON.stringify([proposalId, voter]);
+  }
+
+  private validateKey(key: BallotEncryptionKey): void {
+    if (!key.id.trim()) throw new Error('Ballot encryption key id is required');
+    if (!Buffer.isBuffer(key.key) || key.key.byteLength !== 32) {
+      throw new Error('Ballot encryption keys must be 32 bytes');
+    }
+  }
+
+  private encrypt(vote: Vote, keyId: string, key: Buffer): EncryptedBallot {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(Buffer.from(this.entryId(vote.proposalId, vote.voter), 'utf8'));
+    const serialized = JSON.stringify({ ...vote, weight: vote.weight.toString() });
+    const ciphertext = Buffer.concat([cipher.update(serialized, 'utf8'), cipher.final()]);
+    return {
+      keyId,
+      iv: iv.toString('base64'),
+      authTag: cipher.getAuthTag().toString('base64'),
+      ciphertext: ciphertext.toString('base64'),
+    };
+  }
+
+  private decrypt(entry: EncryptedBallot, id: string): Vote {
+    return this.decryptWithKeys(entry, id, this.keys);
+  }
+
+  private decryptWithKeys(entry: EncryptedBallot, id: string, keys: Map<string, Buffer>): Vote {
+    const key = keys.get(entry.keyId);
+    if (!key) throw new Error(`Ballot encryption key is unavailable: ${entry.keyId}`);
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(entry.iv, 'base64'));
+    decipher.setAAD(Buffer.from(id, 'utf8'));
+    decipher.setAuthTag(Buffer.from(entry.authTag, 'base64'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(entry.ciphertext, 'base64')),
+      decipher.final(),
+    ]).toString('utf8');
+    const vote = JSON.parse(plaintext) as Omit<Vote, 'weight'> & { weight: string };
+    return { ...vote, weight: BigInt(vote.weight) };
+  }
 }
 
 export class MemoryVoteStore implements VoteStore {

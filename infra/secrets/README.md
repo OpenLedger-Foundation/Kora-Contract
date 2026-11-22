@@ -24,6 +24,7 @@ the JSON value. Names are case-sensitive:
 | `dev`, `testnet`, `production` | `/kora/<environment>/api` | API-specific RPC or third-party credentials only |
 | `dev`, `testnet`, `production` | `/kora/<environment>/pinning` | Pinning-provider credential only, if that service is deployed |
 | `dev`, `testnet`, `production` | `/kora/<environment>/kyb` | KYB encryption key and provider credentials only, if deployed |
+| `dev`, `testnet`, `production` | `/kora/<environment>/offchain-voting` | Off-chain ballot encryption key(s), if deployed |
 
 Do not copy secrets between environments. Keep contract addresses, public RPC
 URLs, and other non-secret configuration in normal deployment configuration.
@@ -98,6 +99,10 @@ credential with the provider, deploy it, verify successful requests, and only
 then revoke the old token. If the provider cannot overlap credentials, schedule
 a maintenance window and document the expected interruption rather than
 claiming a zero-downtime rotation.
+
+Off-chain voting ballot-key rotation must keep both key versions available
+during a rolling deployment. Re-encrypt ballots or accept both key IDs before
+revoking the previous version; see the [off-chain voting runbook](../../services/offchain-voting/README.md#rotation-procedure).
 
 ## Audit and incident handling
 
