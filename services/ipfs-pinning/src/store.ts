@@ -9,7 +9,7 @@
  */
 
 import Database, { Database as DB } from "better-sqlite3";
-import { PinStatusRecord } from "./types";
+import { PinDeadLetter, PinStatusRecord } from "./types";
 
 export class PinStore {
   private db: DB;
@@ -33,6 +33,19 @@ export class PinStore {
         last_verified_at    INTEGER,
         consecutive_failures INTEGER NOT NULL DEFAULT 0
       );
+
+      CREATE TABLE IF NOT EXISTS pin_dead_letters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cid TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        error TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pin_dead_letters_status
+        ON pin_dead_letters(status, created_at);
     `);
   }
 
@@ -60,6 +73,45 @@ export class PinStore {
     return rows.map((r) => this.mapRow(r));
   }
 
+  recordDeadLetter(input: Omit<PinDeadLetter, "id" | "attempts" | "status">): number {
+    const result = this.db.prepare(
+      `INSERT INTO pin_dead_letters (cid, provider_id, error, created_at, updated_at)
+       VALUES (@cid, @providerId, @error, @createdAt, @updatedAt)`,
+    ).run(input);
+    return Number(result.lastInsertRowid);
+  }
+
+  getDeadLetter(id: number): PinDeadLetter | undefined {
+    const row = this.db.prepare("SELECT * FROM pin_dead_letters WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? this.mapDeadLetter(row) : undefined;
+  }
+
+  listDeadLetters(status: PinDeadLetter["status"] = "pending"): PinDeadLetter[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM pin_dead_letters WHERE status = ? ORDER BY created_at ASC, id ASC",
+    ).all(status) as Record<string, unknown>[];
+    return rows.map((row) => this.mapDeadLetter(row));
+  }
+
+  recordDeadLetterAttempt(id: number, error: string, updatedAt: number): void {
+    const result = this.db.prepare(
+      `UPDATE pin_dead_letters
+       SET attempts = attempts + 1, error = ?, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    ).run(error, updatedAt, id);
+    if (result.changes === 0) throw new Error(`Pending IPFS dead-letter entry not found: ${id}`);
+  }
+
+  resolveDeadLetter(id: number, updatedAt: number): void {
+    const result = this.db.prepare(
+      `UPDATE pin_dead_letters SET status = 'resolved', updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    ).run(updatedAt, id);
+    if (result.changes === 0) throw new Error(`Pending IPFS dead-letter entry not found: ${id}`);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -76,6 +128,19 @@ export class PinStore {
       updatedAt: r["updated_at"] as number,
       lastVerifiedAt: r["last_verified_at"] as number | null,
       consecutiveFailures: r["consecutive_failures"] as number,
+    };
+  }
+
+  private mapDeadLetter(r: Record<string, unknown>): PinDeadLetter {
+    return {
+      id: r["id"] as number,
+      cid: r["cid"] as string,
+      providerId: r["provider_id"] as string,
+      error: r["error"] as string,
+      attempts: r["attempts"] as number,
+      status: r["status"] as PinDeadLetter["status"],
+      createdAt: r["created_at"] as number,
+      updatedAt: r["updated_at"] as number,
     };
   }
 }

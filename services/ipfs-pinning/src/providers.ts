@@ -17,6 +17,17 @@ export interface PinProvider {
   repin(cid: string, content: Uint8Array): Promise<void>;
 }
 
+export class PinProviderError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly statusCode?: number,
+  ) {
+    super(message);
+    this.name = "PinProviderError";
+  }
+}
+
 /** In-memory provider (tests, local dev). Optionally fails on demand. */
 export class InMemoryPinProvider implements PinProvider {
   private store = new Map<string, Uint8Array>();
@@ -55,16 +66,27 @@ export class HttpPinProvider implements PinProvider {
   ) {}
 
   async pin(cid: string, content: Uint8Array): Promise<void> {
-    const res = await this.fetchFn(`${this.endpoint}/pins`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/octet-stream",
-        "X-CID": cid,
-      },
-      body: content as unknown as BodyInit,
-    });
-    if (!res.ok) throw new Error(`${this.id}: pin failed with HTTP ${res.status}`);
+    let res: Response;
+    try {
+      res = await this.fetchFn(`${this.endpoint}/pins`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/octet-stream",
+          "X-CID": cid,
+        },
+        body: Buffer.from(content),
+      });
+    } catch (error) {
+      throw new PinProviderError(
+        `${this.id}: pin request failed: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      );
+    }
+    if (!res.ok) {
+      const retryable = res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500;
+      throw new PinProviderError(`${this.id}: pin failed with HTTP ${res.status}`, retryable, res.status);
+    }
   }
 
   async isPinned(cid: string): Promise<boolean> {
