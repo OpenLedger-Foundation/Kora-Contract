@@ -168,10 +168,23 @@ echo "--- Deploying contracts ---"
 ACCESS_CONTROL_ID=$(deploy_contract "access_control" "$WASM_DIR/kora_access_control.wasm")
 echo "  access_control : $ACCESS_CONTROL_ID"
 
+# ── parameter_registry MUST be deployed before marketplace, financing_pool, and
+# ── other dependents that read fee/risk caps from it at runtime.  Deploying it
+# ── here (immediately after access_control) ensures the address is available for
+# ── every subsequent initialize call.  deploy.sh exits non-zero if the address is
+# ── empty (the deploy_contract helper already does this, but we guard explicitly
+# ── as a belt-and-suspenders check). See docs/CONTRACTS.md for the full order.
+PARAMETER_REGISTRY_ID=$(deploy_contract "parameter_registry" "$WASM_DIR/kora_parameter_registry.wasm")
+echo "  parameter_registry : $PARAMETER_REGISTRY_ID"
+if [ -z "$PARAMETER_REGISTRY_ID" ]; then
+  echo "ERROR: parameter_registry deployment returned an empty address." >&2
+  echo "       Dependents (marketplace, financing_pool) cannot be initialized without it." >&2
+  exit 1
+fi
+
 INVOICE_NFT_ID=$(deploy_contract "invoice_nft" "$WASM_DIR/kora_invoice_nft.wasm")
 echo "  invoice_nft    : $INVOICE_NFT_ID"
 
-PARAMETER_REGISTRY_ID=$(deploy_contract "parameter_registry" "$WASM_DIR/kora_parameter_registry.wasm")
 RISK_REGISTRY_ID=$(deploy_contract "risk_registry" "$WASM_DIR/kora_risk_registry.wasm")
 echo "  risk_registry  : $RISK_REGISTRY_ID"
 
@@ -190,9 +203,6 @@ echo "  debtor_attestation: $DEBTOR_ATTESTATION_ID"
 
 POOL_ID=$(deploy_contract "financing_pool" "$WASM_DIR/kora_financing_pool.wasm")
 echo "  financing_pool : $POOL_ID"
-
-PARAMETER_REGISTRY_ID=$(deploy_contract "parameter_registry" "$WASM_DIR/kora_parameter_registry.wasm")
-echo "  parameter_registry : $PARAMETER_REGISTRY_ID"
 
 MARKETPLACE_ID=$(deploy_contract "marketplace" "$WASM_DIR/kora_marketplace.wasm")
 echo "  marketplace    : $MARKETPLACE_ID"
@@ -214,8 +224,35 @@ echo "--- Initializing contracts (dependency order) ---"
 invoke "$ACCESS_CONTROL_ID" initialize --admin "$ADMIN"
 echo "  access_control initialized"
 
+# ── parameter_registry is initialized immediately after access_control so that
+# ── marketplace and financing_pool find a live registry with their first read.
 invoke "$PARAMETER_REGISTRY_ID" initialize --admin "$ADMIN" --access_control "$ACCESS_CONTROL_ID"
 echo "  parameter_registry initialized"
+
+# Seed parameter_registry with the initial fee values so that
+# marketplace reads them as governed defaults.
+invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
+  --admin "$ADMIN" \
+  --key "MarketplaceFeeBps" \
+  --value "$MARKETPLACE_FEE_BPS"
+invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
+  --admin "$ADMIN" \
+  --key "ReferrerSplitBps" \
+  --value "$MARKETPLACE_REFERRER_BPS"
+invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
+  --admin "$ADMIN" \
+  --key "LatePenaltyBps" \
+  --value "$LATE_PENALTY_BPS"
+invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
+  --admin "$ADMIN" \
+  --key "MaxPositionBps" \
+  --value "$MAX_POSITION_BPS"
+invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
+  --admin "$ADMIN" \
+  --key "TreasuryFeeBps" \
+  --value "$TREASURY_FEE_BPS"
+echo "  parameter_registry seeded with initial fee values"
+
 invoke "$INVOICE_NFT_ID" initialize --admin "$ADMIN" --access_control "$ACCESS_CONTROL_ID"
 echo "  invoice_nft initialized"
 
@@ -355,21 +392,6 @@ invoke "$POOL_ID" initialize \
   --price_oracle "$PRICE_ORACLE_ID" \
   --max_position_bps "$MAX_POSITION_BPS"
 echo "  financing_pool initialized (late penalty: ${LATE_PENALTY_BPS} bps, max position: ${MAX_POSITION_BPS} bps)"
-
-invoke "$PARAMETER_REGISTRY_ID" initialize --admin "$ADMIN"
-echo "  parameter_registry initialized"
-
-# Seed parameter_registry with the initial fee values so that
-# marketplace reads them as governed defaults.
-invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
-  --admin "$ADMIN" \
-  --key "MarketplaceFeeBps" \
-  --value "$MARKETPLACE_FEE_BPS"
-invoke "$PARAMETER_REGISTRY_ID" admin_set_parameter \
-  --admin "$ADMIN" \
-  --key "ReferrerSplitBps" \
-  --value "$MARKETPLACE_REFERRER_BPS"
-echo "  parameter_registry seeded with initial fee values"
 
 # Initialize governance_voting contract
 invoke "$GOVERNANCE_VOTING_ID" initialize \

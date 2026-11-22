@@ -6,6 +6,47 @@ All amounts are in **stroops** (1 XLM = 10,000,000 stroops). For stablecoins lik
 
 ---
 
+## Contract Deployment Dependency Graph (issue #1083)
+
+The following order is enforced by `scripts/deploy.sh` and verified by CI
+(`check_deploy_order.sh`). A contract must be deployed **and initialized**
+before its dependents attempt to call it.
+
+```
+1. access_control
+   └─► 2. parameter_registry     ← FIRST dependent; marketplace/pool read it at init
+       └─► 3. invoice_nft
+       └─► 3. risk_registry
+       └─► 3. dispute_resolution
+       └─► 3. debtor_attestation
+           └─► 4. financing_pool  ← reads registry at runtime (LatePenaltyBps, MaxPositionBps …)
+               └─► 5. marketplace ← reads registry at list_invoice / fund_invoice
+   └─► (parallel) treasury
+   └─► (parallel) vesting
+   └─► (parallel) price_oracle
+   └─► (parallel) governance_voting
+   └─► (optional) dispute_escrow
+```
+
+**Why `parameter_registry` must come before `marketplace` and `financing_pool`:**
+Both contracts call `get_value` on the registry during `list_invoice` and
+`fund_invoice` to resolve governance-enacted fee and risk limits. If the
+registry is not deployed when those contracts initialize, the cross-contract
+call fails with a host-level contract-not-found error, leaving the contracts
+in an unusable state without a redeployment. `scripts/deploy.sh` exits
+non-zero if `PARAMETER_REGISTRY_ID` is empty after deployment.
+
+**Redeploy-only path:** If the registry is already deployed and you are only
+redeploying marketplace or financing_pool, verify the registry address first:
+
+```bash
+REGISTRY_ID=$(jq -r '.contracts.parameter_registry.address' deployments/<network>.json)
+[ -n "$REGISTRY_ID" ] || { echo "ERROR: registry address missing from manifest"; exit 1; }
+```
+
+---
+
+
 ## `invoice_nft`
 
 ### `initialize(admin, access_control)`
