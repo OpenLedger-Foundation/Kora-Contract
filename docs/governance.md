@@ -162,6 +162,36 @@ governance.publish_fast_track_disclosure(admin, proposal_id);
 
 ---
 
+## Timelock Tests
+
+The two timelock paths produce **distinct error types** — a standard proposal that is executed too early surfaces `GovernanceTimelockNotElapsed` / `ProposalNotPassed`, while a fast-track proposal that is executed before its 2-hour window surfaces `FastTrackTimelockNotElapsed`. The two variants are enforced to be non-equal in the test suite.
+
+### Standard Path
+
+| Test | What it asserts |
+|------|----------------|
+| `standard_timelock_execute_before_voting_end_rejected` | on-chain execution before `voting_end_time` is blocked |
+| `standard_timelock_offchain_anchor_before_voting_end_rejected` | off-chain anchoring before `voting_end_time` returns an error |
+| `standard_timelock_offchain_at_voting_end_accepted` | anchoring and execution at exactly `voting_end_time` succeeds |
+| `standard_threshold_error_is_distinct_from_fast_track_threshold_error` | threshold failure on standard path returns `ProposalNotPassed`, not `FastTrackThresholdNotMet` |
+
+### Fast-Track Path
+
+| Test | What it asserts |
+|------|----------------|
+| `fast_track_is_disabled_until_configured` | `create_fast_track_proposal` fails before `configure_fast_track` |
+| `fast_track_execute_before_timelock_returns_typed_error` | execution before 2h returns typed `FastTrackTimelockNotElapsed` |
+| `fast_track_execute_at_exact_timelock_boundary_succeeds` | execution at exactly `created_at + 7200s` succeeds |
+| `fast_track_execute_one_second_past_timelock_succeeds` | execution at `created_at + 7201s` succeeds |
+| `fast_track_threshold_not_met_returns_distinct_typed_error` | insufficient approval returns `FastTrackThresholdNotMet`, not `ProposalNotPassed` |
+| `fast_track_no_bug_report_returns_typed_error` | unregistered report id returns `NoBugBountyReportLinked` |
+| `fast_track_proposal_too_large_returns_typed_error` | proposal size over limit returns `ProposalTooLarge` |
+| `fast_track_already_executed_is_noop` | re-executing an executed proposal is idempotent |
+
+All tests are in `contracts/governance/src/lib.rs` under `#[cfg(test)]`.
+
+---
+
 ## Configuration
 
 Fast-track governance is configured via `configure_fast_track`:

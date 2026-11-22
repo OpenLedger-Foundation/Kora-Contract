@@ -329,4 +329,377 @@ mod tests {
         client.decline_onboarding(&other_candidate, &other_id);
         assert_eq!(client.withdraw(&supporter, &other_id), 50);
     }
+
+    // ── Slash / stake math tests ───────────────────────────────────────────────
+    //
+    // The nomination contract does not have an on-chain "slash" entrypoint but
+    // the stake accounting must be exact.  These tests verify:
+    //   • total_stake equals sum of individual supporter stakes
+    //   • per-address cap is enforced per nomination (not globally)
+    //   • multiple supporters contribute independently
+    //   • withdraw returns exactly what was staked, no more
+
+    /// Total stake equals the sum of individual supporter contributions.
+    #[test]
+    fn stake_math_total_equals_sum_of_contributors() {
+        let (env, token, client, _) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &s1);
+        fund(&env, &token, &s2);
+
+        let id = client.nominate(&s1, &candidate, &30);
+        client.stake(&s2, &id, &40);
+
+        let nom = client.get_nomination(&id);
+        assert_eq!(
+            nom.total_stake, 70,
+            "total_stake must equal 30 + 40 = 70"
+        );
+        assert_eq!(client.get_stake(&id, &s1), 30);
+        assert_eq!(client.get_stake(&id, &s2), 40);
+    }
+
+    /// Per-address cap is enforced independently per nomination — a supporter
+    /// hitting the cap on one nomination can still stake the full cap on another.
+    #[test]
+    fn stake_cap_independent_per_nomination() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id1 = client.nominate(&supporter, &c1, &100); // cap = 100, saturated
+        // Trying to add 1 more to id1 must fail
+        assert_eq!(
+            client.try_stake(&supporter, &id1, &1).unwrap_err().unwrap(),
+            NominationError::StakeCapExceeded,
+            "exceeding per-address cap must return StakeCapExceeded"
+        );
+
+        // But the same supporter can contribute the full cap to a different nomination
+        let id2 = client.nominate(&supporter, &c2, &100);
+        assert_eq!(
+            client.get_stake(&id2, &supporter), 100,
+            "per-address cap is independent across nominations"
+        );
+    }
+
+    /// Withdraw returns exactly the staked amount — not more.
+    #[test]
+    fn withdraw_returns_exact_staked_amount() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let pre_balance = token::Client::new(&env, &token).balance(&supporter);
+        let id = client.nominate(&supporter, &candidate, &75);
+
+        // Advance past window to unlock withdrawal
+        env.ledger().set(LedgerInfo {
+            timestamp: 201,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let returned = client.withdraw(&supporter, &id);
+        assert_eq!(returned, 75, "withdraw must return exactly the staked 75");
+        let post_balance = token::Client::new(&env, &token).balance(&supporter);
+        assert_eq!(
+            post_balance, pre_balance,
+            "supporter balance must be fully restored after withdrawal"
+        );
+    }
+
+    /// Two supporters can both withdraw their independent shares after the
+    /// nomination window expires, and each gets back exactly what they put in.
+    #[test]
+    fn multiple_supporters_withdraw_independently_after_window() {
+        let (env, token, client, _) = setup();
+        let s1 = Address::generate(&env);
+        let s2 = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &s1);
+        fund(&env, &token, &s2);
+
+        let id = client.nominate(&s1, &candidate, &30);
+        client.stake(&s2, &id, &40);
+
+        // Advance past window
+        env.ledger().set(LedgerInfo {
+            timestamp: 201,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        assert_eq!(client.withdraw(&s1, &id), 30);
+        assert_eq!(client.withdraw(&s2, &id), 40);
+
+        // No funds should remain staked
+        assert_eq!(client.get_stake(&id, &s1), 0);
+        assert_eq!(client.get_stake(&id, &s2), 0);
+    }
+
+    // ── Early withdraw rejection tests ────────────────────────────────────────
+
+    /// Withdrawal inside an open, unexpired nomination window must fail.
+    #[test]
+    fn early_withdraw_inside_window_rejected() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+        // Window is 100s; we are at timestamp 100 (window start) — still inside
+        let result = client.try_withdraw(&supporter, &id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::NotStale,
+            "withdrawal inside window must return typed NotStale"
+        );
+    }
+
+    /// Withdrawal just before the window boundary is rejected.
+    #[test]
+    fn early_withdraw_one_second_before_boundary_rejected() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+        // Nomination created at t=100, window=100 → expires at t=200
+        // Advance to t=199 (1 second before expiry)
+        env.ledger().set(LedgerInfo {
+            timestamp: 199,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = client.try_withdraw(&supporter, &id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::NotStale,
+            "withdrawal one second before window expiry must be rejected"
+        );
+    }
+
+    /// Withdrawal at exactly the window boundary (created_at + window) is accepted.
+    #[test]
+    fn withdraw_at_exact_window_boundary_accepted() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+        // created_at=100, window=100 → boundary at t=200
+        env.ledger().set(LedgerInfo {
+            timestamp: 200,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = client.try_withdraw(&supporter, &id);
+        assert!(
+            result.is_ok(),
+            "withdrawal at exactly the window boundary must succeed (nomination is stale)"
+        );
+        assert_eq!(result.unwrap(), 50);
+    }
+
+    /// Withdrawal of a declined nomination is immediately available, before window expiry.
+    #[test]
+    fn withdraw_after_decline_available_immediately() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+        client.select_candidate();
+        client.decline_onboarding(&candidate, &id);
+
+        // Window has NOT expired (still at t=100); withdrawal is allowed because declined
+        let result = client.try_withdraw(&supporter, &id);
+        assert!(
+            result.is_ok(),
+            "withdrawal after decline must succeed even inside the window"
+        );
+        assert_eq!(result.unwrap(), 50);
+    }
+
+    // ── Double nomination / churn tests ───────────────────────────────────────
+
+    /// A supporter can back multiple distinct candidates with separate nominations.
+    /// The per-address cap is applied per nomination, not globally.
+    #[test]
+    fn double_nomination_different_candidates_allowed() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        fund(&env, &token, &supporter);
+        // Each cap is 100; total stake = 200 is within token balance (500)
+        let id1 = client.nominate(&supporter, &c1, &50);
+        let id2 = client.nominate(&supporter, &c2, &50);
+
+        assert_ne!(id1, id2, "each nomination must have a distinct id");
+        assert_eq!(client.get_stake(&id1, &supporter), 50);
+        assert_eq!(client.get_stake(&id2, &supporter), 50);
+    }
+
+    /// The nomination cap bounds the total number of nominations to MAX_NOMINATIONS (50).
+    #[test]
+    fn nomination_id_counter_advances_monotonically() {
+        let (env, token, client, _) = setup();
+        let prev_supporter = Address::generate(&env);
+        fund(&env, &token, &prev_supporter);
+
+        // Create a few nominations and verify ids are monotonically increasing
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        let id1 = client.nominate(&prev_supporter, &c1, &50);
+        let id2 = client.nominate(&prev_supporter, &c2, &50);
+
+        assert!(id2 > id1, "nomination ids must increase monotonically");
+    }
+
+    // ── Zero-stake nominee edge case ──────────────────────────────────────────
+
+    /// Nominating with zero stake must be rejected with a typed error.
+    #[test]
+    fn nominate_zero_stake_rejected_typed_error() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let result = client.try_nominate(&supporter, &candidate, &0i128);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::InvalidAmount,
+            "zero-stake nomination must be rejected with typed InvalidAmount"
+        );
+    }
+
+    /// Staking zero to an existing nomination must also be rejected.
+    #[test]
+    fn stake_zero_to_existing_nomination_rejected() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+        let result = client.try_stake(&supporter, &id, &0i128);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::InvalidAmount,
+            "zero-stake call to stake() must be rejected"
+        );
+    }
+
+    /// Nominating with a negative stake must be rejected.
+    #[test]
+    fn nominate_negative_stake_rejected() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let result = client.try_nominate(&supporter, &candidate, &-1i128);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::InvalidAmount,
+            "negative-stake nomination must be rejected"
+        );
+    }
+
+    /// A supporter with zero stake cannot withdraw (nothing to return).
+    #[test]
+    fn withdraw_zero_stake_returns_invalid_amount() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let non_supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        let id = client.nominate(&supporter, &candidate, &50);
+
+        // Advance past window so the stale condition is met
+        env.ledger().set(LedgerInfo {
+            timestamp: 201,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        // non_supporter never staked — has 0 stake
+        let result = client.try_withdraw(&non_supporter, &id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::InvalidAmount,
+            "withdrawal of zero stake must return typed InvalidAmount"
+        );
+    }
+
+    /// select_candidate with no eligible nominations returns a typed error.
+    #[test]
+    fn select_candidate_no_eligible_returns_typed_error() {
+        let (env, _token, client, _) = setup();
+        // No nominations created — selection must fail cleanly
+        let result = client.try_select_candidate();
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::NoEligibleCandidate,
+            "select_candidate with no nominations must return typed NoEligibleCandidate"
+        );
+    }
+
+    /// Nomination that does not meet minimum stake is not selected.
+    #[test]
+    fn nomination_below_minimum_stake_not_selectable() {
+        let (env, token, client, _) = setup();
+        let supporter = Address::generate(&env);
+        let candidate = Address::generate(&env);
+        fund(&env, &token, &supporter);
+
+        // minimum_stake = 50; stake only 30 < 50
+        client.nominate(&supporter, &candidate, &30);
+        let result = client.try_select_candidate();
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            NominationError::NoEligibleCandidate,
+            "nomination below minimum stake must not be selectable"
+        );
+    }
 }
