@@ -731,6 +731,103 @@ The automated checker flags any `pub fn` not present in this matrix as an error,
 
 ---
 
+### 14. governance (issue #1037 — invoice_nft transition callers extended)
+
+| Entrypoint | Required Role | Conditional Authorization | Notes |
+|------------|---------------|---------------------------|-------|
+| `initialize` | None (one-time) | | |
+| `set_stake` | **Admin** | | Sets voter stake weight |
+| `set_target_hash` | **Admin** | | Registers upgrade target hash |
+| `create_proposal` | **Voter (Self)** | Stake ≥ min_stake | |
+| `get_proposal` | Permissionless | Read-only | |
+| `designate_offchain_voting` | **Admin** | Proposal active | |
+| `anchor_offchain_result` | **Admin** | Offchain voting designated | |
+| `get_offchain_result` | Permissionless | Read-only | |
+| `vote` | **Voter (Self)** | Proposal active; not already voted | |
+| `execute_proposal` | **Anyone** | Passed; timelock elapsed | Permissionless execution |
+| `configure_fast_track` | **Admin** | | |
+| `register_critical_bug_report` | **Admin** | | |
+| `create_fast_track_proposal` | **Admin** | | |
+| `vote_fast_track` | **Voter (Self)** | Fast-track proposal active | |
+| `execute_fast_track_proposal` | **Anyone** | Passed | Permissionless execution |
+| `publish_fast_track_disclosure` | **Admin** | | |
+| `get_fast_track_proposal` | Permissionless | Read-only | |
+
+---
+
+### 15. debtor_attestation (issue #1037 — invoice_nft transition callers extended)
+
+| Entrypoint | Required Role | Conditional Authorization | Notes |
+|------------|---------------|---------------------------|-------|
+| `initialize` | None (one-time) | | |
+| `admin` | Permissionless | Read-only | |
+| `set_max_attestation_age` | **Admin** | | |
+| `max_attestation_age` | Permissionless | Read-only | |
+| `add_relay` | **Admin** | | |
+| `remove_relay` | **Admin** | | |
+| `is_relay` | Permissionless | Read-only | |
+| `attest` | **Debtor (Self)** | Invoice exists; debtor matches | On-chain attestation |
+| `attest_via_relay` | **Relay (Self)** | Relay registered; invoice exists | Relay-authenticated path |
+| `reject` | **Admin** | Attestation exists | |
+| `attestation_status` | Permissionless | Read-only | |
+| `is_confirmed` | Permissionless | Read-only | |
+| `get_record` | Permissionless | Read-only | |
+| `nonce_of` | Permissionless | Read-only | |
+
+---
+
+### 16. parameter_registry (issue #1037 — invoice_nft transition callers extended)
+
+| Entrypoint | Required Role | Conditional Authorization | Notes |
+|------------|---------------|---------------------------|-------|
+| `initialize` | None (one-time) | | |
+| `set_access_control` | **Admin** | | |
+| `admin_set_parameter` | **Admin** | | Direct admin override |
+| `bootstrap_from_live_contracts` | **Admin** | | One-time bootstrapping |
+| `propose_param_update` | **Governance** | Multisig signer | |
+| `approve_param_update` | **Governance** | Multisig signer; rejects duplicates | |
+| `execute_param_update` | **Governance** | Multisig signer; timelock elapsed | |
+| `cancel_param_update` | **Governance** | Multisig signer; proposer or threshold | |
+| `get_parameter` | Permissionless | Read-only | |
+| `is_param_governed` | Permissionless | Read-only | |
+| `get_value` | Permissionless | Read-only | |
+| `get_values_batch` | Permissionless | Read-only | |
+| `get_proposal` | Permissionless | Read-only | |
+| `propose_upgrade` | **Admin** | 24h timelock | |
+| `execute_upgrade` | **Admin** | Timelock elapsed | |
+| `propose_admin` | **Admin** | | Initiates two-step handover |
+| `accept_admin` | **Pending (Self)** | Pending admin matches caller | |
+| `get_admin` | Permissionless | Read-only | |
+| `get_next_proposal_id` | Permissionless | Read-only | |
+
+---
+
+### invoice_nft State-Transition Caller Matrix (issue #1037)
+
+This sub-table makes explicit which contract may call each `invoice_nft`
+state-transition entrypoint so that drift between the matrix and the
+`set_authorized_callers` wiring fails CI.
+
+| invoice_nft entrypoint | Authorised Caller | Transition | Notes |
+|------------------------|-------------------|------------|-------|
+| `set_created` | **Marketplace Contract** | Listed → Created (relist) | Caller must equal stored marketplace address |
+| `set_listed` | **Marketplace Contract** | Created → Listed | Caller must equal stored marketplace address |
+| `set_funded` | **FinancingPool Contract** | Listed → Funded | Caller must equal stored financing_pool address |
+| `set_repaid` | **FinancingPool Contract** | Funded → Repaid | Caller must equal stored financing_pool address |
+| `set_defaulted` | **Admin** | Funded → Defaulted | Manual; past due date required |
+| `archive_invoice` | **Admin** | Repaid/Defaulted → archived | Removes hot and cold keys |
+| `freeze_invoice` | **Admin** | Any → Frozen | Incident response; blocks transitions |
+| `unfreeze_invoice` | **Admin** | Frozen → unfrozen | |
+| `freeze_sme_invoices` | **Admin** | Batch any → Frozen | Bounded batch |
+| `unfreeze_sme_invoices` | **Admin** | Batch Frozen → unfrozen | Bounded batch |
+
+**Enforcement:** `invoice_nft` validates the caller address against the stored
+authorized-callers registry for every transition. `check_access_matrix` now
+scans all contracts listed in `contract_dirs` (extended in #1037) so any new
+transition entrypoint that lacks a matrix row fails CI.
+
+---
+
 ## Contributor Guide: Adding New Matrix Rows
 
 When you add a new `pub fn` to any contract in `contracts/` **or** add a new contract to `scripts/deploy.sh`:
