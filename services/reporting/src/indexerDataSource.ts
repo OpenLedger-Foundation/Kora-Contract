@@ -28,6 +28,14 @@ import {
   FeeEvent,
   UserStatement,
   ProtocolStatement,
+  TreasuryBalance,
+  TreasuryBalancesResponse,
+  TreasuryInflow,
+  TreasuryInflowsResponse,
+  TreasuryOutflow,
+  TreasuryOutflowsResponse,
+  TreasuryIndexerStatus,
+  TreasuryQueryOptions,
 } from "./types";
 
 const logger = pino({ name: "reporting:indexer-source" });
@@ -243,6 +251,100 @@ export class IndexerReportingDataSource implements ReportingDataSource {
     };
   }
 
+  async getTreasuryBalances(): Promise<TreasuryBalancesResponse> {
+    const [rows, status] = await Promise.all([
+      this._fetchTreasuryEvents(),
+      this._fetchIndexerStatus(),
+    ]);
+
+    const inflows = this._collectTreasuryInflows(rows);
+    const outflows = this._collectTreasuryOutflows(rows);
+
+    const byAsset = new Map<string, { inflows: bigint; outflows: bigint }>();
+    for (const inf of inflows) {
+      const entry = byAsset.get(inf.asset) ?? { inflows: 0n, outflows: 0n };
+      entry.inflows += bigint(inf.amount);
+      byAsset.set(inf.asset, entry);
+    }
+    for (const out of outflows) {
+      const entry = byAsset.get(out.asset) ?? { inflows: 0n, outflows: 0n };
+      entry.outflows += bigint(out.amount);
+      byAsset.set(out.asset, entry);
+    }
+
+    const balances: TreasuryBalance[] = Array.from(byAsset.entries()).map(
+      ([asset, totals]) => {
+        const net = totals.inflows - totals.outflows;
+        return {
+          asset,
+          balance: (net > 0n ? net : 0n).toString(),
+          totalInflows: totals.inflows.toString(),
+          totalOutflows: totals.outflows.toString(),
+        };
+      }
+    );
+
+    const resolvedStatus = this._resolveStatus(status, rows);
+    return {
+      balances,
+      ...resolvedStatus,
+    };
+  }
+
+  async getTreasuryInflows(
+    options: TreasuryQueryOptions = {}
+  ): Promise<TreasuryInflowsResponse> {
+    const [rows, status] = await Promise.all([
+      this._fetchTreasuryEvents(options.fromTs, options.toTs),
+      this._fetchIndexerStatus(),
+    ]);
+
+    const all = this._collectTreasuryInflows(rows).filter((item) => {
+      if (options.asset && item.asset !== options.asset) return false;
+      if (options.fromTs !== undefined && item.timestamp < options.fromTs) return false;
+      if (options.toTs !== undefined && item.timestamp > options.toTs) return false;
+      return true;
+    });
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? all.length;
+    const paged = all.slice(offset, offset + limit);
+
+    const resolvedStatus = this._resolveStatus(status, rows);
+    return {
+      inflows: paged,
+      total: all.length,
+      ...resolvedStatus,
+    };
+  }
+
+  async getTreasuryOutflows(
+    options: TreasuryQueryOptions = {}
+  ): Promise<TreasuryOutflowsResponse> {
+    const [rows, status] = await Promise.all([
+      this._fetchTreasuryEvents(options.fromTs, options.toTs),
+      this._fetchIndexerStatus(),
+    ]);
+
+    const all = this._collectTreasuryOutflows(rows).filter((item) => {
+      if (options.asset && item.asset !== options.asset) return false;
+      if (options.fromTs !== undefined && item.timestamp < options.fromTs) return false;
+      if (options.toTs !== undefined && item.timestamp > options.toTs) return false;
+      return true;
+    });
+
+    const offset = options.offset ?? 0;
+    const limit = options.limit ?? all.length;
+    const paged = all.slice(offset, offset + limit);
+
+    const resolvedStatus = this._resolveStatus(status, rows);
+    return {
+      outflows: paged,
+      total: all.length,
+      ...resolvedStatus,
+    };
+  }
+
   // ── Pagination ────────────────────────────────────────────────────────────
 
   /**
@@ -346,5 +448,128 @@ export class IndexerReportingDataSource implements ReportingDataSource {
       )
       .map(toFeeEvent)
       .filter((e): e is FeeEvent => e !== null);
+  }
+
+  // ── Treasury helpers ──────────────────────────────────────────────────────
+
+  private async _fetchTreasuryEvents(
+    fromTs?: number,
+    toTs?: number
+  ): Promise<IndexerEventRow[]> {
+    const from = fromTs ?? 0;
+    const to = toTs ?? Math.floor(Date.now() / 1000) + 86400;
+    const rows = await this._fetchAllEvents(from, to);
+    return rows.filter((r) => r.contract === CONTRACT.TREASURY);
+  }
+
+  private async _fetchIndexerStatus(): Promise<TreasuryIndexerStatus | null> {
+    try {
+      const resp = await this.fetchFn(`${this.indexerUrl}/status`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!resp.ok) return null;
+      const data = (await resp.json()) as Record<string, unknown>;
+      const lastIndexedLedger = num(
+        data["lastIndexedLedger"] ?? data["last_indexed_ledger"]
+      );
+      const latestChainLedgerRaw =
+        data["latestChainLedger"] ?? data["latest_chain_ledger"];
+      const latestChainLedger =
+        latestChainLedgerRaw !== undefined ? num(latestChainLedgerRaw) : undefined;
+      const lag =
+        latestChainLedger !== undefined ? latestChainLedger - lastIndexedLedger : 0;
+      const partial = Boolean(data["partial"]) || lag > 10;
+      const lagWarning =
+        (data["lagWarning"] as string | undefined) ??
+        (partial && latestChainLedger !== undefined
+          ? `Indexer is ${lag} ledgers behind chain tip (lastIndexedLedger=${lastIndexedLedger}, latestChainLedger=${latestChainLedger})`
+          : undefined);
+      return {
+        lastIndexedLedger,
+        ...(latestChainLedger !== undefined ? { latestChainLedger } : {}),
+        partial,
+        ...(lagWarning ? { lagWarning } : {}),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private _resolveStatus(
+    status: TreasuryIndexerStatus | null,
+    rows: IndexerEventRow[]
+  ): TreasuryIndexerStatus {
+    if (status) return status;
+    const maxLedger = rows.reduce(
+      (max, r) => (r.ledger_sequence > max ? r.ledger_sequence : max),
+      0
+    );
+    return {
+      lastIndexedLedger: maxLedger,
+      partial: false,
+    };
+  }
+
+  private _collectTreasuryInflows(rows: IndexerEventRow[]): TreasuryInflow[] {
+    return rows
+      .filter(
+        (r) =>
+          r.event_type === "FEE_COLL" ||
+          r.event_type === "fee_collected" ||
+          r.event_type === "collect_fee"
+      )
+      .map((r): TreasuryInflow | null => {
+        const p = r.decoded_payload;
+        const asset = str(p["asset"] ?? p["token"]);
+        const amount = bigint(p["feeAmount"] ?? p["fee_amount"] ?? p["amount"]);
+        const txHash = str(p["txHash"] ?? p["tx_hash"]);
+        if (!asset || !txHash) return null;
+        const invoiceId = str(p["invoiceId"] ?? p["invoice_id"]) || undefined;
+        const source = str(p["source"]) || (invoiceId ? "marketplace_fee" : "protocol_fee");
+        const timestamp = num(p["timestamp"] ?? p["ledger_close_time"]);
+        return {
+          id: `${r.ledger_sequence}-${r.event_index}`,
+          asset,
+          amount: amount.toString(),
+          source,
+          ...(invoiceId ? { invoiceId } : {}),
+          txHash,
+          ledgerSequence: r.ledger_sequence,
+          timestamp,
+        };
+      })
+      .filter((e): e is TreasuryInflow => e !== null);
+  }
+
+  private _collectTreasuryOutflows(rows: IndexerEventRow[]): TreasuryOutflow[] {
+    return rows
+      .filter(
+        (r) =>
+          r.event_type === "FEE_WITHD" ||
+          r.event_type === "fee_withdrawn" ||
+          r.event_type === "withdraw" ||
+          r.event_type === "emergency_withdraw"
+      )
+      .map((r): TreasuryOutflow | null => {
+        const p = r.decoded_payload;
+        const asset = str(p["asset"] ?? p["token"]);
+        const amount = bigint(p["amount"]);
+        const recipient = str(p["recipient"] ?? p["to"]);
+        const txHash = str(p["txHash"] ?? p["tx_hash"]);
+        if (!asset || !recipient || !txHash) return null;
+        const reason = str(p["reason"]) || r.event_type;
+        const timestamp = num(p["timestamp"] ?? p["ledger_close_time"]);
+        return {
+          id: `${r.ledger_sequence}-${r.event_index}`,
+          asset,
+          amount: amount.toString(),
+          recipient,
+          reason,
+          txHash,
+          ledgerSequence: r.ledger_sequence,
+          timestamp,
+        };
+      })
+      .filter((e): e is TreasuryOutflow => e !== null);
   }
 }

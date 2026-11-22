@@ -34,6 +34,10 @@ jobs:
       - name: Preflight
         run: |
           set -euo pipefail
+          if [ "${DRILL_ENV}" = "production" ] || [ "${DRILL_ENV}" = "mainnet" ]; then
+            echo "::error::Emergency pause drill must not target mainnet/production (got: ${DRILL_ENV}). Staging/testnet only."
+            exit 1
+          fi
           test -f scripts/emergency-pause.sh
           test -f docs/EMERGENCY_PAUSE_DRILL.md
           if [ -f deployments/testnet.json ]; then
@@ -53,6 +57,7 @@ jobs:
           mkdir -p "artifacts/emergency-pause/${DRILL_ENV}"
           stamp="$(date -u +%Y%m%dT%H%M%SZ)"
           log="artifacts/emergency-pause/${DRILL_ENV}/drill-${stamp}.log"
+          checklist="artifacts/emergency-pause/${DRILL_ENV}/checklist-${stamp}.md"
           {
             echo "timestamp=${stamp} environment=${DRILL_ENV} dry_run=${DRY_RUN}"
             for mode in guardian direct; do
@@ -64,6 +69,15 @@ jobs:
               fi
             done
           } 2>&1 | tee "${log}"
+          cat > "${checklist}" <<EOF
+          # Emergency Pause Drill Checklist
+          - Timestamp: ${stamp}
+          - Environment: ${DRILL_ENV} (staging/testnet only)
+          - Dry Run: ${DRY_RUN}
+          - [x] Preflight & mainnet guard passed
+          - [x] Guardian mode smoke executed
+          - [x] Direct admin mode smoke executed
+          EOF
       - name: Upload timestamped drill logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -22,8 +22,8 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import pino from "pino";
-import { ExportJobQueue } from "./exportJobQueue";
-import { ExportFormat, ExportScope } from "./types";
+import { ExportJobQueue, ReportingDataSource } from "./exportJobQueue";
+import { ExportFormat, ExportScope, TreasuryQueryOptions } from "./types";
 
 const logger = pino({ name: "reporting:http" });
 
@@ -285,20 +285,83 @@ export function startRetentionSweeper(
 
 // ── HTTP server factory ───────────────────────────────────────────────────────
 
+function parseTreasuryQuery(searchParams: URLSearchParams): TreasuryQueryOptions {
+  const opts: TreasuryQueryOptions = {};
+  const asset = searchParams.get("asset");
+  if (asset) opts.asset = asset;
+
+  const fromRaw = searchParams.get("fromTs") ?? searchParams.get("from_ts");
+  if (fromRaw !== null && fromRaw !== "") {
+    const n = Number(fromRaw);
+    if (isFinite(n)) opts.fromTs = n;
+  }
+
+  const toRaw = searchParams.get("toTs") ?? searchParams.get("to_ts");
+  if (toRaw !== null && toRaw !== "") {
+    const n = Number(toRaw);
+    if (isFinite(n)) opts.toTs = n;
+  }
+
+  const limitRaw = searchParams.get("limit");
+  if (limitRaw !== null && limitRaw !== "") {
+    const n = Number(limitRaw);
+    if (isFinite(n) && n >= 0) opts.limit = Math.floor(n);
+  }
+
+  const offsetRaw = searchParams.get("offset");
+  if (offsetRaw !== null && offsetRaw !== "") {
+    const n = Number(offsetRaw);
+    if (isFinite(n) && n >= 0) opts.offset = Math.floor(n);
+  }
+
+  return opts;
+}
+
 /**
  * Create and return the HTTP server.
  * Does not call listen() — caller decides port and binding.
  */
 export function createReportingServer(
   queue: ExportJobQueue,
-  outputDir: string
+  outputDir: string,
+  dataSource?: ReportingDataSource
 ): http.Server {
   const server = http.createServer(async (rawReq, res) => {
     const req = rawReq as ReportingRequest;
+    const parsedUrl = new URL(req.url ?? "/", "http://localhost");
+    const pathname = parsedUrl.pathname;
 
     // Liveness check (no auth)
-    if (req.method === "GET" && req.url === "/health") {
+    if (req.method === "GET" && pathname === "/health") {
       return json(res, 200, { ok: true });
+    }
+
+    // Public read-only treasury transparency endpoints (no auth required)
+    if (req.method === "GET" && pathname.startsWith("/treasury/")) {
+      if (!dataSource) {
+        return json(res, 503, { error: "Treasury data source not configured" });
+      }
+      try {
+        if (pathname === "/treasury/balances") {
+          const result = await dataSource.getTreasuryBalances();
+          return json(res, 200, result);
+        }
+        if (pathname === "/treasury/inflows") {
+          const opts = parseTreasuryQuery(parsedUrl.searchParams);
+          const result = await dataSource.getTreasuryInflows(opts);
+          return json(res, 200, result);
+        }
+        if (pathname === "/treasury/outflows") {
+          const opts = parseTreasuryQuery(parsedUrl.searchParams);
+          const result = await dataSource.getTreasuryOutflows(opts);
+          return json(res, 200, result);
+        }
+        return json(res, 404, { error: "Not found" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Internal server error";
+        logger.error({ err, pathname }, "Treasury endpoint error");
+        return json(res, 500, { error: message });
+      }
     }
 
     // Auth gate for all other routes

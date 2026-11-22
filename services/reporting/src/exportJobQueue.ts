@@ -20,6 +20,10 @@ import {
   ExportStatus,
   UserStatement,
   ProtocolStatement,
+  TreasuryBalancesResponse,
+  TreasuryInflowsResponse,
+  TreasuryOutflowsResponse,
+  TreasuryQueryOptions,
 } from "./types";
 import { StatementBuilder } from "./statementBuilder";
 import { CsvRenderer } from "./csvRenderer";
@@ -48,6 +52,16 @@ export interface ReportingDataSource {
   ): Promise<UserStatement>;
 
   getProtocolStatement(fromTs: number, toTs: number): Promise<ProtocolStatement>;
+
+  getTreasuryBalances(): Promise<TreasuryBalancesResponse>;
+
+  getTreasuryInflows(
+    options?: TreasuryQueryOptions
+  ): Promise<TreasuryInflowsResponse>;
+
+  getTreasuryOutflows(
+    options?: TreasuryQueryOptions
+  ): Promise<TreasuryOutflowsResponse>;
 }
 
 export class ExportJobQueue {

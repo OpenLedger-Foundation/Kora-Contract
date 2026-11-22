@@ -1,0 +1,211 @@
+openapi: 3.0.3
+info:
+  title: Kora Treasury Transparency API
+  version: 1.0.0
+  description: |
+    Public read-only REST endpoints exposed by the Reporting Service for the
+    `apps/web` treasury transparency dashboard (Issue #1099).
+    No API key or authentication is required.
+
+paths:
+  /treasury/balances:
+    get:
+      summary: Get per-token treasury balances
+      description: Returns aggregated per-token balances, total inflows, total outflows, and indexer sync status.
+      responses:
+        "200":
+          description: Treasury balances and indexer status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreasuryBalancesResponse"
+
+  /treasury/inflows:
+    get:
+      summary: List treasury fee inflows
+      description: Returns paginated treasury fee inflow events with optional filtering.
+      parameters:
+        - $ref: "#/components/parameters/AssetParam"
+        - $ref: "#/components/parameters/FromTsParam"
+        - $ref: "#/components/parameters/ToTsParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: Treasury inflow events and indexer status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreasuryInflowsResponse"
+
+  /treasury/outflows:
+    get:
+      summary: List treasury withdrawals / outflows
+      description: Returns paginated treasury withdrawal/outflow events with optional filtering.
+      parameters:
+        - $ref: "#/components/parameters/AssetParam"
+        - $ref: "#/components/parameters/FromTsParam"
+        - $ref: "#/components/parameters/ToTsParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: Treasury outflow events and indexer status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TreasuryOutflowsResponse"
+
+components:
+  parameters:
+    AssetParam:
+      name: asset
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Filter by asset symbol or token address (e.g. USDC, EURC).
+    FromTsParam:
+      name: fromTs
+      in: query
+      required: false
+      schema:
+        type: integer
+      description: Inclusive start Unix timestamp (seconds).
+    ToTsParam:
+      name: toTs
+      in: query
+      required: false
+      schema:
+        type: integer
+      description: Inclusive end Unix timestamp (seconds).
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+      description: Maximum number of records to return.
+    OffsetParam:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+      description: Number of records to skip.
+
+  schemas:
+    TreasuryBalance:
+      type: object
+      required: [asset, balance, totalInflows, totalOutflows]
+      properties:
+        asset:
+          type: string
+        balance:
+          type: string
+          description: Net balance in stroops (7 decimal places).
+        totalInflows:
+          type: string
+        totalOutflows:
+          type: string
+        reserveBalance:
+          type: string
+
+    TreasuryInflow:
+      type: object
+      required: [id, asset, amount, source, txHash, ledgerSequence, timestamp]
+      properties:
+        id:
+          type: string
+        asset:
+          type: string
+        amount:
+          type: string
+        source:
+          type: string
+        invoiceId:
+          type: string
+        txHash:
+          type: string
+        ledgerSequence:
+          type: integer
+        timestamp:
+          type: integer
+
+    TreasuryOutflow:
+      type: object
+      required: [id, asset, amount, recipient, txHash, ledgerSequence, timestamp]
+      properties:
+        id:
+          type: string
+        asset:
+          type: string
+        amount:
+          type: string
+        recipient:
+          type: string
+        reason:
+          type: string
+        txHash:
+          type: string
+        ledgerSequence:
+          type: integer
+        timestamp:
+          type: integer
+
+    TreasuryBalancesResponse:
+      type: object
+      required: [balances, lastIndexedLedger, partial]
+      properties:
+        balances:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreasuryBalance"
+        lastIndexedLedger:
+          type: integer
+        latestChainLedger:
+          type: integer
+        partial:
+          type: boolean
+        lagWarning:
+          type: string
+
+    TreasuryInflowsResponse:
+      type: object
+      required: [inflows, total, lastIndexedLedger, partial]
+      properties:
+        inflows:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreasuryInflow"
+        total:
+          type: integer
+        lastIndexedLedger:
+          type: integer
+        latestChainLedger:
+          type: integer
+        partial:
+          type: boolean
+        lagWarning:
+          type: string
+
+    TreasuryOutflowsResponse:
+      type: object
+      required: [outflows, total, lastIndexedLedger, partial]
+      properties:
+        outflows:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreasuryOutflow"
+        total:
+          type: integer
+        lastIndexedLedger:
+          type: integer
+        latestChainLedger:
+          type: integer
+        partial:
+          type: boolean
+        lagWarning:
+          type: string
