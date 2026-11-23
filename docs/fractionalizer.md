@@ -45,6 +45,13 @@ The position is now owned by the fractionalizer. The investor holds all shares i
 
 `transfer_shares(from, original_investor, invoice_id, to, amount)` moves share balances between addresses. Shares are tracked as `u64` balances in persistent storage keyed by `(invoice_id, original_investor, holder)`.
 
+Share transfers are gated by the same incident controls as the rest of the protocol:
+
+- **Pause:** if `access_control.is_paused()` returns `true`, `transfer_shares` reverts with `ProtocolPaused` (code 4). This prevents share movement while the protocol is in a degraded/incident state.
+- **Blacklist:** if either `from` or `to` is blacklisted in the access-control module, `transfer_shares` reverts with `Blacklisted` (code 15). Both the sender and the recipient are checked so a blacklisted address can neither send nor receive shares.
+
+These checks run before any balance mutation, so a rejected transfer leaves balances unchanged (fail-closed, idempotent re-entry).
+
 ### Settlement
 
 `settle(invoice_id, original_investor)` must be called after the pool closes:
@@ -128,13 +135,15 @@ pub struct WrapRecord {
 | `NotShareHolder` | 12 | Caller holds no shares |
 | `InvalidShareCount` | 13 | Share count is 0 or exceeds MAX_SHARES (1,000,000) |
 | `PositionNotFound` | 14 | No position exists for investor |
+| `Blacklisted` | 15 | Sender or recipient is blacklisted |
 
 ---
 
 ## Security Properties
 
 - **Auth:** `wrap`, `unwrap`, `transfer_shares`, `redeem` all require `require_auth()` on the acting address
-- **Pause:** `wrap` and `unwrap` check `access_control.is_paused()`
+- **Pause:** `wrap`, `unwrap`, and `transfer_shares` check `access_control.is_paused()` and revert with `ProtocolPaused`
+- **Blacklist:** `transfer_shares` checks both `from` and `to` against the access-control blacklist and reverts with `Blacklisted` if either is listed
 - **CEI pattern:** `WrapRecord` is written to storage before `transfer_position` is called in `wrap`; `Claimed` flag is set before token transfer in `redeem`
 - **Double-claim prevention:** `DataKey::Claimed` is set atomically before the token transfer; a second `redeem` call reverts with `AlreadyClaimed`
 - **Dust determinism:** integer division remainder always goes to the last redeemer (when `outstanding_shares == holder_shares`), making dust allocation deterministic and auditable
@@ -149,6 +158,7 @@ wrap()
   └─► WrapRecord { settled: false, outstanding_shares: N }
         │
         ├─► transfer_shares() × M  (distribute to micro-investors)
+        │     └─► gated by pause + blacklist checks
         │
         │   [pool repays, pool.is_closed = true]
         │
