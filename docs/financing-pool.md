@@ -52,11 +52,24 @@ Compounding interest models are explicitly out of scope. Late fees accrue on the
 3. **After grace period** — repay face value plus yield plus accrued late fee (capped).
 4. **After grace period, unpaid** — the invoice may be marked `defaulted`.
 
+## Yield Dust Residual Policy
+
+When yield is distributed across investors, integer division can leave a small **dust residual** that cannot be evenly allocated. The destination of this residual is fixed and deterministic so that accounting is never ambiguous:
+
+- **Destination** — any unallocated yield dust is retained by the **pool reserve** (the pool's own balance), never silently dropped and never sent to an arbitrary investor.
+- **Determinism** — the residual is computed from the same checked arithmetic used for the per-investor share; the sum of distributed shares plus the retained residual always equals the total yield distributed.
+- **Fail closed** — if the pool reserve destination is not configured (empty or missing), distribution fails with a typed error rather than discarding the residual.
+- **Pause / auth** — dust routing executes only as part of the normal distribution path and therefore respects the existing pause guard and caller authorization; it cannot be triggered while the pool is paused or by an unauthorized caller.
+- **Idempotency** — re-entry into distribution does not re-route an already-retained residual; the residual is settled once per distribution.
+
+This policy is locked by tests covering the happy path, the empty/missing-config failure, and the paused/unauthorized edge paths.
+
 ## Edge Cases
 
 - **Grace period boundary** — repayment exactly at the grace period end timestamp is treated as on time; the first late-fee unit accrues only after that instant.
 - **Fee cap** — once accrued fees reach `max_late_fee_bps` of face value, no further fees accrue regardless of elapsed time.
 - **Checked arithmetic** — all fee and total-owed computations use checked math and fail safely on overflow.
+- **Yield dust** — residual yield that cannot be evenly allocated is retained by the pool reserve; missing reserve config fails closed with a typed error.
 
 ## Testing
 
@@ -66,3 +79,6 @@ Tests should cover, at minimum:
 - Fee cap enforcement (accrual stops at the configured maximum).
 - Repayment during the grace period versus after it.
 - Default only triggering after the grace period elapses.
+- Yield dust residual retained by the pool reserve (happy path).
+- Missing/empty reserve config fails closed with a typed error.
+- Dust routing blocked while paused and for unauthorized callers.
