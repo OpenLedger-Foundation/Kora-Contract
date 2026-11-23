@@ -360,3 +360,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1154 -->
 - #1154: Marketplace listing metadata CID pin verification hook
+
+<!-- handsoff-issue-1155 -->
+- #1155: Risk pipeline score explanation payload for SME dashboard
