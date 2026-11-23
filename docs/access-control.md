@@ -232,6 +232,59 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 
 ---
 
+### Paginated Role Enumeration
+
+```rust
+pub fn get_role_members(
+    env: Env,
+    role: Role,
+    start: u32,
+    limit: u32,
+) -> Result<RoleMembersPage, KoraError>
+```
+
+**Purpose:** Enumerate the addresses holding a given role in bounded pages, so admin UIs and off-chain tooling never perform an unbounded role walk.
+
+**Parameters:**
+- `env` — Soroban environment
+- `role` — The role to enumerate (`Operator` or `Verifier`)
+- `start` — Zero-based index of the first member to return (the cursor)
+- `limit` — Maximum number of members to return in this page
+
+**Returns:** A `RoleMembersPage` containing:
+- `members` — up to `limit` addresses starting at `start`
+- `next` — `Some(next_start)` when more members remain, or `None` on the final page
+
+or a typed error:
+- `KoraError::InvalidPageLimit` if `limit` is `0` or exceeds the maximum page size
+- `KoraError::Unauthorized` if `role` is `Admin` or `None` (only enumerable roles are exposed)
+
+**Authorization:** No authorization check (public view).
+
+**Security:**
+- Page size is capped at `MAX_ROLE_PAGE_SIZE`; oversized requests fail closed with `InvalidPageLimit` rather than silently truncating
+- Enumeration is read-only and does not mutate role storage or TTLs
+- An empty role (or a `start` at/after the end) returns an empty `members` list with `next == None`
+- Re-issuing the same `(role, start, limit)` query is idempotent and returns identical results
+
+**Pagination pattern:**
+
+```rust
+let mut cursor = 0u32;
+loop {
+    let page = contract.get_role_members(env.clone(), Role::Verifier, cursor, 50)?;
+    for member in page.members.iter() {
+        // process member
+    }
+    match page.next {
+        Some(next) => cursor = next,
+        None => break,
+    }
+}
+```
+
+---
+
 ## Security Invariants
 
 ### 1. Admin Uniqueness
@@ -259,49 +312,6 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 - Instance storage (admin, paused flag) is tied to the contract instance and does not expire
 
 ### 6. Cross-Contract Safety
-- The `pause` flag is read by `invoice_nft` and `marketplace` via cross-contract calls
-- The calling contract's address is used as the authorized signer (implicit trust)
-- No circular dependencies exist between contracts
-
-### 7. Council Rotation & Term-Limit Enforcement (#845)
-- **Defined Term Limits:** Council seats possess configurable term lengths (`configure_council_terms`) preventing indefinite tenure.
-- **Rotation Elections:** Expiry triggers a structured election (`initiate_council_rotation`, `vote_council_rotation`, `conclude_council_rotation`).
-- **Quorum Safety:** An expiring seat's authority only lapses once a replacement is confirmed; safe minimum quorum is preserved throughout transitions.
-- **Failed-Election Fallback:** If an election fails to reach quorum or confirm a successor, an automatic term extension grace period activates, preventing any gap in protocol authority.
-- **Key Rotation Integration:** Leverages the key-rotation procedures for secure credential handoff.
-
-## Known Limitations (v1)
-
-### Single Admin Key
-- If the admin's private key is compromised, an attacker has full protocol control
-- Mitigations planned for v2:
-  - Multisig admin (threshold signature scheme)
-  - Timelock on sensitive admin operations (48–72 hour delay)
-  - Hardware security module for key storage
-
-### No Role-Based View Permissions
-- All view functions (`is_paused()`, `get_role()`, `get_admin()`) are public
-- There is no way to restrict who can query this information
-- This is acceptable because the pause flag and role assignments are not secret
-
-### No Audit Trail
-- No events are emitted on all role changes (this will be fixed in a future issue)
-- An audit trail of admin actions would improve forensics and accountability
-
-## Interaction with Other Contracts
-
-### `invoice_nft`
-- Calls `access_control.is_paused()` before minting and state transitions
-- Reverts with `KoraError::ProtocolPaused` if paused
-
-### `marketplace`
-- Calls `access_control.is_paused()` before listing and funding
-- Reverts with `KoraError::ProtocolPaused` if paused
-
-### `risk_registry`
-- Checks if caller is a verifier by calling `access_control.get_role()`
-- Only verifiers can register SMEs and assign risk scores
-
-### `financing_pool`
-- Calls `access_control.is_paused()` before repayment and yield distribution
-- Reverts with `KoraError::ProtocolPaused` if paused
+- The `pause` flag is read by `invoice_nft` and `marketplace` before any state-mutating operation
+- Dependent contracts treat a paused protocol as a hard stop (fail closed)
+- Role enumeration is read-only and never bypasses pause or auth checks on mutating paths
