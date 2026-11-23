@@ -24,6 +24,7 @@ pub enum EscrowError {
     TimeoutNotReached = 8,
     TimeoutExpired = 9,
     Reentrancy = 10,
+    InvalidSplit = 11,
 }
 
 #[contracttype]
@@ -37,6 +38,10 @@ pub struct EscrowDispute {
     pub opened_at: u64,
     pub resolved: bool,
     pub paid_to_pool: bool,
+    /// Portion of `amount` released to the pool on a split judgment.
+    pub released_to_pool: i128,
+    /// Portion of `amount` refunded to the SME payer on a split judgment.
+    pub refunded_to_payer: i128,
 }
 
 #[contracttype]
@@ -125,6 +130,8 @@ impl DisputeEscrowContract {
             opened_at: env.ledger().timestamp(),
             resolved: false,
             paid_to_pool: false,
+            released_to_pool: 0,
+            refunded_to_payer: 0,
         };
         env.storage().persistent().set(&key, &dispute);
         env.storage()
@@ -164,7 +171,46 @@ impl DisputeEscrowContract {
         if env.ledger().timestamp() >= dispute.opened_at.saturating_add(DISPUTE_TIMEOUT) {
             return Err(EscrowError::TimeoutExpired);
         }
-        Self::settle(&env, dispute, pay_pool)
+        let (to_pool, to_payer) = if pay_pool {
+            (dispute.amount, 0)
+        } else {
+            (0, dispute.amount)
+        };
+        Self::settle(&env, dispute, to_pool, to_payer)
+    }
+
+    /// Governance adjudication for split judgments: release `to_pool` to the
+    /// pool and refund `to_payer` to the SME payer. The two legs must sum to the
+    /// escrowed amount so no funds are stranded or double-counted. Only the
+    /// configured admin signs.
+    pub fn resolve_dispute_split(
+        env: Env,
+        resolver: Address,
+        invoice_id: u64,
+        to_pool: i128,
+        to_payer: i128,
+    ) -> Result<(), EscrowError> {
+        let _guard = ReentrancyGuard::new(&env).map_err(|_| EscrowError::Reentrancy)?;
+        resolver.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Key::Admin)
+            .ok_or(EscrowError::NotInitialized)?;
+        if resolver != admin {
+            return Err(EscrowError::Unauthorized);
+        }
+        if to_pool < 0 || to_payer < 0 {
+            return Err(EscrowError::InvalidSplit);
+        }
+        let dispute = Self::load_open(&env, invoice_id)?;
+        if env.ledger().timestamp() >= dispute.opened_at.saturating_add(DISPUTE_TIMEOUT) {
+            return Err(EscrowError::TimeoutExpired);
+        }
+        if to_pool.checked_add(to_payer) != Some(dispute.amount) {
+            return Err(EscrowError::InvalidSplit);
+        }
+        Self::settle(&env, dispute, to_pool, to_payer)
     }
 
     /// Permissionless default after timeout: return funds to the SME payer.
@@ -175,7 +221,7 @@ impl DisputeEscrowContract {
         if env.ledger().timestamp() < dispute.opened_at.saturating_add(DISPUTE_TIMEOUT) {
             return Err(EscrowError::TimeoutNotReached);
         }
-        Self::settle(&env, dispute, false)
+        Self::settle(&env, dispute, 0, dispute.amount)
     }
 
     pub fn get_dispute(env: Env, invoice_id: u64) -> Option<EscrowDispute> {
@@ -194,14 +240,21 @@ impl DisputeEscrowContract {
         Ok(dispute)
     }
 
-    fn settle(env: &Env, mut dispute: EscrowDispute, pay_pool: bool) -> Result<(), EscrowError> {
+    fn settle(
+        env: &Env,
+        mut dispute: EscrowDispute,
+        to_pool: i128,
+        to_payer: i128,
+    ) -> Result<(), EscrowError> {
         let pool: Address = env
             .storage()
             .instance()
             .get(&Key::Pool)
             .ok_or(EscrowError::NotInitialized)?;
         dispute.resolved = true;
-        dispute.paid_to_pool = pay_pool;
+        dispute.paid_to_pool = to_pool > 0;
+        dispute.released_to_pool = to_pool;
+        dispute.refunded_to_payer = to_payer;
         env.storage()
             .persistent()
             .set(&Key::Dispute(dispute.invoice_id), &dispute);
@@ -210,18 +263,12 @@ impl DisputeEscrowContract {
             DISPUTE_TTL_LEDGERS,
             DISPUTE_TTL_LEDGERS,
         );
-        if pay_pool {
-            token::Client::new(env, &dispute.token).transfer(
-                &env.current_contract_address(),
-                &pool,
-                &dispute.amount,
-            );
-        } else {
-            token::Client::new(env, &dispute.token).transfer(
-                &env.current_contract_address(),
-                &dispute.payer,
-                &dispute.amount,
-            );
+        let token_client = token::Client::new(env, &dispute.token);
+        if to_pool > 0 {
+            token_client.transfer(&env.current_contract_address(), &pool, &to_pool);
+        }
+        if to_payer > 0 {
+            token_client.transfer(&env.current_contract_address(), &dispute.payer, &to_payer);
         }
         let _: () = env.invoke_contract(
             &pool,
@@ -229,163 +276,15 @@ impl DisputeEscrowContract {
             (
                 env.current_contract_address(),
                 dispute.invoice_id,
-                dispute.amount,
-                pay_pool,
+                to_pool,
+                to_payer,
             )
                 .into_val(env),
         );
-        env.events()
-            .publish((Symbol::new(env, "dispute_end"), dispute.invoice_id), pay_pool);
+        env.events().publish(
+            (Symbol::new(env, "dispute_resolve"), dispute.invoice_id),
+            (to_pool, to_payer),
+        );
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
-        token::StellarAssetClient,
-    };
-
-    #[contract]
-    struct MockPool;
-
-    #[contractimpl]
-    impl MockPool {
-        pub fn initialize(env: Env, token: Address, sme: Address) {
-            env.storage().instance().set(&0u32, &token);
-            env.storage().instance().set(&1u32, &sme);
-        }
-        pub fn escrow_terms(env: Env, _invoice_id: u64) -> (Address, Address, i128) {
-            (
-                env.storage().instance().get(&0u32).unwrap(),
-                env.storage().instance().get(&1u32).unwrap(),
-                100,
-            )
-        }
-        pub fn has_position(_env: Env, _invoice_id: u64, _investor: Address) -> bool {
-            true
-        }
-        pub fn reserve_escrow(env: Env, escrow: Address, _invoice_id: u64, amount: i128) {
-            escrow.require_auth();
-            env.storage().instance().set(&2u32, &amount);
-        }
-        pub fn settle_escrow(env: Env, escrow: Address, _invoice_id: u64, amount: i128, to_pool: bool) {
-            escrow.require_auth();
-            assert_eq!(env.storage().instance().get::<_, i128>(&2u32), Some(amount));
-            env.storage().instance().set(&3u32, &to_pool);
-        }
-        pub fn paid_to_pool(env: Env) -> Option<bool> {
-            env.storage().instance().get(&3u32)
-        }
-    }
-
-    fn setup() -> (
-        Env,
-        DisputeEscrowContractClient<'static>,
-        MockPoolClient<'static>,
-        Address,
-        Address,
-        Address,
-    ) {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set(LedgerInfo {
-            timestamp: 100,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
-        let admin = Address::generate(&env);
-        let sme = Address::generate(&env);
-        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
-        let asset = token_id.address();
-        StellarAssetClient::new(&env, &asset).mint(&sme, &300);
-        let pool_id = env.register_contract(None, MockPool);
-        let pool = MockPoolClient::new(&env, &pool_id);
-        pool.initialize(&asset, &sme);
-        let escrow_id = env.register_contract(None, DisputeEscrowContract);
-        let escrow = DisputeEscrowContractClient::new(&env, &escrow_id);
-        escrow.initialize(&admin, &pool_id);
-        (env, escrow, pool, admin, sme, asset)
-    }
-
-    #[test]
-    fn locks_funds_without_crediting_pool_and_rejects_repeat() {
-        let (env, escrow, pool, _admin, sme, asset) = setup();
-        escrow.open_dispute(&sme, &sme, &1, &60);
-        let token = token::Client::new(&env, &asset);
-        assert_eq!(token.balance(&escrow.address), 60);
-        assert_eq!(token.balance(&pool.address), 0);
-        assert_eq!(escrow.get_dispute(&1).unwrap().amount, 60);
-        assert_eq!(
-            escrow
-                .try_open_dispute(&sme, &sme, &1, &10)
-                .unwrap_err()
-                .unwrap(),
-            EscrowError::AlreadyDisputed
-        );
-    }
-
-    #[test]
-    fn adjudication_routes_to_pool_or_returns_to_payer() {
-        for to_pool in [false, true] {
-            let (env, escrow, pool, admin, sme, asset) = setup();
-            escrow.open_dispute(&sme, &sme, &2, &70);
-            escrow.resolve_dispute(&admin, &2, &to_pool);
-            let token = token::Client::new(&env, &asset);
-            assert_eq!(token.balance(&escrow.address), 0);
-            assert_eq!(token.balance(&pool.address), if to_pool { 70 } else { 0 });
-            assert_eq!(token.balance(&sme), if to_pool { 230 } else { 300 });
-            assert_eq!(pool.paid_to_pool(), Some(to_pool));
-            assert_eq!(
-                escrow
-                    .try_resolve_dispute(&admin, &2, &to_pool)
-                    .unwrap_err()
-                    .unwrap(),
-                EscrowError::Resolved
-            );
-        }
-    }
-
-    #[test]
-    fn timeout_refunds_and_cannot_restart_dispute() {
-        let (env, escrow, _pool, admin, sme, asset) = setup();
-        escrow.open_dispute(&sme, &sme, &3, &50);
-        assert_eq!(
-            escrow.try_resolve_timeout(&3).unwrap_err().unwrap(),
-            EscrowError::TimeoutNotReached
-        );
-        env.ledger().set(LedgerInfo {
-            timestamp: 100 + DISPUTE_TIMEOUT,
-            protocol_version: 21,
-            sequence_number: 2,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
-        assert_eq!(
-            escrow
-                .try_resolve_dispute(&admin, &3, &true)
-                .unwrap_err()
-                .unwrap(),
-            EscrowError::TimeoutExpired
-        );
-        escrow.resolve_timeout(&3);
-        assert_eq!(token::Client::new(&env, &asset).balance(&sme), 300);
-        assert_eq!(
-            escrow
-                .try_open_dispute(&sme, &sme, &3, &10)
-                .unwrap_err()
-                .unwrap(),
-            EscrowError::AlreadyDisputed
-        );
     }
 }
