@@ -357,3 +357,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1154 -->
+- #1154: Marketplace listing metadata CID pin verification hook
