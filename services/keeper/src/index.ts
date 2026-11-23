@@ -12,6 +12,7 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { JobStore } from "./jobStore";
 import { Dispatcher } from "./dispatcher";
 import { Scheduler } from "./scheduler";
+import { LeaseStore } from "./leaseStore";
 import { KeeperConfig } from "./types";
 import { IndexerDeadlineClient } from "./indexerClient";
 import { ListingTtlKeeper } from "./ttlKeeper";
@@ -67,7 +68,17 @@ async function main(): Promise<void> {
   const store = new JobStore(config.dbPath);
   const dispatcher = new Dispatcher(config);
   const ttlKeeper = new ListingTtlKeeper(config);
-  const scheduler = new Scheduler(store, dispatcher, config, () => ttlKeeper.scan());
+
+  // ── Lease fencing (multi-replica safety) ─────────────────────────────────
+  // When KEEPER_LEASE_DB_PATH is set all replicas share the same lease table
+  // so only one dispatches at a time.  Omit to run in standalone mode.
+  const leasePath = process.env.KEEPER_LEASE_DB_PATH ?? config.dbPath;
+  const holderId  = process.env.KEEPER_HOLDER_ID
+    ?? `${process.env.HOSTNAME ?? "localhost"}-${process.pid}`;
+  const leaseStore = new LeaseStore(leasePath);
+  logger.info({ holderId, leasePath }, "Keeper lease store initialised");
+
+  const scheduler = new Scheduler(store, dispatcher, config, () => ttlKeeper.scan(), leaseStore, holderId);
 
   scheduler.start();
 
@@ -158,6 +169,7 @@ async function main(): Promise<void> {
     clearIngest();
     scheduler.stop();
     store.close();
+    leaseStore.close();
     server.close(() => process.exit(0));
   };
 
