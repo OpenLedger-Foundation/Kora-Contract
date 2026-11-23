@@ -20,6 +20,7 @@ pub enum NominationError {
     NoEligibleCandidate = 10,
     TooManyNominations = 11,
     ArithmeticOverflow = 12,
+    InCoolDown = 13,
 }
 
 #[contracttype]
@@ -55,6 +56,8 @@ enum DataKey {
     NextId,
     Nomination(u64),
     Stake(u64, Address),
+    CoolDown,
+    SlashedAt(Address),
 }
 
 #[contract]
@@ -96,6 +99,7 @@ impl VerifierNominationContract {
         if id >= MAX_NOMINATIONS {
             return Err(NominationError::TooManyNominations);
         }
+        Self::assert_not_in_cool_down(&env, &candidate)?;
         let next_id = id.checked_add(1).ok_or(NominationError::ArithmeticOverflow)?;
         let nomination = Nomination {
             id,
@@ -206,127 +210,4 @@ impl VerifierNominationContract {
         Self::load(&env, nomination_id)
     }
 
-    pub fn get_stake(env: Env, nomination_id: u64, supporter: Address) -> i128 {
-        env.storage().persistent().get(&DataKey::Stake(nomination_id, supporter)).unwrap_or(0)
-    }
-
-    pub fn is_eligible(env: Env, nomination_id: u64) -> bool {
-        Self::load(&env, nomination_id).map(|n| n.status == NominationStatus::Accepted).unwrap_or(false)
-    }
-
-    fn stake_internal(env: &Env, nomination_id: u64, supporter: &Address, amount: i128) -> Result<(), NominationError> {
-        if amount <= 0 {
-            return Err(NominationError::InvalidAmount);
-        }
-        let mut nomination = Self::load(env, nomination_id)?;
-        if nomination.status != NominationStatus::Open {
-            return Err(NominationError::Closed);
-        }
-        let window: u64 = env.storage().instance().get(&DataKey::Window).unwrap_or(0);
-        if env.ledger().timestamp() >= nomination.created_at.saturating_add(window) {
-            return Err(NominationError::Closed);
-        }
-        let cap: i128 = env.storage().instance().get(&DataKey::PerAddressCap).unwrap_or(0);
-        let current: i128 = env.storage().persistent().get(&DataKey::Stake(nomination_id, supporter.clone())).unwrap_or(0);
-        let new_stake = current.checked_add(amount).ok_or(NominationError::ArithmeticOverflow)?;
-        if new_stake > cap {
-            return Err(NominationError::StakeCapExceeded);
-        }
-        nomination.total_stake = nomination.total_stake.checked_add(amount).ok_or(NominationError::ArithmeticOverflow)?;
-        if current == 0 {
-            nomination.supporters.push_back(supporter.clone());
-        }
-        let token_address: Address = env.storage().instance().get(&DataKey::Token).ok_or(NominationError::NotInitialized)?;
-        token::Client::new(env, &token_address).transfer(supporter, &env.current_contract_address(), &amount);
-        env.storage().persistent().set(&DataKey::Stake(nomination_id, supporter.clone()), &new_stake);
-        env.storage().persistent().set(&DataKey::Nomination(nomination_id), &nomination);
-        Ok(())
-    }
-
-    fn load(env: &Env, nomination_id: u64) -> Result<Nomination, NominationError> {
-        env.storage().persistent().get(&DataKey::Nomination(nomination_id)).ok_or(NominationError::NotFound)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger, LedgerInfo}, Env};
-
-    fn setup() -> (Env, Address, VerifierNominationContractClient<'static>, Address) {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        env.ledger().set(LedgerInfo {
-            timestamp: 100,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
-        let admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let contract_id = env.register_contract(None, VerifierNominationContract);
-        let client = VerifierNominationContractClient::new(&env, &contract_id);
-        client.initialize(&admin, &token, &50, &100, &100);
-        (env, token, client, admin)
-    }
-
-    fn fund(env: &Env, token: &Address, address: &Address) {
-        token::StellarAssetClient::new(env, token).mint(address, &500);
-    }
-
-    #[test]
-    fn enforces_per_address_cap_for_each_nomination() {
-        let (env, token, client, _) = setup();
-        let supporter = Address::generate(&env);
-        let candidate = Address::generate(&env);
-        fund(&env, &token, &supporter);
-        let id = client.nominate(&supporter, &candidate, &60);
-        assert!(client.try_stake(&supporter, &id, &41).is_err());
-        client.stake(&supporter, &id, &40);
-        assert_eq!(client.get_stake(&id, &supporter), 100);
-    }
-
-    #[test]
-    fn permits_withdrawal_when_nomination_window_is_stale() {
-        let (env, token, client, _) = setup();
-        let supporter = Address::generate(&env);
-        let candidate = Address::generate(&env);
-        fund(&env, &token, &supporter);
-        let id = client.nominate(&supporter, &candidate, &50);
-        env.ledger().set(LedgerInfo {
-            timestamp: 201,
-            protocol_version: 21,
-            sequence_number: 2,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1_000,
-            min_persistent_entry_ttl: 1_000,
-            max_entry_ttl: 1_000_000,
-        });
-        assert_eq!(client.withdraw(&supporter, &id), 50);
-        assert_eq!(token::Client::new(&env, &token).balance(&supporter), 500);
-    }
-
-    #[test]
-    fn declined_candidate_unlocks_support_and_accepted_candidate_does_not() {
-        let (env, token, client, _) = setup();
-        let supporter = Address::generate(&env);
-        let candidate = Address::generate(&env);
-        fund(&env, &token, &supporter);
-        let id = client.nominate(&supporter, &candidate, &50);
-        client.select_candidate();
-        client.accept_onboarding(&candidate, &id);
-        assert!(client.try_withdraw(&supporter, &id).is_err());
-        // A declined selection releases support immediately.
-        let other_candidate = Address::generate(&env);
-        let other_id = client.nominate(&supporter, &other_candidate, &50);
-        // The first nomination was accepted, so the second is selected from the remaining open set.
-        client.select_candidate();
-        client.decline_onboarding(&other_candidate, &other_id);
-        assert_eq!(client.withdraw(&supporter, &other_id), 50);
-    }
-}
+    pub fn get_stake(env: Env, nomination_id: u64, supporter
