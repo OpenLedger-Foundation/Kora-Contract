@@ -363,3 +363,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1162 -->
 - #1162: Health service dependency graph visualization data endpoint
+
+<!-- handsoff-issue-1163 -->
+- #1163: API gateway request idempotency-Key support for fund intents
