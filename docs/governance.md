@@ -192,32 +192,36 @@ includes the source snapshot timestamp and is explicitly a current-state
 estimate, not a guarantee of execution impact. The service receives snapshots
 through an adapter so deployments can source indexed protocol state.
 
+### Soroban Resource Fee Estimates
+
+Every simulation result also carries a `resourceEstimate` block so voters can
+see whether the payload is affordable to execute before approving it. The
+estimate is derived from the same snapshot adapter (no parallel subsystem) and
+reports:
+
+| Field              | Meaning                                                        |
+|--------------------|----------------------------------------------------------------|
+| `cpuInstructions`  | Estimated Soroban CPU instruction budget for the payload        |
+| `memBytes`         | Estimated memory footprint in bytes                            |
+| `ledgerEntries`    | Number of ledger entries read/written                          |
+| `inclusionFeeStroops` | Base inclusion fee (stroops)                                |
+| `resourceFeeStroops`  | Soroban resource fee (stroops)                              |
+| `totalFeeStroops`  | `inclusionFeeStroops + resourceFeeStroops`                     |
+| `affordable`       | `true` when the snapshot's fee balance covers `totalFeeStroops` |
+
+Edge behavior:
+
+- **Paused / degraded dependency** — when the snapshot adapter reports the
+  protocol paused or the fee oracle degraded, the estimate is returned with
+  `affordable: false` and a typed `ResourceEstimateUnavailable` reason rather
+  than a silently zeroed fee.
+- **Empty or missing config** — a missing fee config fails closed with a typed
+  `MissingFeeConfig` error; the simulation does not fall back to defaults.
+- **Idempotent re-entry** — re-running `simulateImpact` for the same change and
+  snapshot yields an identical `resourceEstimate` (pure function of inputs).
+
 ## Signature-Based Off-Chain Voting
 
 `services/offchain-voting` provides Stellar Ed25519 vote verification, stake
 weight lookup through the same governance source adapter used for on-chain
-eligibility, proposal-scoped signatures, and deterministic SHA-256 tally
-summaries for on-chain anchoring. Proposal IDs are included in the signed
-message, so a signature cannot be replayed for another proposal. The adapter
-must refuse off-chain voting whenever on-chain voting is open and must verify
-the proposal is designated for the off-chain path. Its repository adapter must
-provide atomic mode reservation and vote insertion in persistent storage; the
-included in-memory store is for tests/development only. Result anchoring and
-optional execution are idempotent on-chain adapter operations and must apply the
-governance contract's quorum and threshold rules. The contract defaults each
-proposal to on-chain voting; an authenticated admin may designate off-chain
-voting before any on-chain votes are cast. On-chain voting is then rejected.
-After the voting deadline, the admin-authenticated adapter may anchor one tally
-hash and its `for`/`against` weights. Execution uses those anchored weights with
-the same quorum and approval threshold as on-chain voting. The hash is publicly
-readable through `get_offchain_result`; the authorized anchor adapter is
-responsible for deriving it from the canonical tally.
-
-## Multi-Sig Council Rotation & Term-Limit Enforcement (#845)
-
-To prevent indefinite unreviewed tenure and ensure periodic community oversight:
-- **Council Term Expiry:** Seats are governed by configurable term limits (`configure_council_terms`).
-- **Rotation Elections:** When a term expires, a structured rotation election is conducted (`initiate_council_rotation`, `vote_council_rotation`).
-- **Safe Fallback & Quorum Preservation:** An expiring seat continues to serve during the transition until a successor is confirmed or an automatic grace period extension applies if an election does not produce a confirmed candidate.
-- **Credential Handoff:** Integrates with the protocol's secure key-rotation framework for atomic signer replacement.
-
+eligibility, proposa
