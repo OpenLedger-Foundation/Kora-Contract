@@ -79,13 +79,26 @@ above forfeited collateral.
 
 **Boundary note:** `financing_pool::mark_default` accepts `now >= due_date + grace`, but `invoice_nft::set_defaulted` requires `now > due_date`. With `grace = 0`, a default at exactly `due_date` passes the pool check and then reverts inside the NFT call (`InvalidInvoiceStatus`, #12). Clients decode that as `FinancingPoolError` #12 (`PoolAlreadyClosed`) even though the pool is still open. The call rolls back, so no claim can be triggered early, but keepers should schedule defaults at `due_date + grace + 1` when `grace == 0`.
 
-#### Concentration Cap Manipulation (4 tests)
-- `test_sybil_concentration_bypass` — Uses multiple addresses to exceed caps
-- `test_position_share_consolidation` — Tries to consolidate shares post-funding
-- `test_micro_splitting_fee_optimization` — Splits contributions to game fee tiers
-- `test_volume_tier_gaming_via_splitting` — Fakes volume through address splitting
+#### Concentration Cap Manipulation (11 tests)
 
-**Result:** KYC costs and gas overhead make Sybil attacks prohibitively expensive
+The marketplace per-listing cap (`set_max_investor_share_bps`) is measured against a running gross total per `(invoice_id, investor)`, exposed as `get_gross_contribution(invoice_id, investor)`. Previously that total was read but never written, so every `fund_invoice` call was checked on its own and an investor could reach 100% of a listing by splitting contributions. The total is now recorded on every successful fund (even while the cap is disabled), measured in listing-token units after oracle conversion, and cleared on refund.
+
+- `test_sybil_concentration_bypass` — 40% control needs four separately accredited addresses; never profitable
+- `test_position_share_consolidation` — models merging capped positions after funding (see open item below)
+- `test_micro_splitting_fee_optimization` — splits contributions to game fee tiers
+- `test_volume_tier_gaming_via_splitting` — fakes volume through address splitting
+- `test_contract_cap_exact_boundary` — real marketplace: exact cap allowed, next unit `InvestorConcentrationExceeded`
+- `test_contract_micro_splitting_cannot_bypass_cap` — 25 slices fill the cap, the 26th and any dust are rejected
+- `test_contract_cap_enabled_or_lowered_counts_prior_funding` — enabling a cap counts uncapped funding; lowering it blocks top-ups without clawing back; `0` disables
+- `test_contract_sybil_requires_accreditation` — unaccredited sybil rejected with `InvestorNotAccredited`; accredited sybils are each capped, aggregate is exactly `n * cap`
+- `test_contract_cap_is_scoped_per_listing` — the cap budget is per listing
+- `test_contract_oversized_single_call_rejected` — a single over-cap call is rejected without affecting other investors
+
+Every rejected call is checked to leave `funded_amount` and the running total unchanged, and failure messages name the attempted amount, the running total and the cap.
+
+**Sybil note:** the cap is per address. N accredited addresses held by one entity can hold up to `N * cap`; linking them is an off-chain KYC duty. On-chain, every funding address must be individually accredited by the admin.
+
+**Open item:** `financing_pool::transfer_position` merges a transferred position into the recipient's existing one without re-checking `MaxPositionBps`, so capped positions can be consolidated after funding. A fix must keep the fractionalizer's multi-investor wraps working (it is a custodian that legitimately merges positions).
 
 ### Key Findings
 
@@ -390,7 +403,7 @@ pub fn bump_pools_batch(env: Env, pool_ids: Vec<u64>) -> u32 {
 | Fund-Refund Gaming | 3 | ✅ Pass | Fee gaming, volume manipulation |
 | Referral Self-Dealing | 4 | ✅ Pass | Sybil attacks, allocation drain |
 | Insurance Pool Timing | 16 | ✅ Pass | Front-running, cascade, grace boundary, reserve drain race, invariant self-checks |
-| Concentration Cap | 4 | ✅ Pass | Bypass via Sybil or consolidation |
+| Concentration Cap | 11 | ✅ Pass | Cumulative cap, micro-splitting, cap changes, Sybil accreditation, per-listing scope |
 
 **Total:** 15 attack scenarios, all verified unprofitable
 
