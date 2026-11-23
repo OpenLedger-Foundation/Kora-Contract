@@ -46,6 +46,7 @@ NGN, KES, GHS, ZAR, TZS, UGX, XOF, EGP (configurable via `FX_CURRENCIES`)
 | `EXCHANGE_RATE_API_KEY` | _(required)_ | exchangerate-api.com API key |
 | `CURRENCY_API_KEY` | _(required)_ | currencyapi.com API key |
 | `FX_MAX_STALENESS_SECONDS` | `3600` | Max rate age before staleness rejection |
+| `FX_METRICS_PORT` | `8081` | Port for the Prometheus `/metrics` scrape endpoint |
 
 In deployed environments, inject `FX_RELAY_SECRET`, provider API keys, and any
 RPC credentials from the environment-specific `/kora/<environment>/fx-ingestion`
@@ -76,3 +77,23 @@ npm test
 ```
 
 Minimum 90% coverage enforced. All HTTP calls are mockable via the `FxSource` interface.
+
+---
+
+## Monitoring (staleness gauges)
+
+The service exposes a Prometheus `/metrics` endpoint on `FX_METRICS_PORT`
+(default `8081`) so monitoring alerts can detect stale FX rates before the
+oracle's on-chain staleness guard rejects them:
+
+- `kora_fx_rate_age_seconds{base,quote}` — seconds since the last successful
+  publication. **No samples yet → a comment is emitted, not a bogus zero**, so a
+  missing series drives alerts (see `infra/monitoring/README.md`).
+- `kora_fx_last_ingestion_timestamp_seconds{base,quote}` — last publication time.
+- `kora_fx_ingestion_cycles_total` — completed ingestion cycles.
+- `kora_fx_publication_skipped_total{reason}` — skipped publications by reason.
+
+Alert rules (`KoraFxRateStale`, `KoraFxRateNeverPublished`, `KoraFxIngestionDown`)
+and the scrape target live in `infra/monitoring/`. Validate with
+`promtool check rules infra/monitoring/alerts.yml` and
+`promtool test rules infra/monitoring/tests/alerts.test.yml`.

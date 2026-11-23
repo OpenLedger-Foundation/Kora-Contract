@@ -79,3 +79,30 @@ tests:
             exp_annotations:
               summary: Kora invoice default event observed
               description: A default event was observed. Defaults can be expected protocol events; investigate context before escalation.
+
+  - name: fx rate stale fires warning after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_fx_rate_age_seconds{base="NGN", quote="USDC", job="kora-fx-ingestion"}'
+        values: "2000 2000 2000 2000 2000 2000"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: KoraFxRateStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-2
+              base: NGN
+              quote: USDC
+            exp_annotations:
+              summary: Kora FX rate for NGN/USDC is stale
+
+  - name: fx rate fresh does not fire
+    interval: 1m
+    input_series:
+      - series: 'kora_fx_rate_age_seconds{base="NGN", quote="USDC", job="kora-fx-ingestion"}'
+        values: "0 60 60 60 60 60"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: KoraFxRateStale
+        exp_alerts: []

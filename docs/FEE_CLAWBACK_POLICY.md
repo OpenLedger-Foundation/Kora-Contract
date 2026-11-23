@@ -22,3 +22,27 @@
   `claim_refund` by the refunded gross (`net + fee`) using checked subtraction
   (`safe_sub`), which returns `ArithmeticOverflow` instead of panicking on
   underflow. After all investors refund, the cap returns to its pre-listing level.
+
+
+## Secondary-market fee-recipient allowlist (#<fee-recipient>)
+
+- `secondary_market::buy_position` routes the protocol fee to the configured
+  `treasury` only while that address is on the secondary-market fee-recipient
+  allowlist. If the treasury is not allowlisted, the call fails **closed** with
+  `SecondaryMarketError::FeeRecipientNotAllowed` *before* any state is mutated
+  or any transfer is made, so fees can never flow to an unbounded destination
+  (preventing fee skimming).
+- `initialize` auto-allowlists the configured `treasury`, so existing
+  deployments keep routing fees to it without action. The allowlist is the
+  policy boundary; it does not change which address is the configured treasury.
+- Admin entrypoints (admin-gated, idempotent):
+  - `add_fee_recipient(admin, recipient)` — permits a recipient.
+  - `remove_fee_recipient(admin, recipient)` — revokes a recipient. Removing
+    the active treasury is allowed and causes subsequent `buy_position` calls to
+    fail closed until a permitted recipient is restored.
+- `is_fee_recipient_allowed(recipient)` is a read-only view of the allowlist.
+- Consistent with the treasury's own recipient-allowlist pattern (#457): fee
+  outflows are bounded by an explicit, admin-managed allowlist and fail closed
+  when the configured recipient is not permitted.
+- Events: `SM_R_ADD` (admin, recipient, timestamp) on add;
+  `SM_R_REM` (admin, recipient, timestamp) on remove. See `docs/EVENTS.md`.

@@ -55,6 +55,7 @@ Indexer (deadline export: /api/v1/deadlines?horizon_sec=…)
 | `KEEPER_ACTIVE_LISTINGS_URL` | _(required)_ | Paginated indexer endpoint for active listings |
 | `KEEPER_INDEXER_API_KEY` | _(empty)_ | Optional Bearer token for the active-listings endpoint |
 | `KEEPER_TTL_THRESHOLD_LEDGERS` | `518400` | Bump listings below this remaining TTL |
+| `KEEPER_DRY_RUN` | _(off)_ | When `true`/`1`, run a read-only TTL rehearsal once, print the JSON report, and exit without starting the scheduler or submitting any transaction |
 
 The active-listings endpoint receives `isActive=true`, `limit=100`, and an
 optional `cursor` query parameter. It must return pages shaped as
@@ -82,6 +83,7 @@ production credentials locally. See [the secrets runbook](../../infra/secrets/RE
 | `GET /status` | Job counts by status |
 | `GET /metrics` | Prometheus keeper job gauges |
 | `GET /history` | Last 200 job records |
+| `GET /dry-run` | Read-only TTL-bump rehearsal report (instance vs persistent keys + needs-bump); never enqueues or dispatches |
 
 ### Deadline ingestion env vars (#1022)
 
@@ -122,3 +124,45 @@ TTL scan metrics are also exported at `/metrics`:
 `kora_keeper_ttl_listings_scanned_total`,
 `kora_keeper_ttl_listings_at_risk_total`, and
 `kora_keeper_ttl_scan_errors_total`.
+
+---
+
+## TTL-bump dry-run (#<keeper-dry-run>)
+
+Before paying for a mass `extend_ttl`, operators can rehearse the decision
+read-only. The dry run scans the marketplace contract's persistent `Listing`
+entries **and** its contract *instance* entry, classifies each as `instance` or
+`persistent`, and reports which are below `KEEPER_TTL_THRESHOLD_LEDGERS` (i.e.
+need a bump) — **without enqueuing, dispatching, or submitting any
+transaction**.
+
+```bash
+# One-shot: print the report and exit (no scheduler, no writes)
+KEEPER_DRY_RUN=1 npm start
+```
+
+The report is also available at `GET /dry-run` while the service is running:
+
+```bash
+curl -s http://localhost:8080/dry-run | jq
+```
+
+Report shape:
+
+```json
+{
+  "contractAddress": "C…",
+  "latestLedger": 12345,
+  "thresholdLedgers": 518400,
+  "entries": [
+    { "key": "instance", "durability": "instance", "remainingLedgers": 400000, "needsBump": false, "missing": false },
+    { "key": "listing:42", "durability": "persistent", "invoiceId": "42", "liveUntilLedgerSeq": 124000, "remainingLedgers": 555, "needsBump": true, "missing": false }
+  ],
+  "summary": { "total": 2, "instance": 1, "persistent": 1, "needsBump": 1, "healthy": 1, "missing": 0 }
+}
+```
+
+Missing (archived/expired) entries are flagged `needsBump: true, missing: true`
+rather than silently skipped, so they surface for restoration. The dry run
+fails closed with a typed `DryRunConfigError` when `MARKETPLACE_CONTRACT_ID` is
+missing or `KEEPER_TTL_THRESHOLD_LEDGERS` is non-positive.

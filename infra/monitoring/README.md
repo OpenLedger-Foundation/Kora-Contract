@@ -60,6 +60,44 @@ Scrape target (already in `prometheus.yml` job `kora-indexer`):
     - targets: ["indexer:9090"]
 ```
 
+## FX ingestion `/metrics`
+
+The FX ingestion service (`services/fx-ingestion`) exposes Prometheus 0.0.4
+text at `GET /metrics` on configurable `FX_METRICS_PORT` (default `8081`):
+
+- `kora_fx_rate_age_seconds{base,quote}`: gauge = seconds since the last
+  successful FX rate publication for a pair. Emits a comment instead of a bogus
+  zero when no sample exists yet (so a missing series, not `0`, drives alerts).
+- `kora_fx_last_ingestion_timestamp_seconds{base,quote}`: gauge = unix
+  timestamp of the last successful publication per pair.
+- `kora_fx_ingestion_cycles_total`: counter incremented once per completed
+  ingestion cycle.
+- `kora_fx_publication_skipped_total{reason}`: counter of skipped publications
+  by reason (e.g. `no_sources_available`, `insufficient_sources_for_cross_check`,
+  `source_divergence_*`, `stale_rate`, `rate_limited`).
+
+Scrape target (already in `prometheus.yml` job `kora-fx-ingestion`):
+
+```yaml
+- job_name: kora-fx-ingestion
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["fx-ingestion:8081"]
+```
+
+### FX staleness alerts
+
+| Alert | Expression | For | Tier |
+|---|---|---|---|
+| `KoraFxRateStale` | `max by (base,quote) (kora_fx_rate_age_seconds) > 1800` | 5m | Sev-2 warning |
+| `KoraFxRateNeverPublished` | `absent(kora_fx_rate_age_seconds)` | 15m | Sev-2 warning |
+| `KoraFxIngestionDown` | `up{job="kora-fx-ingestion"} == 0` | 3m | Sev-3 warning |
+
+The staleness threshold (1800s) is half the oracle's 3600s `maxStalenessSeconds`
+budget so operators are paged before the on-chain staleness guard begins
+rejecting rates. Tune via a recording rule or threshold override per
+environment.
+
 ## Severity and routing
 
 Severity follows [the incident response runbook](../../docs/INCIDENT_RESPONSE.md):
@@ -72,6 +110,8 @@ Severity follows [the incident response runbook](../../docs/INCIDENT_RESPONSE.md
 | Keeper/indexer scrape unavailable for 3 minutes | Sev-3 / warning | Operations channel | Degradation; does not by itself establish risk to funds |
 | Keeper dead-letter jobs for 5 minutes | Sev-3 / warning | Operations channel | Operator follow-up required, no automatic page |
 | Default or treasury-sweep events | Sev-2 / warning or Sev-3 / warning | Operations channel | Events may be expected; inspect transaction, amount, and authorization before escalation |
+| FX rate stale beyond 30 min for any pair | Sev-2 / warning | Operations channel | Multi-currency invoice displays and funding math depend on fresh rates; inspect source availability and the fx-ingestion `/metrics` endpoint |
+| FX ingestion scrape unavailable for 3 minutes | Sev-3 / warning | Operations channel | Degradation; FX staleness may be going undetected |
 
 Rules use `for` windows; Alertmanager groups by alert and service, delays
 initial notifications, and applies repeat intervals to reduce flapping and
