@@ -402,6 +402,16 @@ impl MarketplaceContract {
             .unwrap_or(0)
     }
 
+    /// Returns `investor`'s cumulative gross (pre-fee) contribution to the
+    /// listing for `invoice_id`, in listing-token units. This is the amount
+    /// the concentration cap is measured against. Cleared on refund.
+    pub fn get_gross_contribution(env: Env, invoice_id: u64, investor: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GrossContribution(invoice_id, investor))
+            .unwrap_or(0)
+    }
+
     /// Mark an investor address as accredited, enabling them to call
     /// `fund_invoice`. Admin only. (#436)
     ///
@@ -930,42 +940,6 @@ impl MarketplaceContract {
             return Err(KoraError::ContributionBelowMinimum);
         }
 
-        // === #435: Per-listing investor concentration cap ===
-        // Compute prospective gross (pre-fee) cumulative contribution and reject
-        // if it would exceed cap_bps of asking_price.  0 = uncapped (default).
-        let cap_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxInvestorShareBps)
-            .unwrap_or(0);
-        if cap_bps > 0 {
-            let gross_key = DataKey::GrossContribution(invoice_id, investor.clone());
-            let prev_gross: i128 = env
-                .storage()
-                .persistent()
-                .get(&gross_key)
-                .unwrap_or(0);
-            let prospective = safe_add(prev_gross, amount)?;
-            // prospective * 10_000 / asking_price > cap_bps
-            // rearranged to avoid division: prospective * 10_000 > cap_bps * asking_price
-            let lhs = prospective
-                .checked_mul(10_000)
-                .ok_or(KoraError::ArithmeticOverflow)?;
-            let rhs = (cap_bps as i128)
-                .checked_mul(listing.asking_price)
-                .ok_or(KoraError::ArithmeticOverflow)?;
-            if lhs > rhs {
-                events::investor_concentration_exceeded(
-                    &env,
-                    invoice_id,
-                    &investor,
-                    prospective,
-                    cap_bps,
-                );
-                return Err(KoraError::InvestorConcentrationExceeded);
-            }
-        }
-
         // Check per-invoice freeze before any token operations.
         // Enforced in addition to the protocol-wide pause so a single disputed
         // invoice can be frozen without halting all protocol activity.
@@ -996,6 +970,41 @@ impl MarketplaceContract {
         // Check before token movement. The entrypoint's reentrancy guard keeps
         // the state stable until the successful allocation is recorded below.
         Self::check_debtor_cap(env, &invoice.debtor_hash, listing_amount)?;
+
+        // === #435: Per-listing investor concentration cap ===
+        // Cumulative gross (pre-fee) contribution in listing-token units must
+        // not exceed cap_bps of asking_price. Measured after oracle conversion
+        // so a cross-currency payment is compared in the same units as the
+        // asking price, and against the running total recorded below so
+        // splitting one contribution across many calls cannot bypass it.
+        // 0 = uncapped (default).
+        let gross_key = DataKey::GrossContribution(invoice_id, investor.clone());
+        let prev_gross: i128 = env.storage().persistent().get(&gross_key).unwrap_or(0);
+        let gross_after = safe_add(prev_gross, listing_amount)?;
+        let cap_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxInvestorShareBps)
+            .unwrap_or(0);
+        if cap_bps > 0 {
+            // gross_after * 10_000 > cap_bps * asking_price (no division)
+            let lhs = gross_after
+                .checked_mul(10_000)
+                .ok_or(KoraError::ArithmeticOverflow)?;
+            let rhs = (cap_bps as i128)
+                .checked_mul(listing.asking_price)
+                .ok_or(KoraError::ArithmeticOverflow)?;
+            if lhs > rhs {
+                events::investor_concentration_exceeded(
+                    env,
+                    invoice_id,
+                    investor,
+                    gross_after,
+                    cap_bps,
+                );
+                return Err(KoraError::InvestorConcentrationExceeded);
+            }
+        }
 
         let listing_token_client = token::Client::new(env, &listing.token);
         let token_decimals = listing_token_client.decimals();
@@ -1094,6 +1103,11 @@ impl MarketplaceContract {
 
         // Track per-investor net contribution for potential refund
         env.storage().persistent().set(&contrib_key, &contrib_after);
+
+        // Running gross total for the concentration cap. Recorded even while
+        // the cap is disabled so enabling it later counts prior funding.
+        env.storage().persistent().set(&gross_key, &gross_after);
+        Self::bump_persistent(env, &gross_key);
 
         // Track the investor's fee share so claim_refund can claw it back
         // from the treasury on a failed/cancelled listing. (#450)
@@ -1226,8 +1240,11 @@ impl MarketplaceContract {
                     );
                 }
 
-                // Clear contribution record
+                // Clear contribution records
                 env.storage().persistent().remove(&contrib_key);
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::GrossContribution(invoice_id, investor.clone()));
 
                 events::refund_claimed(&env, invoice_id, &investor, net_contributed);
             }
@@ -1569,6 +1586,9 @@ impl MarketplaceContract {
             env.storage().persistent().remove(&fee_key);
             events::fee_reversed(&env, &env.current_contract_address(), invoice_id, &investor, fee_contributed, &listing.token);
         }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::GrossContribution(invoice_id, investor.clone()));
 
         events::refund_claimed(&env, invoice_id, &investor, net_contributed);
         Ok(())
