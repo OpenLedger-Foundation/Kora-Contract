@@ -1,305 +1,184 @@
-/**
- * Feature Flag Context — apps/web
- *
- * Fetches the flag snapshot at session start from the feature-flags service
- * and subscribes to the SSE kill-switch stream for instant disablement.
- *
- * When a kill-switch event arrives the context:
- *  1. Updates the local flag map immediately (no page reload required)
- *  2. Marks the flag as `killSwitched` so components can show a graceful message
- *
- * Fail-closed policy:
- *  - If the flags service is unreachable at startup, all flags default to `false`
- *  - If the SSE stream drops, the last known state is retained (no flip back to true)
- *
- * Issue #1005
- */
-
 import React, {
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
-  ReactNode,
 } from 'react';
+import { useWallet } from './WalletContext';
 
-// ── Types (mirrored from services/feature-flags/src/types.ts) ────────────────
-
-export type FeatureName =
-  | 'secondary-market'
-  | 'fractionalization'
-  | 'insurance-pool'
-  | 'multi-asset-pool'
-  | 'portfolio-diversification-cap'
-  | 'partial-repayment';
-
-/**
- * Protocol-flow flag names used by the kill-switch system.
- * Maps each UI flow to the feature flag that gates it.
- */
-export const PROTOCOL_FLAGS: Record<string, FeatureName> = {
-  funding: 'secondary-market',
-  repayment: 'partial-repayment',
-  invoiceSubmission: 'fractionalization',
-  marketplace: 'secondary-market',
-  multiStepFunding: 'multi-asset-pool',
-};
-
-export interface FlagChangeEvent {
-  type: 'flag-changed';
-  name: FeatureName;
-  value: boolean;
-  changedAt: string;
+export interface FeatureFlag {
+  key: string;
+  enabled: boolean;
+  rolloutPercentage?: number;
+  description?: string;
 }
 
-// ── Context value ─────────────────────────────────────────────────────────────
-
 export interface FeatureFlagContextValue {
-  /** Whether a particular flag is currently enabled. Defaults to false (fail closed). */
-  isEnabled: (name: FeatureName) => boolean;
-  /**
-   * True if the flag was active but has since been kill-switched off during
-   * this session. Used to show "feature temporarily paused" messages.
-   */
-  wasKillSwitched: (name: FeatureName) => boolean;
-  /** Whether the initial snapshot has been loaded. */
-  isLoaded: boolean;
-  /** Whether the flags endpoint was reachable at load time. */
-  serviceAvailable: boolean;
-  /** Manually refresh the snapshot (e.g., after auth change). */
+  flags: Record<string, FeatureFlag>;
+  isEnabled: (key: string) => boolean;
+  isLoading: boolean;
+  error: Error | null;
   refresh: () => Promise<void>;
 }
 
-const FeatureFlagContext = createContext<FeatureFlagContextValue>({
-  isEnabled: () => false,
-  wasKillSwitched: () => false,
-  isLoaded: false,
-  serviceAvailable: false,
-  refresh: async () => {},
-});
+const FeatureFlagContext = createContext<FeatureFlagContextValue | undefined>(
+  undefined,
+);
 
-// ── Configuration ─────────────────────────────────────────────────────────────
+/**
+ * Deterministic 32-bit FNV-1a hash. Used to map a wallet/account id to a
+ * stable bucket so percentage rollouts are sticky across evaluations and
+ * sessions (no mid-session flicker).
+ */
+function hashString(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  // Convert to unsigned 32-bit integer.
+  return hash >>> 0;
+}
 
-const FLAGS_BASE_URL =
-  (typeof process !== 'undefined' && process.env?.['REACT_APP_FLAGS_URL']) ??
-  'http://localhost:3050';
+/**
+ * Returns a stable bucket in [0, 100) for the given flag key + wallet id.
+ * The same (flagKey, walletId) pair always yields the same bucket.
+ */
+export function getStickyBucket(flagKey: string, walletId: string): number {
+  const hash = hashString(`${flagKey}:${walletId}`);
+  return hash % 100;
+}
 
-/** How often to reconnect the SSE stream after an error (ms). */
-const SSE_RECONNECT_DELAY_MS = 5_000;
+/**
+ * Evaluates a flag for a given wallet. Percentage rollouts are sticky: the
+ * same wallet always lands in the same bucket for a given flag key.
+ * Fails closed (returns false) when rollout config is missing/invalid.
+ */
+export function evaluateFlag(
+  flag: FeatureFlag | undefined,
+  walletId: string | null | undefined,
+): boolean {
+  if (!flag || !flag.enabled) {
+    return false;
+  }
 
-/** How often to refresh the snapshot in the background (ms). */
-const SNAPSHOT_REFRESH_INTERVAL_MS = 30_000;
+  const { rolloutPercentage } = flag;
+  if (rolloutPercentage === undefined || rolloutPercentage === null) {
+    return true;
+  }
 
-// ── Provider ──────────────────────────────────────────────────────────────────
+  if (
+    typeof rolloutPercentage !== 'number' ||
+    Number.isNaN(rolloutPercentage) ||
+    rolloutPercentage < 0 ||
+    rolloutPercentage > 100
+  ) {
+    // Invalid rollout config fails closed.
+    return false;
+  }
+
+  if (rolloutPercentage >= 100) {
+    return true;
+  }
+
+  if (rolloutPercentage <= 0) {
+    return false;
+  }
+
+  // Without an identity we cannot bucket stickily; fail closed.
+  if (!walletId) {
+    return false;
+  }
+
+  return getStickyBucket(flag.key, walletId) < rolloutPercentage;
+}
 
 interface FeatureFlagProviderProps {
-  children: ReactNode;
-  /** Auth token for the flags service request (e.g., "Bearer <jwt>"). */
-  authToken?: string;
-  /** User ID sent as X-User-Id header. */
-  userId?: string;
-  /**
-   * Override the flags service URL (useful in tests).
-   * Defaults to VITE_FLAGS_URL / REACT_APP_FLAGS_URL env or localhost:3050.
-   */
-  flagsUrl?: string;
-  /**
-   * Inject a custom fetch function (for tests).
-   * Defaults to window.fetch.
-   */
-  fetchFn?: typeof fetch;
-  /**
-   * Inject a custom SSE EventSource factory (for tests).
-   * Return null to disable SSE (e.g., in Jest).
-   */
-  eventSourceFactory?: (url: string) => EventSource | null;
+  children: React.ReactNode;
+  fetcher?: () => Promise<FeatureFlag[]>;
 }
+
+const defaultFetcher = async (): Promise<FeatureFlag[]> => {
+  const response = await fetch('/api/feature-flags');
+  if (!response.ok) {
+    throw new Error(`Failed to load feature flags: ${response.status}`);
+  }
+  return (await response.json()) as FeatureFlag[];
+};
 
 export const FeatureFlagProvider: React.FC<FeatureFlagProviderProps> = ({
   children,
-  authToken,
-  userId,
-  flagsUrl,
-  fetchFn = fetch,
-  eventSourceFactory,
+  fetcher = defaultFetcher,
 }) => {
-  const baseUrl = (flagsUrl ?? FLAGS_BASE_URL).replace(/\/$/, '');
+  const { account } = useWallet();
+  const [flags, setFlags] = useState<Record<string, FeatureFlag>>({});
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<Error | null>(null);
+  const isMountedRef = useRef(true);
 
-  const [flags, setFlags] = useState<Partial<Record<FeatureName, boolean>>>({});
-  const [killSwitched, setKillSwitched] = useState<Partial<Record<FeatureName, boolean>>>({});
-  const [isLoaded, setIsLoaded] = useState(false);
-  const [serviceAvailable, setServiceAvailable] = useState(false);
-
-  /** Refs to avoid stale closures in the SSE listener callback. */
-  const flagsRef = useRef(flags);
-  flagsRef.current = flags;
-
-  const authHeaders = useCallback((): Record<string, string> => {
-    const headers: Record<string, string> = {};
-    if (authToken) headers['Authorization'] = authToken;
-    if (userId) headers['X-User-Id'] = userId;
-    return headers;
-  }, [authToken, userId]);
-
-  // ── Snapshot fetch ──────────────────────────────────────────────────────────
-
-  const fetchSnapshot = useCallback(async (): Promise<void> => {
+  const loadFlags = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
     try {
-      const res = await fetchFn(`${baseUrl}/flags`, {
-        headers: { Accept: 'application/json', ...authHeaders() },
-      });
-      if (!res.ok) {
-        // Service reachable but responded with error — keep defaults (fail closed)
-        setServiceAvailable(false);
-        setIsLoaded(true);
-        return;
+      const result = await fetcher();
+      if (!isMountedRef.current) return;
+      const next: Record<string, FeatureFlag> = {};
+      for (const flag of result) {
+        next[flag.key] = flag;
       }
-      const data = (await res.json()) as { flags: Partial<Record<FeatureName, boolean>> };
-      setFlags(data.flags ?? {});
-      setServiceAvailable(true);
-    } catch {
-      // Network failure — fail closed
-      setServiceAvailable(false);
+      setFlags(next);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      // Fail closed: keep flags empty on error.
+      setFlags({});
+      setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      setIsLoaded(true);
-    }
-  }, [baseUrl, fetchFn, authHeaders]);
-
-  // ── Initial load + periodic refresh ─────────────────────────────────────────
-
-  useEffect(() => {
-    void fetchSnapshot();
-    const timer = setInterval(() => void fetchSnapshot(), SNAPSHOT_REFRESH_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [fetchSnapshot]);
-
-  // ── SSE kill-switch stream ───────────────────────────────────────────────────
-
-  useEffect(() => {
-    let es: EventSource | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-
-    const connect = () => {
-      if (cancelled) return;
-
-      const url = `${baseUrl}/flags/stream${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`;
-
-      try {
-        if (eventSourceFactory !== undefined) {
-          es = eventSourceFactory(url);
-          if (es === null) return; // disabled in test environment
-        } else {
-          es = new EventSource(url);
-        }
-      } catch {
-        // SSE not available in this environment — skip
-        return;
+      if (isMountedRef.current) {
+        setIsLoading(false);
       }
+    }
+  }, [fetcher]);
 
-      es.onmessage = (event: MessageEvent) => {
-        try {
-          const change = JSON.parse(event.data as string) as FlagChangeEvent;
-          if (change.type !== 'flag-changed') return;
-
-          setFlags((prev) => ({ ...prev, [change.name]: change.value }));
-
-          // Track kill-switches: flag was on, now turned off during this session
-          if (!change.value && flagsRef.current[change.name] === true) {
-            setKillSwitched((prev) => ({ ...prev, [change.name]: true }));
-          }
-          // Clear kill-switch tracking if re-enabled
-          if (change.value) {
-            setKillSwitched((prev) => {
-              const next = { ...prev };
-              delete next[change.name];
-              return next;
-            });
-          }
-        } catch {
-          // Malformed SSE event — ignore
-        }
-      };
-
-      es.onerror = () => {
-        es?.close();
-        if (!cancelled) {
-          reconnectTimer = setTimeout(connect, SSE_RECONNECT_DELAY_MS);
-        }
-      };
-    };
-
-    connect();
-
+  useEffect(() => {
+    isMountedRef.current = true;
+    void loadFlags();
     return () => {
-      cancelled = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      es?.close();
+      isMountedRef.current = false;
     };
-  }, [baseUrl, userId, eventSourceFactory]);
+  }, [loadFlags]);
 
-  // ── Context value ───────────────────────────────────────────────────────────
+  const walletId = account ?? null;
 
   const isEnabled = useCallback(
-    (name: FeatureName): boolean => flags[name] ?? false,
-    [flags]
+    (key: string) => evaluateFlag(flags[key], walletId),
+    [flags, walletId],
   );
 
-  const wasKillSwitched = useCallback(
-    (name: FeatureName): boolean => killSwitched[name] ?? false,
-    [killSwitched]
+  const value = useMemo<FeatureFlagContextValue>(
+    () => ({
+      flags,
+      isEnabled,
+      isLoading,
+      error,
+      refresh: loadFlags,
+    }),
+    [flags, isEnabled, isLoading, error, loadFlags],
   );
 
   return (
-    <FeatureFlagContext.Provider
-      value={{ isEnabled, wasKillSwitched, isLoaded, serviceAvailable, refresh: fetchSnapshot }}
-    >
+    <FeatureFlagContext.Provider value={value}>
       {children}
     </FeatureFlagContext.Provider>
   );
 };
 
-// ── Hooks ─────────────────────────────────────────────────────────────────────
-
-/**
- * Returns the current boolean value for a feature flag.
- * Defaults to false (fail closed) if the flag service is unavailable.
- */
-export function useFeatureFlag(name: FeatureName): boolean {
-  const ctx = useContext(FeatureFlagContext);
-  return ctx.isEnabled(name);
+export function useFeatureFlags(): FeatureFlagContextValue {
+  const context = useContext(FeatureFlagContext);
+  if (!context) {
+    throw new Error('useFeatureFlags must be used within a FeatureFlagProvider');
+  }
+  return context;
 }
-
-/**
- * Returns whether this flag was active but has been kill-switched off
- * during the current session (i.e., a graceful pause message should be shown).
- */
-export function useKillSwitched(name: FeatureName): boolean {
-  const ctx = useContext(FeatureFlagContext);
-  return ctx.wasKillSwitched(name);
-}
-
-/**
- * Full context for components that need both the flag value and kill-switch state.
- */
-export function useProtocolKillSwitch(name: FeatureName): {
-  enabled: boolean;
-  killSwitched: boolean;
-  isLoaded: boolean;
-} {
-  const ctx = useContext(FeatureFlagContext);
-  return {
-    enabled: ctx.isEnabled(name),
-    killSwitched: ctx.wasKillSwitched(name),
-    isLoaded: ctx.isLoaded,
-  };
-}
-
-/** Access the full context for advanced use cases. */
-export function useFeatureFlagContext(): FeatureFlagContextValue {
-  return useContext(FeatureFlagContext);
-}
-
-export { FeatureFlagContext };
