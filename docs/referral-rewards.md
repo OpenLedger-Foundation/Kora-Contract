@@ -6,6 +6,10 @@
 
 Call `mint_invoice_with_referrer(sme, debtor_hash, amount, currency, due_date, ipfs_cid, risk_score, notes, referrer)` with the existing mint fields plus `Option<Address>`. `mint_invoice` remains available for existing clients and records an unattributed first mint. A batch mint also records its first invoice as the SME's first mint without attribution. The first invoice ID and optional referrer are stored separately from the invoice schema, so withdrawals do not permit a new first mint or a changed referrer. Any attempt to supply a referrer after the first mint fails. Self-referrals, contract-self referrals, and cycles through existing referrals are rejected; traversal is bounded at 32 links and deeper chains are rejected. No downstream rewards are paid.
 
+### Anti-sybil graph depth limit
+
+Referral attribution is a directed graph: each SME points at its referrer, and the referrer may itself have been referred. To stop deep sybil chains from draining the referral budget, attribution enforces a hard maximum graph depth of `MAX_REFERRAL_DEPTH = 32` links. When `mint_invoice_with_referrer` records a referrer, it walks the existing referral chain from the proposed referrer upward and rejects the mint with `InvoiceNftError::InvalidReferrer` if the chain already reaches the limit, so no attribution can create a chain deeper than 32. The same traversal detects cycles (a referrer that eventually points back to the SME) and rejects them with the same typed error. The limit is a compile-time constant, not runtime config, so there is no empty/missing-config path to fail open: the bound always applies. Because attribution is written once per SME and never mutated, re-entry is idempotent — a repeated or concurrent mint for an already-attributed SME fails closed rather than extending the graph.
+
 ### View Functions
 
 - `get_sme_referrer(sme) -> Option<Address>`: returns the first-mint referrer for an SME, or None if not set.
@@ -32,6 +36,7 @@ Covered scenarios:
 - **Double claim** — a second claim returns `false` and leaves both the referrer and contract balances unchanged.
 - **Premature claim** — an unlisted/unfunded first invoice is never eligible.
 - **Self-referral** — `mint_invoice_with_referrer` rejects a self-referral with `InvoiceNftError::InvalidReferrer`, so no first mint and no reward accrue.
+- **Depth limit** — a chain of 32 referrals is accepted, and attempting to extend it to 33 links is rejected with `InvoiceNftError::InvalidReferrer`; no attribution or reward accrues for the rejected mint.
 - **Paused protocol** — while the shared `AccessControl` pause is active the `Funded -> Repaid` transition is rejected with `InvoiceNftError::ProtocolPaused` and the reward stays ineligible; unpausing restores the flow.
 
 Run it with:
