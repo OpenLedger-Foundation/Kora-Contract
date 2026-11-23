@@ -357,3 +357,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1161 -->
+- #1161: Reporting service CSV export for treasury transparency endpoints
