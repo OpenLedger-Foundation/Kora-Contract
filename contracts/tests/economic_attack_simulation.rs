@@ -73,18 +73,23 @@ mod integration_tests {
         println!("   - Multiple referrer attempts for same SME rejected");
         println!();
         
-        println!("3. Insurance Pool Timing (4 scenarios)");
-        println!("   - Front-running claims");
+        println!("3. Insurance Pool Timing (16 scenarios)");
+        println!("   - Front-running claims (order independence)");
         println!("   - Strategic default timing");
         println!("   - Pool insolvency cascade");
-        println!("   - Grace period gaming");
+        println!("   - Grace period gaming and boundary block times");
+        println!("   - Replay, claim splitting, staggered batches");
+        println!("   - Invariant checker self-tests (I2, I3, I4, I6)");
+        println!("   - Real mark_default grace boundary and reserve drain race");
         println!();
         
-        println!("4. Concentration Cap Manipulation (4 scenarios)");
+        println!("4. Concentration Cap Manipulation (11 scenarios)");
         println!("   - Sybil concentration bypass");
         println!("   - Position share consolidation");
         println!("   - Micro-splitting fee optimization");
         println!("   - Volume tier gaming via splitting");
+        println!("   - Real marketplace: exact cap, cumulative micro-splits,");
+        println!("     cap enabled/lowered, sybil accreditation, per-listing scope");
         println!();
         
         println!("Attacker Profile:");
@@ -99,7 +104,7 @@ mod integration_tests {
         println!("  ✓ Referral rewards limited to first invoice only");
         println!("  ✓ Fixed allocation caps prevent unbounded drain");
         println!("  ✓ Debtor bonds must exceed insurance coverage");
-        println!("  ✓ Concentration caps enforced on all transfers");
+        println!("  ✓ Concentration caps enforced cumulatively per listing");
         println!();
         
         println!("All attack simulations are executed as individual test cases.");
@@ -123,7 +128,7 @@ mod integration_tests {
 /// - Fee costs exceed bonus, making fake-invoice cycling unprofitable
 ///
 /// ## Insurance Pool Defense
-/// - Fair claim ordering (FIFO by default timestamp)
+/// - Fair claim ordering (by default timestamp, pro-rata when oversubscribed)
 /// - Debtor bonds exceed insurance coverage
 /// - Grace periods prevent immediate claim manipulation
 ///
