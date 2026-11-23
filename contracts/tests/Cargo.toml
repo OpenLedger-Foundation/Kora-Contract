@@ -114,6 +114,10 @@ name = "fractionalizer_e2e"
 path = "fractionalizer_e2e.rs"
 
 [[test]]
+name = "fractionalizer_settle_claim_sequencing"
+path = "fractionalizer_settle_claim_sequencing.rs"
+
+[[test]]
 name = "marketplace_fee_property"
 path = "marketplace_fee_property.rs"
 
