@@ -863,10 +863,10 @@ impl MarketplaceContract {
 
         // Re-validate the current tier policy on every funding path. A policy change
         // after listing takes effect before any investor funds move.
-        Self::require_debtor_attestation_if_needed(env, invoice_id, invoice.amount, &invoice.risk_tier)?;
         // Early load of invoice to determine currency for conversion check
         let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
         let invoice = nft_client.get_invoice(&invoice_id);
+        Self::require_debtor_attestation_if_needed(env, invoice_id, invoice.amount, &invoice.risk_tier)?;
 
         // === #743: Circuit Breaker gate ===
         Self::require_circuit_breaker_not_tripped(env, &invoice.debtor_hash, &invoice.risk_tier)?;

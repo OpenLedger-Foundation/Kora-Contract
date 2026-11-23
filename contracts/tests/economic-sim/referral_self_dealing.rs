@@ -139,7 +139,6 @@ fn mint_invoice(
         &None,
         &referrer,
     )
-    .unwrap()
 }
 
 #[test]
@@ -237,7 +236,7 @@ fn test_referral_rapid_cycling_timing() {
     let profit_per_cycle = bonus - cost_per_cycle;
     
     metrics.net_profit = profit_per_cycle * cycles;
-    metrics.tx_count = cycles * 5;
+    metrics.tx_count = (cycles * 5) as u32;
     
     // Time constraint: each invoice must be created, funded, and repaid
     // Minimum realistic time: 1 ledger per invoice = ~5 seconds
@@ -529,7 +528,7 @@ fn test_exhausted_pool_claim_returns_false() {
 
     metrics.capital_deployed = 0;
     metrics.net_profit = 0;
-    metrics.tx_count = (claims_needed + 1) * 5;
+    metrics.tx_count = ((claims_needed + 1) * 5) as u32;
     metrics.outcome = format!(
         "Pool exhausted after {} claims; next claim returns false (no panic).",
         claims_needed
@@ -605,7 +604,7 @@ fn test_default_before_repaid_ineligible() {
     env.ledger().set(LedgerInfo {
         timestamp: env.ledger().timestamp() + 200_000,
         protocol_version: 21,
-        sequence_number: env.ledger().sequence_number(),
+        sequence_number: env.ledger().sequence(),
         network_id: Default::default(),
         base_reserve: 10,
         min_temp_entry_ttl: 1000,

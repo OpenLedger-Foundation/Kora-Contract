@@ -599,7 +599,7 @@ mod tests {
         let s = setup();
         seed_pool_and_position(&s, 1, 10_000_000_000);
         s.client.wrap(&s.investor, &1u64, &100u64);
-        let wrap = s.client.get_wrap(&1u64, &s.investor).unwrap();
+        let wrap = s.client.get_wrap(&1u64, &s.investor);
         assert_eq!(wrap.total_shares, 100);
         assert_eq!(wrap.outstanding_shares, 100);
         assert_eq!(wrap.contributed, 10_000_000_000);
