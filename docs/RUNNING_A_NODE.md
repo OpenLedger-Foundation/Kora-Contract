@@ -109,6 +109,47 @@ cargo run -p kora-xtask --bin bootstrap-registry -- \
 
 ---
 
+## Indexer Cursor Checkpoints (Disaster Recovery)
+
+The indexer persists its ledger cursor so a restart resumes from the last
+processed ledger instead of reindexing from genesis. For DR drills you can
+export that cursor to a portable checkpoint file and import it into a fresh
+indexer instance.
+
+### Export
+
+```bash
+cargo run -p kora-indexer --bin indexer-checkpoint -- \
+  --export /tmp/indexer-checkpoint.json
+```
+
+The checkpoint records the ledger cursor and a checksum over its contents. Keep
+the file with your other DR artifacts (see `infra/backup/`).
+
+### Import
+
+```bash
+cargo run -p kora-indexer --bin indexer-checkpoint -- \
+  --import /tmp/indexer-checkpoint.json
+```
+
+On import the checksum is recomputed and compared against the stored value. A
+mismatch (tampered or corrupted file) fails closed with a typed error and the
+cursor is **not** advanced. Importing the same checkpoint twice is idempotent:
+re-applying an already-current cursor is a no-op.
+
+### Edge cases
+
+- **Missing/empty config** — if no checkpoint path is configured, export and
+  import fail closed with a typed error rather than silently defaulting.
+- **Checksum mismatch** — import aborts with a typed error; the existing cursor
+  is left untouched.
+- **Paused / degraded dependency** — if the indexer is paused or its storage
+  dependency is unavailable, checkpoint operations return a typed error instead
+  of writing a partial checkpoint.
+
+---
+
 ## Edge Cases
 
 ### Missing contract address
