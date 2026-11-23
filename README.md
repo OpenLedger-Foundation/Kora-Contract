@@ -357,3 +357,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1142 -->
+- #1142: Add governance_voting snapshot block hash binding tests
