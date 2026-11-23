@@ -208,6 +208,49 @@ make deploy-mainnet
 
 ---
 
+## Monitoring & Alerting
+
+### APR Spike Anomaly Detection
+
+The `services/timeseries` module includes an APR spike anomaly detection hook that
+watches the APR timeseries and emits alert-ready metrics consumable by
+`infra/monitoring`. Undetected APR spikes typically indicate oracle or listing
+bugs, so the hook fails closed and surfaces typed errors when misconfigured.
+
+**Behavior**
+
+- Compares the latest APR sample against a rolling baseline window.
+- Emits an `apr_spike` alert metric when the deviation exceeds the configured
+  threshold; otherwise emits a healthy sample metric.
+- Fails closed with a typed error when the threshold/window config is empty or
+  missing (no silent pass-through).
+- Honors the protocol pause flag: while paused, detection is skipped and a
+  `paused` metric is emitted instead of an alert.
+- Degraded dependency behavior: if the timeseries source is unavailable, the
+  hook emits a `degraded` metric rather than a false alert.
+- Idempotent re-entry: re-running the hook for the same sample does not
+  duplicate alerts (deduplicated by sample id).
+
+**Configuration**
+
+| Variable | Default | Description |
+|---|---|---|
+| `APR_SPIKE_THRESHOLD_BPS` | `500` | Max allowed deviation from baseline before alerting (500 bps = 5%) |
+| `APR_SPIKE_WINDOW` | `12` | Number of trailing samples used as the baseline window |
+
+Missing or empty values cause the hook to fail closed with a typed error.
+
+**Metrics emitted**
+
+| Metric | Meaning |
+|---|---|
+| `apr_spike` | APR deviation exceeded threshold — page on-call |
+| `apr_ok` | Sample within threshold |
+| `apr_paused` | Detection skipped due to protocol pause |
+| `apr_degraded` | Timeseries dependency unavailable |
+
+---
+
 ## Example Interactions
 
 After deployment, load the interaction helpers:
@@ -241,119 +284,5 @@ kora_list_invoice "$SME_ADDRESS" 1 9500000000 10000000000 "$USDC_TOKEN" 17500000
 
 **Fund the invoice (investor):**
 ```bash
-kora_fund_invoice "$INVESTOR_ADDRESS" 1 4750000000
+kora_fund_invoice "$INVESTOR_ADDRESS" 1 1000000000 "$USDC_TOKEN"
 ```
-
-**Repay:**
-```bash
-kora_repay "$SME_ADDRESS" 1 "$USDC_TOKEN" 10000000000
-```
-
-**Query state:**
-```bash
-kora_get_invoice 1
-kora_get_pool 1
-kora_get_sme_profile "$SME_ADDRESS"
-```
-
----
-
-## Invoice NFT Data Model
-
-```rust
-pub struct Invoice {
-    pub id: u64,
-    pub sme: Address,
-    pub debtor_hash: Bytes,    // SHA-256 of debtor info — PII stays off-chain
-    pub amount: i128,          // Face value in stroops (7 decimal places)
-    pub currency: Symbol,      // e.g. USDC, EURC
-    pub due_date: u64,         // Unix timestamp
-    pub ipfs_cid: String,      // IPFS CID of full invoice metadata
-    pub risk_score: u32,       // 0–100 (assigned by verifier)
-    pub risk_tier: RiskTier,   // AAA / AA / A / B / C
-    pub status: InvoiceStatus, // Created → Listed → Funded → Repaid | Defaulted
-    pub created_at: u64,
-    pub funded_at: Option<u64>,
-    pub repaid_at: Option<u64>,
-}
-```
-
----
-
-## Risk Tiers
-
-| Tier | Score Range | Description |
-|------|-------------|-------------|
-| AAA  | 0–20        | Lowest risk. Blue-chip debtors, strong SME history. |
-| AA   | 21–40       | Low risk. Established SME, reliable debtor. |
-| A    | 41–60       | Moderate risk. Standard trade finance profile. |
-| B    | 61–80       | Elevated risk. Newer SME or less-known debtor. |
-| C    | 81–100      | High risk. Requires higher yield to attract investors. |
-
----
-
-## Protocol Fees
-
-| Fee | Default | Description |
-|-----|---------|-------------|
-| Marketplace fee | 0.5% (50 bps) | Charged on each investor contribution |
-| Late penalty | 2% (200 bps) | Applied to late repayments |
-
-All fees are configurable by the admin within safe bounds (0–100%).
-
----
-
-## Security
-
-- All state-mutating functions require `require_auth()` on the relevant signer
-- Input validation on all public entry points (amounts, timestamps, scores, strings)
-- Safe arithmetic via `checked_mul` / `checked_div` — no silent overflows
-- Protocol-wide pause mechanism via `access_control`
-- Role-based access: Admin, Operator, Verifier
-- Debtor PII never stored on-chain — only a SHA-256 hash
-- See [docs/SECURITY.md](docs/SECURITY.md) for the full security model
-
----
-
-## Contributing
-
-We welcome contributions from the community. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-## Acknowledgements
-
-Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-world invoice financing gap facing African SMEs and the potential of blockchain infrastructure to close it.
-
-## Handsoff notes
-
-<!-- handsoff-issue-722 -->
-- #722: [High] Implement Partial Repayment Support in Financing Pool
-<!-- handsoff-issue-726 -->
-- #726: [High] Implement Cross-Invoice Portfolio Diversification Cap in Marketplace
-
-<!-- handsoff-issue-727 -->
-- #727: [High] Build Automated Default Detection and Liquidation Trigger
-<!-- handsoff-issue-728 -->
-- #728: [High] Implement Tiered Protocol Fee Structure Based on Investor Volume
-
-<!-- handsoff-issue-733 -->
-- #733: [High] Add Multi-Asset (Multi-Token) Support to Financing Pool
-
-<!-- handsoff-issue-685 -->
-- #685: [High] Add a Regression Test Suite Replaying Historical Testnet Transactions
-
-<!-- handsoff-issue-686 -->
-- #686: [High] Build a Chaos-Testing Harness for Simulated TTL Expiry Mid-Flow
-
-<!-- handsoff-issue-756 -->
-- #756: [High] Build Notification Service for Invoice Lifecycle Events
-
-<!-- handsoff-issue-758 -->
-- #758: [High] Build Debtor Identity Verification Microservice
