@@ -363,3 +363,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1155 -->
 - #1155: Risk pipeline score explanation payload for SME dashboard
+
+<!-- handsoff-issue-1156 -->
+- #1156: FX ingestion holiday calendar and weekend gap handling
