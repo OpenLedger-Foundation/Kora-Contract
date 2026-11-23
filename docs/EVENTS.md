@@ -44,6 +44,8 @@ absence as "pre-v1".
 | Version | Change | Related issue |
 |---|---|---|
 | 1 | Initial versioned release — `SCHEMA_V` topic added to every event | #583 |
+| 1 | Added `PAR_BOOT` (`parameter_registry_bootstrap`) — emitted once per `bootstrap_from_live_contracts` call with seeded count and checksum | governance-sync |
+| 1 | Added `DA_POLICY` (`debtor_attestation_policy_decision`) — emitted on every attestation-gate evaluation in `marketplace` with tier ordinal and `required` flag | governance-sync |
 
 ### Indexer integration
 
@@ -101,6 +103,7 @@ Where:
 |-------|----------|---------|-------------|
 | `MKTPL_CANCELLED` | listing_cancelled | (invoice_id, seller, timestamp) | Listing cancelled |
 | `MKTPL_EXPIRED` | listing_expired | (seller, invoice_id, timestamp) | Funding deadline passed |
+| `DA_POLICY` | debtor_attestation_policy_decision | (invoice_id, tier_ordinal, required, timestamp) | Attestation gate decision per tier (0=AAA…4=C). `required=true` means a valid debtor attestation is mandatory for this listing/funding attempt. Governance-sync dashboards index this to audit policy changes live. |
 
 ### Treasury Contract (TREAS_*)
 
@@ -161,6 +164,36 @@ emissions is removed.
 | `AC_ACTION_PROPOSED` | action_proposed | (proposal_id, proposer, timestamp) | Multisig action proposed |
 | `AC_ACTION_APPROVED` | action_approved | (proposal_id, approver, approval_count, timestamp) | Multisig approval |
 | `AC_ACTION_EXECUTED` | action_executed | (proposal_id, executor, timestamp) | Multisig action executed |
+
+### Parameter Registry Contract (PAR_*)
+
+| Topic | Function | Payload | Description |
+|-------|----------|---------|-------------|
+| `REG_INIT` | registry_param_initialized | (admin, timestamp) | Registry initialized; bootstrap defaults written |
+| `PAR_PROP` | param_update_proposed | (proposer, key_discriminant, new_value, timestamp) | Governance proposal opened for a parameter change |
+| `PAR_APRV` | param_update_approved | (approver, proposal_id, approval_count, timestamp) | A signer approved a pending proposal |
+| `PAR_EXEC` | param_updated | (executor, key_discriminant, old_value, new_value, timestamp) | Proposal executed; value is now live on-chain |
+| `PAR_BOOT` | parameter_registry_bootstrap | (admin, seeded_count, checksum, timestamp) | `bootstrap_from_live_contracts` completed; `seeded_count` keys written, `checksum` is big-endian concatenation of their values for indexer verification |
+
+**Key discriminant mapping** (stable `u32` used in `PAR_PROP`/`PAR_EXEC` payloads):
+
+| Discriminant | Key |
+|---|---|
+| 1 | `MarketplaceFeeBps` |
+| 2 | `ReferrerSplitBps` |
+| 3 | `MinContributionAmount` |
+| 4–8 | `TierFeeAaa`…`TierFeeC` |
+| 9 | `LatePenaltyBps` |
+| 10 | `LatePenaltyTreasurySplitBps` |
+| 11 | `MaxPositionBps` |
+| 12 | `GracePeriodSecs` |
+| 13 | `MinimumVerifierStake` |
+| 14 | `SlashPercentageBps` |
+| 15 | `MinimumDebtorScore` |
+| 16 | `TreasuryFeeBps` |
+| 17 | `ReserveAllocationBps` |
+| 18 | `MinReserveRatioBps` |
+| 19–23 | `DebtorAttestationAaa`…`DebtorAttestationC` |
 
 ### Vesting Contract (VEST_*)
 
