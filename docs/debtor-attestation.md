@@ -59,3 +59,50 @@ An expired attestation (`now > expires_at`) returns `Expired` from
 `attestation_status` and `false` from `is_confirmed`. Marketplace then returns
 `DebtorNotAttested`, not `AttestationAmountMismatch`. The debtor must re-attest
 with a new expiry before the invoice can be listed again.
+
+## Expiry sweep job (issue #1150)
+
+Expired attestations otherwise linger silently and confuse tier gates. The
+keeper runs a periodic **attestation expiry sweep** that walks the existing
+`debtor_attestation` records and reports which ones have lapsed, so operators
+can alert and prompt debtors to re-attest. The sweep is read-only against the
+contract — it never mutates attestation state and never bypasses the
+marketplace gate.
+
+### Behavior
+
+- Uses the existing keeper job pattern in `services/keeper/` (same scheduler,
+  config loading, and metrics plumbing as other keeper jobs). No parallel
+  subsystem is introduced.
+- Reads attestations through the existing `contracts/debtor_attestation/`
+  module (`attestation_status` / `is_confirmed`); an attestation is considered
+  expired when `now > expires_at`.
+- Emits metrics on each run:
+  - `attestation_sweep_expired_total` — count of expired attestations found.
+  - `attestation_sweep_failures_total` — count of records that could not be
+    read (RPC/contract errors).
+  - `attestation_sweep_last_success_timestamp` — last successful sweep time.
+- Emits an alert when `attestation_sweep_expired_total > 0` or when
+  `attestation_sweep_failures_total > 0`, so lapsed attestations and degraded
+  reads are both surfaced.
+
+### Edge cases
+
+- **Paused / degraded dependency:** if the attestation contract or its RPC is
+  paused or unreachable, the sweep records the failure in
+  `attestation_sweep_failures_total`, emits an alert, and does not advance
+  `attestation_sweep_last_success_timestamp`. It never treats an unreadable
+  record as valid.
+- **Empty or missing config:** a missing attestation contract address or sweep
+  interval fails closed with a typed config error at startup; the job does not
+  run with partial configuration.
+- **Idempotent re-entry:** the sweep is read-only and keyed by attestation ID,
+  so re-running it (retries, overlapping schedules) produces the same counts
+  and does not double-count or mutate state.
+
+### Ops / env
+
+The sweep reuses the keeper's existing attestation contract address and RPC
+configuration; no new required env vars are introduced. Operators should wire
+`attestation_sweep_expired_total` and `attestation_sweep_failures_total` into
+alerting so expired attestations are actioned promptly.
