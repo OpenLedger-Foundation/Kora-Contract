@@ -169,3 +169,11 @@ fn buy_uses_admin_updated_fee_rate_for_settlement() {
         .update_protocol_fee_bps(&t.admin, &updated_fee_bps);
     assert_fee_settlement(&t, updated_fee_bps);
 }
+/// SM-3: fee-rate ceiling is inclusive and only the admin may change it.
+#[test]
+fn fee_rate_bounds_and_admin_are_enforced() {
+    let t = setup(250);
+    assert!(t.market.try_update_protocol_fee_bps(&t.admin, &1_000).is_ok());
+    assert!(t.market.try_update_protocol_fee_bps(&t.admin, &1_001).is_err());
+    assert!(t.market.try_update_protocol_fee_bps(&t.observer, &100).is_err());
+}

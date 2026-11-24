@@ -1034,3 +1034,33 @@ fn test_invariant_share_bps_never_exceeds_10000() {
         );
     }
 }
+
+// Section 6: secondary_market fee arithmetic (buy_position)
+
+/// SM-1 / SM-2: fee and proceeds conserve the price at every boundary.
+#[test]
+fn test_secondary_fee_conserves_price() {
+    for price in [0, 1, 39, 40, 9_999, 10_000, 12_345_679, MAX_AMOUNT] {
+        for bps in [0u32, 1, 250, 1_000] {
+            let fee = bps_of(price, bps).unwrap();
+            let proceeds = safe_sub(price, fee).unwrap();
+            assert!(fee >= 0 && proceeds >= 0);
+            assert_eq!(fee + proceeds, price);
+        }
+    }
+}
+
+/// SM-1: fees round down; 39 units at 250 bps is below one fee unit.
+#[test]
+fn test_secondary_fee_rounding_boundary() {
+    assert_eq!(bps_of(39, 250).unwrap(), 0);
+    assert_eq!(bps_of(40, 250).unwrap(), 1);
+}
+
+/// SM-1: i128 extremes fail with typed errors.
+#[test]
+fn test_secondary_fee_extremes_fail_closed() {
+    assert_eq!(bps_of(i128::MAX, 1_000), Err(CommonError::ArithmeticOverflow));
+    assert_eq!(bps_of(i128::MIN, 250), Err(CommonError::InvalidAmount));
+    assert_eq!(bps_of(-1, 250), Err(CommonError::InvalidAmount));
+}
