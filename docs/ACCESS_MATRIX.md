@@ -623,6 +623,20 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 
 ---
 
+## Pause-Bypass Documentation Gate (issue #1183)
+
+`cargo run -p kora-xtask --bin check_pause_matrix` (CI: `ci.yml`) fails when a
+pause-guarded entrypoint (body calls `require_not_paused`, directly or through a
+private helper) is missing either:
+
+- a `✓ YES` row in `docs/SECURITY.md` → *Pause-Semantics Enforcement Matrix*, or
+- a row in this file under its `### <n>. <contract>` section.
+
+An undocumented pausable entrypoint is treated as an undocumented pause bypass:
+integrators and incident responders cannot tell whether it halts under
+`pause()`. To fix a failure, add the entrypoint row here and the `✓ YES` row in
+SECURITY.md. No new env vars or config are introduced.
+
 ## Automated Verification Checker
 
 ### Tool: `contracts/xtask/src/bin/check_access_matrix.rs`

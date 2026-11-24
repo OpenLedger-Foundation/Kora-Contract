@@ -7,7 +7,7 @@ import * as http from "http";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
-import { createReportingServer } from "../src/httpServer";
+import { createReportingServer, shapeTreasuryBalances } from "../src/httpServer";
 import { ExportJobQueue } from "../src/exportJobQueue";
 import { FixtureReportingDataSource } from "../src/fixtureDataSource";
 import { IndexerReportingDataSource } from "../src/indexerDataSource";
@@ -89,7 +89,7 @@ describe("Treasury Transparency REST API (Issue #1099)", () => {
     expect(balRes.body["partial"]).toBe(false);
     const balances = balRes.body["balances"] as Array<Record<string, unknown>>;
     expect(balances).toHaveLength(2);
-    expect(balances[0]).toMatchObject({
+    expect(balances.find((b) => b["asset"] === "USDC")).toMatchObject({
       asset: "USDC",
       balance: "2450000000",
       totalInflows: "3000000000",
@@ -113,7 +113,7 @@ describe("Treasury Transparency REST API (Issue #1099)", () => {
   });
 
   test("marks partial indexer lag in response", async () => {
-    const mockFetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const mockFetch = async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
       const url = String(input);
       if (url.endsWith("/status")) {
         return new Response(
@@ -169,7 +169,7 @@ describe("Treasury Transparency REST API (Issue #1099)", () => {
   });
 
   test("handles empty treasury cleanly", async () => {
-    const emptyFetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const emptyFetch = async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
       const url = String(input);
       if (url.endsWith("/status")) {
         return new Response(
@@ -216,5 +216,88 @@ describe("Treasury Transparency REST API (Issue #1099)", () => {
     } finally {
       await new Promise<void>((resolve) => emptyServer.close(() => resolve()));
     }
+  });
+
+  describe("multi-asset balance view (Issue #1184)", () => {
+    test("returns every asset, sorted, with an assets index", async () => {
+      const res = await requestJson(server, "/treasury/balances");
+      expect(res.status).toBe(200);
+      expect(res.body["assets"]).toEqual(["EURC", "USDC"]);
+      const balances = res.body["balances"] as Array<Record<string, unknown>>;
+      expect(balances.map((b) => b["asset"])).toEqual(["EURC", "USDC"]);
+      expect(balances[0]).toMatchObject({ asset: "EURC", balance: "1200000000" });
+    });
+
+    test("filters by asset case-insensitively", async () => {
+      const res = await requestJson(server, "/treasury/balances?asset=eurc");
+      expect(res.status).toBe(200);
+      expect(res.body["assets"]).toEqual(["EURC"]);
+      expect((res.body["balances"] as unknown[]).length).toBe(1);
+    });
+
+    test("unknown asset returns empty list, not an error", async () => {
+      const res = await requestJson(server, "/treasury/balances?asset=XLM");
+      expect(res.status).toBe(200);
+      expect(res.body["balances"]).toEqual([]);
+      expect(res.body["assets"]).toEqual([]);
+    });
+
+    test("rejects malformed asset codes with 400", async () => {
+      for (const bad of ["", "USDC%3BDROP", "ABCDEFGHIJKLM"]) {
+        const res = await requestJson(server, `/treasury/balances?asset=${bad}`);
+        expect(res.status).toBe(400);
+      }
+    });
+
+    test("data source failure fails closed with 500", async () => {
+      const failing = new FixtureReportingDataSource();
+      failing.getTreasuryBalances = async () => {
+        throw new Error("indexer unavailable");
+      };
+      const s2 = createReportingServer(queue, tmpDir, failing);
+      await new Promise<void>((resolve) => s2.listen(0, "127.0.0.1", resolve));
+      try {
+        const res = await requestJson(s2, "/treasury/balances");
+        expect(res.status).toBe(500);
+        expect(res.body["error"]).toBe("indexer unavailable");
+      } finally {
+        await new Promise<void>((resolve) => s2.close(() => resolve()));
+      }
+    });
+
+    test("indexer source merges asset codes that differ only in case", async () => {
+      const ev = (asset: string, amount: string, i: number) => ({
+        contract: "treasury",
+        event_type: "fee_collected",
+        ledger_sequence: 100 + i,
+        event_index: 0,
+        decoded_payload: {
+          asset,
+          feeAmount: amount,
+          invoiceId: `inv-${i}`,
+          txHash: `0xma${i}`,
+          timestamp: 1700000000 + i,
+        },
+      });
+      const fetchFn = async (input: Parameters<typeof fetch>[0]): Promise<Response> => {
+        const body = String(input).endsWith("/status")
+          ? { lastIndexedLedger: 200, latestChainLedger: 200 }
+          : {
+              events: [ev("USDC", "100", 1), ev("usdc", "50", 2), ev("EURC", "7", 3)],
+              next_cursor: null,
+            };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+      const ds = new IndexerReportingDataSource({
+        indexerUrl: "http://mock-indexer",
+        fetchFn: fetchFn as typeof fetch,
+      });
+      const shaped = shapeTreasuryBalances(await ds.getTreasuryBalances());
+      expect(shaped.assets).toEqual(["EURC", "USDC"]);
+      expect(shaped.balances.find((b) => b.asset === "USDC")?.totalInflows).toBe("150");
+    });
   });
 });

@@ -99,6 +99,11 @@ path = "auth_fuzzing.rs"
 name = "economic_attack_simulation"
 path = "economic_attack_simulation.rs"
 
+# ── MEV: commit-reveal funding window status guard (Issue #1181) ─────────────
+[[test]]
+name = "mev_commit_reveal_status"
+path = "mev_commit_reveal_status.rs"
+
 # ── Vesting grant lifecycle integration tests (Issue #965) ──────────────────
 [[test]]
 name = "vesting_lifecycle"

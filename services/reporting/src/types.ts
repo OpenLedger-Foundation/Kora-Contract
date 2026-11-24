@@ -154,6 +154,11 @@ export interface TreasuryQueryOptions {
 /** Response envelope for GET /treasury/balances. */
 export interface TreasuryBalancesResponse extends TreasuryIndexerStatus {
   balances: TreasuryBalance[];
+  /**
+   * Asset codes present in `balances`, sorted (issue #1184). Added by the HTTP
+   * layer; data sources may omit it.
+   */
+  assets?: string[];
 }
 
 /** Response envelope for GET /treasury/inflows. */

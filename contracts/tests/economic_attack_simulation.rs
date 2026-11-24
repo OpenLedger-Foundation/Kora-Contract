@@ -10,6 +10,7 @@
 //! - `referral_self_dealing`: Tests Sybil attacks on referral reward system
 //! - `insurance_pool_timing`: Tests claim-timing manipulation and pool drain attacks
 //! - `concentration_cap_manipulation`: Tests bypass of per-investor concentration limits
+//! - `secondary_wash_trading`: Detects wash-looking secondary round-trips/cycles (#1182)
 //!
 //! ## Success Criteria
 //!
@@ -44,6 +45,7 @@ mod integration_tests {
         println!("  - referral_self_dealing");
         println!("  - insurance_pool_timing");
         println!("  - concentration_cap_manipulation");
+        println!("  - secondary_wash_trading");
     }
 
     /// Run all attack simulations and summarize results
