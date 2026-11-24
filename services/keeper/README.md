@@ -19,6 +19,10 @@ Indexer (deadline export: /api/v1/deadlines?horizon_sec=…)
         │  promoteExpired() on every tick
         ▼
   Dispatcher.dispatch()
+        │  due_date / grace_period_end → simulateTransaction precheck (#1187)
+        │     ├─ simulation error, no-op code → already_triggered (no tx sent)
+        │     ├─ simulation error, other      → failed / permanent_failure (no tx sent)
+        │     └─ RPC unavailable              → failed (precheck_unavailable; never submits blind)
         │
         ├─ submitted      → job: in_flight
         ├─ already_triggered (no-op) → job: done
@@ -32,6 +36,7 @@ Indexer (deadline export: /api/v1/deadlines?horizon_sec=…)
 |---|---|
 | Deduplication across restarts | `INSERT OR IGNORE` on `dedup_key` (SQLite UNIQUE) — a restart never re-enqueues |
 | Already-triggered detection | Known no-op error codes (`AlreadyDefaulted`, `AlreadyRefunded`, etc.) are treated as `done`, not `failed` |
+| Default-mark precheck | `due_date` / `grace_period_end` jobs are simulated before submit; reverting or already-defaulted invoices never reach the network, and skipped jobs do not consume the rate-limit budget. Counters via `Dispatcher.getPrecheckMetrics()` (`simulations`, `skippedIneligible`, `simulationErrors`) |
 | Rate limiting | Token-bucket: max 10 tx/min on the keeper account |
 | Fee bumping | Base 100 stroops × 1.1^attempts, capped at 10 000 stroops |
 | Retry back-off | Exponential: `backoffBaseMs × 2^(attempts-1)` |

@@ -7,7 +7,7 @@ use kora_shared::{
     reentrancy::ReentrancyGuard,
     types::{InvoiceStatus, Listing, MultisigConfig, RegistryParamKey, RiskTier},
     validation::{
-        bps_of_normalized, require_non_zero_amount, require_valid_fee_bps,
+        bps_of, bps_of_normalized, exceeds_bps_share, require_non_zero_amount, require_valid_fee_bps,
         require_within_max_amount, safe_add, safe_div, safe_mul, safe_sub, UPGRADE_TIMELOCK_DELAY,
     },
 };
@@ -946,15 +946,9 @@ impl MarketplaceContract {
                 .get(&gross_key)
                 .unwrap_or(0);
             let prospective = safe_add(prev_gross, amount)?;
-            // prospective * 10_000 / asking_price > cap_bps
-            // rearranged to avoid division: prospective * 10_000 > cap_bps * asking_price
-            let lhs = prospective
-                .checked_mul(10_000)
-                .ok_or(KoraError::ArithmeticOverflow)?;
-            let rhs = (cap_bps as i128)
-                .checked_mul(listing.asking_price)
-                .ok_or(KoraError::ArithmeticOverflow)?;
-            if lhs > rhs {
+            // Shared checked helper: prospective / asking_price > cap_bps,
+            // evaluated without division (#1188).
+            if exceeds_bps_share(prospective, listing.asking_price, cap_bps)? {
                 events::investor_concentration_exceeded(
                     &env,
                     invoice_id,
@@ -1025,7 +1019,7 @@ impl MarketplaceContract {
             env.storage().persistent().get(&DataKey::Referrer(invoice_id));
         let split_bps = Self::referrer_split_bps(env, &config)?;
         let referral_fee = if referrer_opt.is_some() && split_bps > 0 {
-            safe_div(safe_mul(fee, split_bps as i128)?, 10_000)?
+            bps_of(fee, split_bps)?
         } else {
             0
         };
