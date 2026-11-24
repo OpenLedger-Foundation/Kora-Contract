@@ -5,6 +5,7 @@ target/
 .env.*
 # Committed configuration examples are documentation, not secrets.
 !.env.mev.example
+!.env.example
 
 # Test snapshots
 test_snapshots/

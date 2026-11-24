@@ -154,3 +154,20 @@ access_control
 
 `scripts/deploy.sh` enforces this order. See [`docs/CONTRACTS.md`](CONTRACTS.md)
 for the full contract reference.
+
+---
+
+## Community Node (indexer + API + health)
+
+```bash
+cp packaging/.env.example .env   # fill in CONTRACT_* and TREASURY_CONTRACT_ID
+./packaging/community-node.sh
+```
+
+Starts Postgres, the indexer (`:3000`), the treasury API (`:3001`) and the health
+aggregator (`http://localhost:8081/health`), and waits until all are healthy.
+Re-running is safe. Missing configuration exits 2 before any container starts;
+a degraded or failed dependency fails the wait. Set `KORA_INDEXER_IMAGE` to run a
+prebuilt indexer. `services/indexer` currently ships only a library, with no
+server binary, so a local indexer build requires one to be added first.
+`HEALTH_SERVICES` limits which upstreams the aggregator polls.

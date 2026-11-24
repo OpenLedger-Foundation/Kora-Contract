@@ -9,6 +9,7 @@
  *  - HEALTH_PORT (default 8081)
  *  - KEEPER_HEALTH_URL, INDEXER_HEALTH_URL, API_HEALTH_URL,
  *    FEATURE_FLAGS_HEALTH_URL, REPORTING_HEALTH_URL
+ *  - HEALTH_SERVICES: comma-separated subset to poll (default: all)
  *  - HEALTH_POLL_TIMEOUT_MS (default 2000)
  *
  * Issue #1024
@@ -61,7 +62,7 @@ export function defaultHealthFetcher(): HealthFetcher {
 
 /** Build the upstream list from env, matching the deploy-services/nginx set. */
 export function loadUpstreams(timeoutMs: number): UpstreamService[] {
-  return [
+  const all = [
     { name: "keeper", url: env("KEEPER_HEALTH_URL", "http://keeper:8080/health") },
     { name: "indexer", url: env("INDEXER_HEALTH_URL", "http://indexer:8080/health") },
     { name: "api", url: env("API_HEALTH_URL", "http://api:8080/health") },
@@ -70,7 +71,18 @@ export function loadUpstreams(timeoutMs: number): UpstreamService[] {
       url: env("FEATURE_FLAGS_HEALTH_URL", "http://feature-flags:8080/health"),
     },
     { name: "reporting", url: env("REPORTING_HEALTH_URL", "http://reporting:8080/health") },
-  ].map((svc) => ({ ...svc, sla: { timeoutMs } }));
+  ];
+  const wanted = env("HEALTH_SERVICES", all.map((svc) => svc.name).join(","))
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const unknown = wanted.filter((name) => !all.some((svc) => svc.name === name));
+  if (wanted.length === 0 || unknown.length > 0) {
+    throw new Error(`HEALTH_SERVICES is invalid: ${unknown.join(", ") || "no services listed"}`);
+  }
+  return all
+    .filter((svc) => wanted.includes(svc.name))
+    .map((svc) => ({ ...svc, sla: { timeoutMs } }));
 }
 
 function main(): void {

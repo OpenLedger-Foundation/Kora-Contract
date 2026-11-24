@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "generate:errors": "node scripts/generate-errors.js",
     "test": "jest --coverage",
     "release:npm": "npm publish --access public",
     "docs:api": "typedoc"
@@ -28,7 +29,8 @@
     "testMatch": [
       "**/tests/transaction-recovery.test.ts",
       "**/tests/governance.test.ts",
-      "**/tests/clients.test.ts"
+      "**/tests/clients.test.ts",
+      "**/tests/error-mapping.test.ts"
     ],
     "collectCoverageFrom": [
       "src/transactionRecovery.ts"

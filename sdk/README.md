@@ -218,4 +218,16 @@ In addition to the core 7 contracts, the SDK provides typed clients for extended
 - **`SecondaryMarketClient`** (`contracts/secondary_market`): List investor positions for secondary sale, purchase listed positions, and manage secondary trading fees.
 - **`GovernanceVotingClient`** (`contracts/governance_voting`): Create and vote on governance proposals (Standard and Quadratic voting), manage vote delegation, configure vesting weight sources, and execute proposals.
 
-These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
+These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
+## Typed contract errors
+
+```ts
+import { KoraErrorCode, mapContractError } from "@kora-protocol/sdk";
+
+const { code, retryable } = mapContractError(err, "marketplace");
+if (code === KoraErrorCode.ProtocolPaused) showPausedBanner();
+```
+
+Codes are per contract; unrecognised contracts or codes map to
+`KoraErrorCode.Unknown` and are not retryable. After changing a contract error
+enum, run `npm run generate:errors`.
