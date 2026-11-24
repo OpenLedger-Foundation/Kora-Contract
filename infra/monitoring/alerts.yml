@@ -113,3 +113,26 @@ groups:
         annotations:
           summary: Kora treasury sweep observed
           description: Verify the sweep amount and authorized transaction; expected sweeps do not page on-call.
+  # Issue #1175 — proof that an emergency pause / drill took effect on every
+  # target contract. Series are written by scripts/verify-pause-effect.sh.
+  - name: kora-pause-effect
+    rules:
+      - alert: KoraPauseNotEffective
+        expr: kora_pause_effective == 0
+        for: 0m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Pause not effective on {{ $labels.target }}
+          description: is_paused did not return true for {{ $labels.target }} ({{ $labels.contract }}) after a pause/drill. Re-run the pause for this target immediately.
+
+      - alert: KoraPauseProbeFailed
+        expr: kora_pause_probe_error == 1
+        for: 0m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Pause state unverifiable for {{ $labels.target }}
+          description: The is_paused probe failed for {{ $labels.target }}; treat the target as NOT paused until verified.

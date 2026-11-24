@@ -174,11 +174,46 @@ the tagged source.
 
 ---
 
+## Pinned builder image
+
+> Issue #1174.
+
+Floating tags (`rust:1.75`, `debian:bookworm-slim`) can be re-pointed upstream,
+silently changing the toolchain. Every `FROM` in `packaging/` is therefore
+pinned by immutable digest:
+
+| File | Image |
+|------|-------|
+| `packaging/Dockerfile.wasm` | `rust:1.75.0-slim-bookworm@sha256:70c2a016…1f74` (matches `rust-toolchain.toml`) |
+| `packaging/Dockerfile` (indexer) | `rust:1.78-slim-bookworm@sha256:0fea9676…2dc9`, `debian:bookworm-slim@sha256:e67eeead…ce0e` |
+
+Build canonical WASM in the pinned container:
+
+```bash
+docker build -f packaging/Dockerfile.wasm -o target/wasm-docker .
+cat target/wasm-docker/SHA256SUMS
+```
+
+The `pinned-digests` job in `.github/workflows/security.yml` runs
+`scripts/check-pinned-digests.sh`, which fails with `ERR_UNPINNED_IMAGE` for any
+tag-only `FROM` and fails closed (`ERR_CONFIG_MISSING`/`ERR_CONFIG_SCHEMA`, exit 2)
+on missing or FROM-less Dockerfiles. Tests: `bash scripts/tests/test-pinned-digests.sh`
+(also asserts the WASM builder tag matches `rust-toolchain.toml`).
+
+**Rotating the digest:** when bumping `rust-toolchain.toml`, resolve the new
+digest (`docker buildx imagetools inspect rust:<ver>-slim-bookworm`), update
+`packaging/Dockerfile.wasm` and this table in the same PR, and record the new
+WASM hashes.
+
+---
+
 ## Related Files
 
 | File | Purpose |
 |------|---------|
 | `rust-toolchain.toml` | Pins Rust toolchain version for reproducibility |
+| `packaging/Dockerfile.wasm` | Digest-pinned WASM builder container |
+| `scripts/check-pinned-digests.sh` | CI gate: every `FROM` must be digest-pinned |
 | `Cargo.toml` `[profile.release]` | LTO, codegen-units=1, strip symbols |
 | `scripts/record-wasm-hashes.sh` | Record and verify hashes locally |
 | `.github/workflows/release.yml` | CI pipeline: dual-build verification + release |

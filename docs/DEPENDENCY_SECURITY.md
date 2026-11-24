@@ -37,3 +37,39 @@ dependencies, run `Scheduled dependency advisories` with
 `[Security Test] Scheduled dependency alert delivery` issue, then close that
 test issue. A real finding still creates/updates the normal security tracking
 issue and fails the workflow.
+## Advisory allowlist
+
+> Issue #1173.
+
+The `advisory-gate` job in `.github/workflows/security.yml` runs on every PR,
+push to `main`, and weekly. It fails the build on any RustSec advisory that is
+not explicitly allowlisted:
+
+1. `scripts/security/check_advisory_allowlist.py` validates the allowlist and
+   fails closed with typed errors:
+   - `ERR_CONFIG_MISSING` / `ERR_CONFIG_SCHEMA` — `deny.toml` or
+     `.cargo/audit.toml` missing, empty, or without `[advisories].ignore`.
+   - `ERR_BAD_ADVISORY_ID` — ID is not `RUSTSEC-YYYY-NNNN`.
+   - `ERR_MISSING_REASON` — `deny.toml` entry lacks a `reason` with an
+     `expires=YYYY-MM-DD` marker (bare string IDs are rejected).
+   - `ERR_EXCEPTION_EXPIRED` — the exception's expiry date has passed.
+   - `ERR_ALLOWLIST_DRIFT` — `deny.toml` and `.cargo/audit.toml` disagree.
+2. `cargo audit` (reads `.cargo/audit.toml`, `deny = ["warnings"]`).
+3. `cargo deny check advisories` (reads `deny.toml`).
+
+To accept an advisory, add it to **both** files:
+
+```toml
+# deny.toml
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-XXXX", reason = "Unreachable: <analysis>; owner=@sec; expires=2027-01-31; tracked in #NNN" },
+]
+
+# .cargo/audit.toml
+[advisories]
+ignore = ["RUSTSEC-2024-XXXX"]
+```
+
+Run locally: `python3 scripts/security/check_advisory_allowlist.py && cargo audit && cargo deny check advisories`.
+Tests: `bash scripts/tests/test-advisory-allowlist.sh`.
