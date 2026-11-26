@@ -154,6 +154,25 @@ path = "secondary_market_fill_invariants.rs"
 [[test]]
 name = "tranche_waterfall_property"
 path = "tranche_waterfall_property.rs"
+# ── Parameter registry governance events (governance-sync) ───────────────────
+[[test]]
+name = "parameter_registry_events"
+path = "parameter_registry_events.rs"
+
+# ── Cross-contract pause propagation (fund/repay paths) ──────────────────────
+[[test]]
+name = "cross_contract_pause_propagation"
+path = "cross_contract_pause_propagation.rs"
+
+# ── Invoice NFT immutable field mutation fuzz (#nft) ─────────────────────────
+[[test]]
+name = "invoice_nft_immutable_field_mutation"
+path = "invoice_nft_immutable_field_mutation.rs"
+
+# ── Marketplace multisig approval required paths (#marketplace) ───────────────
+[[test]]
+name = "marketplace_multisig_approval_required"
+path = "marketplace_multisig_approval_required.rs"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
