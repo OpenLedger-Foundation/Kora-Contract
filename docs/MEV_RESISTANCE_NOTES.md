@@ -230,8 +230,43 @@ Stellar Consensus Protocol provides:
 | Concentration cap gaming | Negligible | Independent per-investor caps | ✅ Acceptable |
 | Priority window expiry timing | Negligible | Time-based, not order-based | ✅ By design |
 | Surge pricing fee manipulation | Medium | Transparent algorithmic prioritization | ✅ Economically rational |
+| Commit-reveal funding window | N/A | Not implemented — see §3.4 | ⛔ N/A (by design) |
 
 ---
+
+### 3.4 Commit-Reveal Funding Window — Status: N/A (issue #1181)
+
+**Status: N/A — not implemented, intentionally.** `marketplace::fund_invoice`
+is a single-step, first-come-first-served call. There is no
+`commit_funding` / `reveal_funding` entrypoint, no commitment storage key, and
+no reveal deadline. Integrators MUST NOT expect a two-phase funding flow.
+
+**Rationale:**
+
+1. **No mempool-observable price edge.** A listing's terms (discount, amount,
+   currency) are fixed when listed; funding does not move a price curve, so a
+   front-runner gains nothing a commitment would hide (§2.1).
+2. **Deterministic ordering.** Stellar SCP orders transactions without a
+   gas-price auction (§1, §3.2), removing the sandwich/priority-gas-auction
+   attacks commit-reveal exists to stop.
+3. **Fairness is handled by existing modules.** Early access is governed by
+   `PriorityWindow` (§2.5, appendix #976) and per-investor
+   `MaxInvestorShareBps` caps (§2.4) rather than hidden bids.
+4. **Cost of adding it.** Two-phase funding would add a reveal-liveness failure
+   mode (unrevealed commitments locking a listing), extra storage rent, and a
+   new pause/expiry state machine — a parallel subsystem the protocol avoids.
+
+**Behavioural guarantees this implies (tested):** pause blocks `fund_invoice`
+immediately (no pending commitments to drain or expire); repeated funding
+calls are independent single-step operations; there is no reveal config to be
+missing, so nothing can fail open.
+
+**Guard test:** `contracts/tests/mev_commit_reveal_status.rs`
+(`cargo test -p kora-tests --test mev_commit_reveal_status`) fails if a
+commit/reveal entrypoint appears in `contracts/marketplace/src` without this
+section being updated, and if this N/A declaration is removed. If commit-reveal
+is ever introduced, replace this section with the window parameters, pause and
+expiry semantics, and update `docs/ACCESS_MATRIX.md` and `docs/EVENTS.md`.
 
 ## 4. Recommendations and Monitoring
 

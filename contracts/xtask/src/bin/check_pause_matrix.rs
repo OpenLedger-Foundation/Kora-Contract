@@ -13,7 +13,11 @@
 //!   - a `✓ YES` row names an entrypoint that is not pause-guarded,
 //!   - a `✗ NO` row names an entrypoint that is pause-guarded or does not exist,
 //!   - an `N/A` row is used for a contract that has pause-guarded entrypoints,
-//!   - a workspace contract has no row at all.
+//!   - a workspace contract has no row at all,
+//!   - a pause-guarded entrypoint has no row in `docs/ACCESS_MATRIX.md`
+//!     under a `### <n>. <contract>` section (issue #1183: undocumented
+//!     pause bypasses — a pausable entrypoint missing from the access matrix
+//!     is an integrator/incident doc hole).
 //!
 //! Usage:
 //!   cargo run -p kora-xtask --bin check_pause_matrix
@@ -349,6 +353,67 @@ fn check(inventory: &BTreeMap<String, ContractInventory>, rows: &[Row]) -> Vec<S
     problems
 }
 
+/// Collect entrypoint names documented in `docs/ACCESS_MATRIX.md`, keyed by
+/// contract. A section belongs to a contract when its `### ` heading's first
+/// word after the optional `<n>.` prefix is a known contract name; table rows
+/// below it contribute every backticked name in their first cell (call
+/// suffixes such as `fn(args)` are trimmed).
+fn parse_access_matrix(
+    markdown: &str,
+    contracts: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            current = trimmed.strip_prefix("### ").and_then(|h| {
+                let h = h.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ');
+                let word: String = h
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                contracts.contains(&word).then_some(word)
+            });
+            continue;
+        }
+        let Some(contract) = &current else { continue };
+        if !trimmed.starts_with('|') {
+            continue;
+        }
+        let first = trimmed.trim_matches('|').split('|').next().unwrap_or("");
+        let mut rest = first;
+        while let Some(start) = rest.find('`') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('`') else { break };
+            let name = after[..end].split('(').next().unwrap_or("").trim();
+            if !name.is_empty() {
+                out.entry(contract.clone()).or_default().insert(name.to_string());
+            }
+            rest = &after[end + 1..];
+        }
+    }
+    out
+}
+
+/// Every pause-guarded entrypoint must have an ACCESS_MATRIX row (#1183).
+fn check_access_matrix(
+    inventory: &BTreeMap<String, ContractInventory>,
+    access: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (contract, inv) in inventory {
+        for ep in &inv.pausable {
+            if !access.get(contract).is_some_and(|s| s.contains(ep)) {
+                problems.push(format!(
+                    "ACCESS_MATRIX.md: `{contract}::{ep}` is pause-guarded but has no access-matrix row"
+                ));
+            }
+        }
+    }
+    problems
+}
+
 fn locate_workspace_root() -> PathBuf {
     let cwd = std::env::current_dir().expect("failed to read current directory");
     cwd.ancestors()
@@ -372,17 +437,26 @@ fn main() -> ExitCode {
     let doc_path = root.join("docs/SECURITY.md");
     let markdown = fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", doc_path.display()));
-    let problems = check(&inventory, &parse_matrix(&markdown));
+    let mut problems = check(&inventory, &parse_matrix(&markdown));
+
+    let access_path = root.join("docs/ACCESS_MATRIX.md");
+    let access_md = fs::read_to_string(&access_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", access_path.display()));
+    let names: BTreeSet<String> = inventory.keys().cloned().collect();
+    problems.extend(check_access_matrix(
+        &inventory,
+        &parse_access_matrix(&access_md, &names),
+    ));
 
     let total: usize = inventory.values().map(|i| i.pausable.len()).sum();
     if problems.is_empty() {
         println!(
-            "check_pause_matrix: OK — {total} pause-guarded entrypoints across {} contracts are documented in docs/SECURITY.md.",
+            "check_pause_matrix: OK — {total} pause-guarded entrypoints across {} contracts are documented in docs/SECURITY.md and docs/ACCESS_MATRIX.md.",
             inventory.len()
         );
         ExitCode::SUCCESS
     } else {
-        eprintln!("check_pause_matrix: docs/SECURITY.md is out of sync with the code:\n");
+        eprintln!("check_pause_matrix: docs/SECURITY.md / docs/ACCESS_MATRIX.md are out of sync with the code:\n");
         for p in &problems {
             eprintln!("  - {p}");
         }
@@ -461,5 +535,38 @@ mod tests {
         let md = "| **c** | — | N/A | |\n| **other** | — | N/A | |";
         let problems = check(&inv(), &parse_matrix(md)).join("\n");
         assert!(problems.contains("`c` is marked N/A"));
+    }
+
+    fn names() -> BTreeSet<String> {
+        ["c".to_string(), "other".to_string()].into_iter().collect()
+    }
+
+    #[test]
+    fn access_matrix_accepts_documented_pausable_entrypoints() {
+        let md = "### 1. c\n| Entrypoint | Role |\n|---|---|\n| `mint` | Admin |\n| `fund(amount)` | Investor |\n";
+        let access = parse_access_matrix(md, &names());
+        assert!(check_access_matrix(&inv(), &access).is_empty());
+    }
+
+    #[test]
+    fn access_matrix_flags_undocumented_pause_bypass() {
+        // `fund` is only documented under another contract's section.
+        let md = "### 1. c\n| `mint` | Admin |\n### 2. other\n| `fund` | x |\n";
+        let problems = check_access_matrix(&inv(), &parse_access_matrix(md, &names())).join("\n");
+        assert!(problems.contains("`c::fund` is pause-guarded but has no access-matrix row"));
+        assert!(!problems.contains("`c::mint`"));
+    }
+
+    #[test]
+    fn access_matrix_missing_section_fails_closed() {
+        let problems = check_access_matrix(&inv(), &parse_access_matrix("", &names()));
+        assert_eq!(problems.len(), 2);
+    }
+
+    #[test]
+    fn access_matrix_ignores_unknown_and_non_table_lines() {
+        let md = "### Quick reference\n| `mint` | x |\n### 1. c\nprose `fund` here\n";
+        let access = parse_access_matrix(md, &names());
+        assert!(access.get("c").is_none());
     }
 }
