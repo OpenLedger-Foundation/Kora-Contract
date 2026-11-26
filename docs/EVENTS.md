@@ -167,7 +167,7 @@ emissions is removed.
 | Topic | Function | Payload | Description |
 |-------|----------|---------|-------------|
 | `VEST_INIT` | vesting_initialized | (admin, token, timestamp) | Vesting contract initialized |
-| `VEST_GRANT` | vesting_grant_created | (admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp) | Vesting grant created |
+| `VEST_GRNT` | vesting_grant_created | (admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp) | Vesting grant created |
 | `VEST_REL` | vesting_tokens_released | (beneficiary, amount, timestamp) | Vested tokens released |
 | `VEST_REV` | vesting_grant_revoked | (admin, beneficiary, revoked_at, timestamp) | Vesting grant revoked |
 | `UPG_PROP` | upgrade_proposed | (admin, wasm_hash, timestamp) | Upgrade proposed |

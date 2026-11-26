@@ -29,7 +29,7 @@
 //! - mark_default         → haircut redeem payout = 0
 //! - repay_partial then complete repay before redeem
 //! - Multiple investors fractionalizing the same pool
-//! - Settle is idempotent
+//! - Double settle rejected (AlreadySettled)
 //! - Pool aggregates / share balances tracked correctly after every step
 
 #[cfg(test)]
@@ -455,11 +455,11 @@ mod fractionalizer_e2e {
         assert_eq!(grand_total, total, "Grand total must equal full repaid amount");
     }
 
-    // ── Settle is idempotent ───────────────────────────────────────────────────
+    // ── Double settle is rejected ─────────────────────────────────────────────
 
-    /// Calling settle twice must be a no-op and must not affect redeem payouts.
+    /// A second settle must fail with AlreadySettled and leave payouts intact.
     #[test]
-    fn test_settle_is_idempotent() {
+    fn test_double_settle_rejected() {
         let t = setup();
         let invoice_id = create_pool(&t, INVOICE_AMOUNT);
         fund_position(&t, invoice_id, &t.investor1, INVOICE_AMOUNT, INVOICE_AMOUNT);
@@ -467,9 +467,12 @@ mod fractionalizer_e2e {
         t.pool.repay(&t.sme, &invoice_id, &t.token, &REPAY_AMOUNT);
 
         t.frac.settle(&invoice_id, &t.investor1);
-        // Second settle — must not error
         let result = t.frac.try_settle(&invoice_id, &t.investor1);
-        assert!(result.is_ok(), "Second settle must be a no-op (idempotent)");
+        assert_eq!(
+            result,
+            Err(Ok(kora_fractionalizer::FractionalizerError::AlreadySettled)),
+            "Second settle must be rejected"
+        );
 
         // Full payout still available
         let payout = t.frac.redeem(&t.investor1, &invoice_id, &t.investor1);

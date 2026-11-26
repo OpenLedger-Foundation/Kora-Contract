@@ -44,21 +44,61 @@ Comprehensive security improvements implemented to prevent economic attacks, eli
 
 **Result:** Cost of fake invoices exceeds referral bonus, making attacks unprofitable
 
-#### Insurance Pool Timing (4 tests)
-- `test_front_running_insurance_claims` — Tries to claim before others during insolvency
-- `test_strategic_default_timing` — Controls both debtor and investor to profit from default
-- `test_pool_insolvency_cascade` — Coordinates multiple defaults to exhaust reserves
-- `test_grace_period_gaming` — Manipulates timing around grace periods
+#### Insurance Pool Timing (16 tests)
 
-**Result:** Fair claim ordering and sufficient debtor bonds prevent exploitation
+Claims run through a deterministic `InsurancePool` model whose
+`check_invariants` panics on any break:
 
-#### Concentration Cap Manipulation (4 tests)
-- `test_sybil_concentration_bypass` — Uses multiple addresses to exceed caps
-- `test_position_share_consolidation` — Tries to consolidate shares post-funding
-- `test_micro_splitting_fee_optimization` — Splits contributions to game fee tiers
-- `test_volume_tier_gaming_via_splitting` — Fakes volume through address splitting
+| Invariant | Meaning |
+|-----------|---------|
+| I1 solvency | reserve never goes negative |
+| I2 conservation | `paid + reserve == initial_reserve` |
+| I3 coverage cap | no claim paid above `insured * COVERAGE_BPS` |
+| I4 grace boundary | nothing paid before `due_date + grace` (inclusive, same as `financing_pool::mark_default`) |
+| I5 no replay | a claim id is paid at most once |
+| I6 order independence | payouts identical under every submission order |
 
-**Result:** KYC costs and gas overhead make Sybil attacks prohibitively expensive
+Model policy: `GRACE_SECS = 86_400`, `COVERAGE_BPS = 5_000`, `BOND_BPS = 6_000`.
+`test_coverage_never_exceeds_forfeited_bond` fails if coverage is ever raised
+above forfeited collateral.
+
+- `test_front_running_insurance_claims` — races a claim into an oversubscribed reserve; payout equals the pro-rata share (the submission-order reference model is shown to leak value)
+- `test_strategic_default_timing` — self-dealing default swept across 30 default days; never profitable
+- `test_pool_insolvency_cascade` — 10 colluding + 5 honest defaults in one batch; honest claimants keep their pro-rata share
+- `test_grace_period_gaming` — claiming at the boundary vs late in the window pays the same
+- `test_boundary_block_times` — `due + grace - 1` rejected, `due + grace` accepted, `due + grace` overflow never eligible
+- `test_replay_and_zero_claims_rejected` — duplicate ids (same or later batch) and non-positive claims rejected
+- `test_claim_splitting_harvests_no_dust` — splitting one claim into nine never earns more rounding dust
+- `test_staggered_batches_respect_conservation` — reserve drained across five batches stays conserved
+- `invariant_checker_*` (4) — deliberately broken models must trip I2, I3, I4 and I6
+- `test_contract_mark_default_grace_boundary` — real `financing_pool`: `GracePeriodActive` one second early, accepted at the boundary, second default `PoolAlreadyClosed`
+- `test_contract_zero_grace_defaults_at_due_date` — real contracts with `grace = 0` (see note below)
+- `test_contract_reserve_drain_race` — real `treasury`: unauthorized caller rejected, over-draw rejected with `InsufficientReserveBalance`, I1/I2 checked after every disbursement, revoking the caller stops draws
+
+**Result:** Claim ranking by default time with pro-rata settlement removes the front-running edge; coverage capped below forfeited bond makes self-dealing defaults unprofitable.
+
+**Boundary note:** `financing_pool::mark_default` accepts `now >= due_date + grace`, but `invoice_nft::set_defaulted` requires `now > due_date`. With `grace = 0`, a default at exactly `due_date` passes the pool check and then reverts inside the NFT call (`InvalidInvoiceStatus`, #12). Clients decode that as `FinancingPoolError` #12 (`PoolAlreadyClosed`) even though the pool is still open. The call rolls back, so no claim can be triggered early, but keepers should schedule defaults at `due_date + grace + 1` when `grace == 0`.
+
+#### Concentration Cap Manipulation (11 tests)
+
+The marketplace per-listing cap (`set_max_investor_share_bps`) is measured against a running gross total per `(invoice_id, investor)`, exposed as `get_gross_contribution(invoice_id, investor)`. Previously that total was read but never written, so every `fund_invoice` call was checked on its own and an investor could reach 100% of a listing by splitting contributions. The total is now recorded on every successful fund (even while the cap is disabled), measured in listing-token units after oracle conversion, and cleared on refund.
+
+- `test_sybil_concentration_bypass` — 40% control needs four separately accredited addresses; never profitable
+- `test_position_share_consolidation` — models merging capped positions after funding (see open item below)
+- `test_micro_splitting_fee_optimization` — splits contributions to game fee tiers
+- `test_volume_tier_gaming_via_splitting` — fakes volume through address splitting
+- `test_contract_cap_exact_boundary` — real marketplace: exact cap allowed, next unit `InvestorConcentrationExceeded`
+- `test_contract_micro_splitting_cannot_bypass_cap` — 25 slices fill the cap, the 26th and any dust are rejected
+- `test_contract_cap_enabled_or_lowered_counts_prior_funding` — enabling a cap counts uncapped funding; lowering it blocks top-ups without clawing back; `0` disables
+- `test_contract_sybil_requires_accreditation` — unaccredited sybil rejected with `InvestorNotAccredited`; accredited sybils are each capped, aggregate is exactly `n * cap`
+- `test_contract_cap_is_scoped_per_listing` — the cap budget is per listing
+- `test_contract_oversized_single_call_rejected` — a single over-cap call is rejected without affecting other investors
+
+Every rejected call is checked to leave `funded_amount` and the running total unchanged, and failure messages name the attempted amount, the running total and the cap.
+
+**Sybil note:** the cap is per address. N accredited addresses held by one entity can hold up to `N * cap`; linking them is an off-chain KYC duty. On-chain, every funding address must be individually accredited by the admin.
+
+**Open item:** `financing_pool::transfer_position` merges a transferred position into the recipient's existing one without re-checking `MaxPositionBps`, so capped positions can be consolidated after funding. A fix must keep the fractionalizer's multi-investor wraps working (it is a custodian that legitimately merges positions).
 
 ### Key Findings
 
@@ -362,8 +402,8 @@ pub fn bump_pools_batch(env: Env, pool_ids: Vec<u64>) -> u32 {
 |---------------|-------|--------|----------|
 | Fund-Refund Gaming | 3 | ✅ Pass | Fee gaming, volume manipulation |
 | Referral Self-Dealing | 4 | ✅ Pass | Sybil attacks, allocation drain |
-| Insurance Pool Timing | 4 | ✅ Pass | Front-running, cascade attacks |
-| Concentration Cap | 4 | ✅ Pass | Bypass via Sybil or consolidation |
+| Insurance Pool Timing | 16 | ✅ Pass | Front-running, cascade, grace boundary, reserve drain race, invariant self-checks |
+| Concentration Cap | 11 | ✅ Pass | Cumulative cap, micro-splitting, cap changes, Sybil accreditation, per-listing scope |
 
 **Total:** 15 attack scenarios, all verified unprofitable
 
