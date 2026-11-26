@@ -263,7 +263,7 @@ kora_list_invoice "$SME_ADDRESS" 1 9500000000 10000000000 "$USDC_TOKEN" 17500000
 
 **Fund the invoice (investor):**
 ```bash
-kora_fund_invoice "$INVESTOR_ADDRESS" 1 4750000000
+kora_fund_invoice "$INVESTOR_ADDRESS" 1 1000000000 "$USDC_TOKEN"
 ```
 
 **Repay:**
