@@ -242,7 +242,7 @@ describe("reporting + ipfs-pinning probes", () => {
   });
 
   it("exposes env-configurable probe URLs", () => {
-    expect(buildDefaultServices().length).toBe(2);
+    expect(buildDefaultServices().length).toBe(5);
   });
 });
 

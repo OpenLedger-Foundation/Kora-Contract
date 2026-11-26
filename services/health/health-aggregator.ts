@@ -142,6 +142,41 @@ export const DEFAULT_SLAS: Record<string, ServiceSlaConfig> = {
     downThresholds: { failedProviders: 999_999 },
     timeoutMs: 3_000,
   },
+  // ── New services (issue #771 expansion) ─────────────────────────────────────
+  /**
+   * timeseries — downsampling lag and ingestion queue depth.
+   *   degraded: downsampling job has not run for >10 min (lagSeconds > 600)
+   *             OR the raw ingest queue is backing up (ingestQueueDepth > 100)
+   *   down:     job stalled for >60 min OR queue depth critical (> 1 000)
+   */
+  timeseries: {
+    degradedThresholds: { lagSeconds: 600, ingestQueueDepth: 100 },
+    downThresholds:     { lagSeconds: 3_600, ingestQueueDepth: 1_000 },
+    timeoutMs: 3_000,
+  },
+  /**
+   * risk-pipeline — batch scoring idempotency and duplicate rates.
+   *   degraded: duplicate score submissions detected (duplicateRate > 0, < 5 %)
+   *             OR scoring backlog building (scoringBacklogDepth > 20)
+   *   down:     duplicate rate ≥ 5 % (may flip tiers) OR backlog critical (> 200)
+   */
+  "risk-pipeline": {
+    degradedThresholds: { duplicateRate: 1, scoringBacklogDepth: 20 },
+    downThresholds:     { duplicateRate: 5, scoringBacklogDepth: 200 },
+    timeoutMs: 3_000,
+  },
+  /**
+   * governance-sandbox — proposal simulation service.
+   *   degraded: snapshot store approaching capacity (snapshotCount > 5 000)
+   *             OR average simulation latency elevated (simLatencyMs > 2 000)
+   *   down:     store full / unavailable (snapshotCount > 50 000)
+   *             OR simulations timing out (simLatencyMs > 10 000)
+   */
+  "governance-sandbox": {
+    degradedThresholds: { snapshotCount: 5_000, simLatencyMs: 2_000 },
+    downThresholds:     { snapshotCount: 50_000, simLatencyMs: 10_000 },
+    timeoutMs: 3_000,
+  },
 };
 
 export const HEALTH_SCHEMA_VERSION = "1.1.0";
@@ -155,10 +190,25 @@ export function ipfsPinningProbeUrl(): string {
   return process.env.IPFS_PINNING_URL ?? "http://ipfs-pinning:8080/health";
 }
 
-/** Default upstream descriptors including reporting + ipfs-pinning probes. */
+export function timeseriesProbeUrl(): string {
+  return process.env.TIMESERIES_URL ?? "http://timeseries:8080/health";
+}
+
+export function riskPipelineProbeUrl(): string {
+  return process.env.RISK_PIPELINE_URL ?? "http://risk-pipeline:8080/health";
+}
+
+export function governanceSandboxProbeUrl(): string {
+  return process.env.GOVERNANCE_SANDBOX_URL ?? "http://governance-sandbox:8080/health";
+}
+
+/** Default upstream descriptors including all known Kora service probes. */
 export function buildDefaultServices(): UpstreamService[] {
   return [
-    { name: "reporting", url: reportingProbeUrl(), sla: DEFAULT_SLAS.reporting },
-    { name: "ipfs-pinning", url: ipfsPinningProbeUrl(), sla: DEFAULT_SLAS["ipfs-pinning"] },
+    { name: "reporting",          url: reportingProbeUrl(),          sla: DEFAULT_SLAS.reporting },
+    { name: "ipfs-pinning",       url: ipfsPinningProbeUrl(),        sla: DEFAULT_SLAS["ipfs-pinning"] },
+    { name: "timeseries",         url: timeseriesProbeUrl(),         sla: DEFAULT_SLAS.timeseries },
+    { name: "risk-pipeline",      url: riskPipelineProbeUrl(),       sla: DEFAULT_SLAS["risk-pipeline"] },
+    { name: "governance-sandbox", url: governanceSandboxProbeUrl(),  sla: DEFAULT_SLAS["governance-sandbox"] },
   ];
 }
