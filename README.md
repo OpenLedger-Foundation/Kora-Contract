@@ -208,6 +208,28 @@ make deploy-mainnet
 
 ---
 
+## Load Testing
+
+The `infra/load-testing/` harness exercises the marketplace fund path against a
+running API. When surge fee hints are enabled, the fund path must remain
+correct and bounded — see
+[`docs/MEV_RESISTANCE_NOTES.md`](docs/MEV_RESISTANCE_NOTES.md) for the
+surge + load behavior and the documented request budgets.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOAD_TEST_SURGE_HINTS` | `false` | Enable surge fee hints during the fund-path load test |
+| `LOAD_TEST_FUND_CONCURRENCY` | `16` | Concurrent fund requests issued by the harness |
+| `LOAD_TEST_FUND_DURATION_SECS` | `60` | Duration of the fund-path load run |
+| `LOAD_TEST_RPC_BUDGET` | `5000` | Max RPC calls the run may issue before failing closed |
+
+```bash
+# Run the surge-enabled fund-path load test
+LOAD_TEST_SURGE_HINTS=true make load-test-fund
+```
+
+---
+
 ## Example Interactions
 
 After deployment, load the interaction helpers:
@@ -241,119 +263,5 @@ kora_list_invoice "$SME_ADDRESS" 1 9500000000 10000000000 "$USDC_TOKEN" 17500000
 
 **Fund the invoice (investor):**
 ```bash
-kora_fund_invoice "$INVESTOR_ADDRESS" 1 4750000000
+kora_fund_invoice "$INVESTOR_ADDRESS" 1 1000000000 "$USDC_TOKEN"
 ```
-
-**Repay:**
-```bash
-kora_repay "$SME_ADDRESS" 1 "$USDC_TOKEN" 10000000000
-```
-
-**Query state:**
-```bash
-kora_get_invoice 1
-kora_get_pool 1
-kora_get_sme_profile "$SME_ADDRESS"
-```
-
----
-
-## Invoice NFT Data Model
-
-```rust
-pub struct Invoice {
-    pub id: u64,
-    pub sme: Address,
-    pub debtor_hash: Bytes,    // SHA-256 of debtor info — PII stays off-chain
-    pub amount: i128,          // Face value in stroops (7 decimal places)
-    pub currency: Symbol,      // e.g. USDC, EURC
-    pub due_date: u64,         // Unix timestamp
-    pub ipfs_cid: String,      // IPFS CID of full invoice metadata
-    pub risk_score: u32,       // 0–100 (assigned by verifier)
-    pub risk_tier: RiskTier,   // AAA / AA / A / B / C
-    pub status: InvoiceStatus, // Created → Listed → Funded → Repaid | Defaulted
-    pub created_at: u64,
-    pub funded_at: Option<u64>,
-    pub repaid_at: Option<u64>,
-}
-```
-
----
-
-## Risk Tiers
-
-| Tier | Score Range | Description |
-|------|-------------|-------------|
-| AAA  | 0–20        | Lowest risk. Blue-chip debtors, strong SME history. |
-| AA   | 21–40       | Low risk. Established SME, reliable debtor. |
-| A    | 41–60       | Moderate risk. Standard trade finance profile. |
-| B    | 61–80       | Elevated risk. Newer SME or less-known debtor. |
-| C    | 81–100      | High risk. Requires higher yield to attract investors. |
-
----
-
-## Protocol Fees
-
-| Fee | Default | Description |
-|-----|---------|-------------|
-| Marketplace fee | 0.5% (50 bps) | Charged on each investor contribution |
-| Late penalty | 2% (200 bps) | Applied to late repayments |
-
-All fees are configurable by the admin within safe bounds (0–100%).
-
----
-
-## Security
-
-- All state-mutating functions require `require_auth()` on the relevant signer
-- Input validation on all public entry points (amounts, timestamps, scores, strings)
-- Safe arithmetic via `checked_mul` / `checked_div` — no silent overflows
-- Protocol-wide pause mechanism via `access_control`
-- Role-based access: Admin, Operator, Verifier
-- Debtor PII never stored on-chain — only a SHA-256 hash
-- See [docs/SECURITY.md](docs/SECURITY.md) for the full security model
-
----
-
-## Contributing
-
-We welcome contributions from the community. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-## Acknowledgements
-
-Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-world invoice financing gap facing African SMEs and the potential of blockchain infrastructure to close it.
-
-## Handsoff notes
-
-<!-- handsoff-issue-722 -->
-- #722: [High] Implement Partial Repayment Support in Financing Pool
-<!-- handsoff-issue-726 -->
-- #726: [High] Implement Cross-Invoice Portfolio Diversification Cap in Marketplace
-
-<!-- handsoff-issue-727 -->
-- #727: [High] Build Automated Default Detection and Liquidation Trigger
-<!-- handsoff-issue-728 -->
-- #728: [High] Implement Tiered Protocol Fee Structure Based on Investor Volume
-
-<!-- handsoff-issue-733 -->
-- #733: [High] Add Multi-Asset (Multi-Token) Support to Financing Pool
-
-<!-- handsoff-issue-685 -->
-- #685: [High] Add a Regression Test Suite Replaying Historical Testnet Transactions
-
-<!-- handsoff-issue-686 -->
-- #686: [High] Build a Chaos-Testing Harness for Simulated TTL Expiry Mid-Flow
-
-<!-- handsoff-issue-756 -->
-- #756: [High] Build Notification Service for Invoice Lifecycle Events
-
-<!-- handsoff-issue-758 -->
-- #758: [High] Build Debtor Identity Verification Microservice
