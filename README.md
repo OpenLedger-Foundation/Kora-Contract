@@ -388,3 +388,9 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1163 -->
 - #1163: API gateway request idempotency-Key support for fund intents
+
+<!-- handsoff-issue-1165 -->
+- #1165: KYB vendor failover configuration and circuit breaker
+
+<!-- handsoff-issue-1168 -->
+- #1168: Blue-green traffic shadowing for API before cutover
