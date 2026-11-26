@@ -403,3 +403,9 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1156 -->
 - #1156: FX ingestion holiday calendar and weekend gap handling
+
+<!-- handsoff-issue-1142 -->
+- #1142: Add governance_voting snapshot block hash binding tests
+
+<!-- handsoff-issue-1143 -->
+- #1143: Price oracle multi-source median with outlier discard tests
