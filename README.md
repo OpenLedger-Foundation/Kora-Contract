@@ -394,3 +394,12 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1168 -->
 - #1168: Blue-green traffic shadowing for API before cutover
+
+<!-- handsoff-issue-1154 -->
+- #1154: Marketplace listing metadata CID pin verification hook
+
+<!-- handsoff-issue-1155 -->
+- #1155: Risk pipeline score explanation payload for SME dashboard
+
+<!-- handsoff-issue-1156 -->
+- #1156: FX ingestion holiday calendar and weekend gap handling
