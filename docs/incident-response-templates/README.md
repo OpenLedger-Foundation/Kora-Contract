@@ -16,6 +16,26 @@ any template.** Keep those in the approved restricted incident record.
 
 ---
 
+## Suggesting a severity
+
+> Issue #1176.
+
+`scripts/classify_incident_sev.py` suggests a severity and the templates to use
+from a symptoms checklist. The highest-severity symptom wins; the Incident
+Commander confirms the final severity.
+
+```bash
+scripts/classify_incident_sev.py --list                       # symptom ids
+scripts/classify_incident_sev.py --symptom funds_at_risk --symptom protocol_paused
+scripts/classify_incident_sev.py --checklist symptoms.md --json   # "- [x] id" lines
+```
+
+Empty input, unknown symptoms, or a missing checklist fail closed with exit 2
+(`ERR_NO_SYMPTOMS`, `ERR_UNKNOWN_SYMPTOM`, `ERR_CONFIG_MISSING`).
+Tests: `python3 -m unittest scripts/tests/test_classify_incident_sev.py`.
+
+---
+
 ## Required header fields
 
 Every completed message must include:

@@ -12,9 +12,11 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { JobStore } from "./jobStore";
 import { Dispatcher } from "./dispatcher";
 import { Scheduler } from "./scheduler";
+import { LeaseStore } from "./leaseStore";
 import { KeeperConfig } from "./types";
 import { IndexerDeadlineClient } from "./indexerClient";
 import { ListingTtlKeeper } from "./ttlKeeper";
+import { TtlDryRun, dryRunReplacer } from "./dryRun";
 import pino from "pino";
 
 const logger = pino({ name: "keeper" });
@@ -64,10 +66,36 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // ── Dry-run mode (#<keeper-dry-run>) ──────────────────────────────────────
+  // Rehearses the TTL-bump decision read-only and exits without starting the
+  // scheduler/dispatcher, so no transaction is ever submitted. Operators run
+  // this with KEEPER_DRY_RUN=1 before paying for a mass extend.
+  if (process.env.KEEPER_DRY_RUN === "true" || process.env.KEEPER_DRY_RUN === "1") {
+    try {
+      const report = await new TtlDryRun(config).analyze();
+      process.stdout.write(`${JSON.stringify(report, dryRunReplacer)}\n`);
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err: String(err) }, "Keeper TTL dry-run failed");
+      process.exit(1);
+    }
+  }
+
   const store = new JobStore(config.dbPath);
   const dispatcher = new Dispatcher(config);
   const ttlKeeper = new ListingTtlKeeper(config);
-  const scheduler = new Scheduler(store, dispatcher, config, () => ttlKeeper.scan());
+
+  // ── Lease fencing (multi-replica safety) ─────────────────────────────────
+  // When KEEPER_LEASE_DB_PATH is set all replicas share the same lease table
+  // so only one dispatches at a time.  Omit to run in standalone mode.
+  const leasePath = process.env.KEEPER_LEASE_DB_PATH ?? config.dbPath;
+  const holderId  = process.env.KEEPER_HOLDER_ID
+    ?? `${process.env.HOSTNAME ?? "localhost"}-${process.pid}`;
+  const leaseStore = new LeaseStore(leasePath);
+  logger.info({ holderId, leasePath }, "Keeper lease store initialised");
+
+  const dryRun = new TtlDryRun(config);
+  const scheduler = new Scheduler(store, dispatcher, config, () => ttlKeeper.scan(), leaseStore, holderId);
 
   scheduler.start();
 
@@ -97,7 +125,7 @@ async function main(): Promise<void> {
   const clearIngest = (): void => clearInterval(ingestTimer);
 
   // ── Observability HTTP server ────────────────────────────────────────────
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     if (req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
@@ -143,6 +171,20 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Read-only TTL-bump rehearsal: classifies instance vs persistent keys and
+    // reports which need a bump without enqueuing or dispatching anything.
+    if (req.url === "/dry-run") {
+      try {
+        const report = await dryRun.analyze();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(report, dryRunReplacer));
+      } catch (err) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "dry-run failed", detail: String(err) }));
+      }
+      return;
+    }
+
     res.writeHead(404);
     res.end();
   });
@@ -158,6 +200,7 @@ async function main(): Promise<void> {
     clearIngest();
     scheduler.stop();
     store.close();
+    leaseStore.close();
     server.close(() => process.exit(0));
   };
 

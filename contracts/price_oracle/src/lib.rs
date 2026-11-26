@@ -1567,6 +1567,293 @@ mod tests {
         );
     }
 
+    // ── Staleness circuit-breaker on read paths ───────────────────────────────
+    // These tests cover the centralized staleness guard enforced inside
+    // `get_price`.  They verify the acceptance criteria of the heartbeat
+    // staleness bounty:
+    //   • a stale price (age > TTL) is rejected with a typed error
+    //   • a fresh price succeeds
+    //   • `convert` and `convert_with_decimals` both flow through `get_price`
+    //     and therefore also reject stale data
+    //   • the boundary at exactly TTL is accepted (age == TTL → still fresh)
+    //   • the boundary at TTL+1 is rejected (age > TTL → stale)
+    //   • per-pair override is respected on read
+
+    /// Fresh price read succeeds — baseline confirm.
+    #[test]
+    fn test_staleness_circuit_breaker_fresh_read_succeeds() {
+        let (env, _admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "BTC");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder, &base, &quote, &50_000_000_000i128);
+        let result = client.try_get_price(&base, &quote);
+        assert!(result.is_ok(), "fresh price must succeed");
+        assert_eq!(result.unwrap().price, 50_000_000_000i128);
+    }
+
+    /// A price whose age is exactly MAX_STALENESS_SECS is still considered
+    /// fresh (age == TTL → boundary is inclusive on the fresh side).
+    #[test]
+    fn test_staleness_circuit_breaker_exactly_at_ttl_boundary_accepted() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "ETH");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_max_staleness(&admin, &base, &quote, &100u64);
+        client.set_price(&feeder, &base, &quote, &3_000_000_000i128);
+
+        // Advance exactly to the TTL boundary
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 100,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let result = client.try_get_price(&base, &quote);
+        assert!(
+            result.is_ok(),
+            "price at exactly TTL boundary must be accepted (age == TTL is fresh)"
+        );
+    }
+
+    /// One second past the TTL boundary flips the price to stale.
+    /// The error must be the typed `AllFeedsStale` variant — not a panic or
+    /// host trap — so callers can distinguish it from other failures.
+    #[test]
+    fn test_staleness_circuit_breaker_one_second_past_ttl_rejected_typed_error() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "ETH");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_max_staleness(&admin, &base, &quote, &100u64);
+        client.set_price(&feeder, &base, &quote, &3_000_000_000i128);
+
+        // TTL+1 → stale
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 101,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let result = client.try_get_price(&base, &quote);
+        assert!(result.is_err(), "price one second past TTL must be rejected");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PriceOracleError::AllFeedsStale,
+            "stale read must surface the typed AllFeedsStale error, not a panic"
+        );
+    }
+
+    /// `convert` flows through `get_price` and therefore must also reject
+    /// stale prices.  A stale backing price must block the conversion, not
+    /// silently return a stale converted amount.
+    #[test]
+    fn test_staleness_circuit_breaker_convert_rejects_stale_price() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "EURC");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_max_staleness(&admin, &base, &quote, &300u64);
+        client.set_price(&feeder, &base, &quote, &11_000_000i128);
+
+        // Advance past TTL so the backing price becomes stale
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 301,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let result = client.try_convert(&10_000_000i128, &base, &quote);
+        assert!(
+            result.is_err(),
+            "convert must reject when the backing oracle price is stale"
+        );
+    }
+
+    /// `convert_with_decimals` flows through `get_price` and must also reject
+    /// stale prices regardless of the decimal rescaling path.
+    #[test]
+    fn test_staleness_circuit_breaker_convert_with_decimals_rejects_stale_price() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "EURC");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_max_staleness(&admin, &base, &quote, &300u64);
+        client.set_price(&feeder, &base, &quote, &11_000_000i128);
+
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 301,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+
+        let result = client.try_convert_with_decimals(&10_000_000i128, &base, &quote, &7u32, &7u32);
+        assert!(
+            result.is_err(),
+            "convert_with_decimals must reject when backing oracle price is stale"
+        );
+    }
+
+    /// Two independent feeders: one goes stale, one stays fresh.
+    /// With the default quorum floor (2), a single fresh feeder must trigger
+    /// `InsufficientFreshFeeders`, not silently serve the manipulable single price.
+    #[test]
+    fn test_staleness_circuit_breaker_partial_staleness_triggers_quorum_error() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder1, client) = setup();
+        // Restore default quorum of 2 (setup() sets it to 1 for unrelated tests)
+        client.set_min_fresh_feeders(&admin, &2u32);
+        let feeder2 = soroban_sdk::testutils::Address::generate(&env);
+        client.add_feeder(&admin, &feeder2);
+
+        let base = Symbol::new(&env, "XRP");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder1, &base, &quote, &1_000_000i128);
+        client.set_price(&feeder2, &base, &quote, &1_050_000i128);
+
+        // Advance past TTL — feeder2 resubmits (fresh); feeder1 goes stale
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + MAX_STALENESS_SECS + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        client.set_price(&feeder2, &base, &quote, &1_050_000i128);
+
+        let result = client.try_get_price(&base, &quote);
+        // Only feeder2 is fresh; default quorum is 2 → InsufficientFreshFeeders
+        assert!(
+            result.is_err(),
+            "single fresh feeder below quorum must be rejected"
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PriceOracleError::InsufficientFreshFeeders,
+            "partial staleness with quorum=2 must surface InsufficientFreshFeeders"
+        );
+    }
+
+    /// Per-pair staleness override is respected on the read path: a tighter TTL
+    /// causes rejection sooner than the global default would.
+    #[test]
+    fn test_staleness_circuit_breaker_per_pair_override_tightens_read_window() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "SOL");
+        let quote = Symbol::new(&env, "USDC");
+        // Override to a very short 60-second TTL for this volatile pair
+        client.set_max_staleness(&admin, &base, &quote, &60u64);
+        client.set_price(&feeder, &base, &quote, &100_000_000i128);
+
+        // 59 seconds: still fresh under tight TTL
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 59,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        assert!(
+            client.try_get_price(&base, &quote).is_ok(),
+            "price at 59s must pass a 60s TTL override"
+        );
+
+        // 61 seconds: stale (global 3600s would still pass, but per-pair override wins)
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 2, // now 61s from submission
+            protocol_version: 21,
+            sequence_number: 3,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        let result = client.try_get_price(&base, &quote);
+        assert!(
+            result.is_err(),
+            "per-pair TTL override must reject before the global 3600s would"
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PriceOracleError::AllFeedsStale,
+            "per-pair override staleness must surface AllFeedsStale"
+        );
+    }
+
+    /// Verify the global default TTL (MAX_STALENESS_SECS) used when no
+    /// per-pair override is set.  Price at exactly MAX_STALENESS_SECS is
+    /// accepted; at MAX_STALENESS_SECS+1 it is rejected.
+    #[test]
+    fn test_staleness_circuit_breaker_global_default_ttl_boundary() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, _admin, feeder, client) = setup();
+        let base = Symbol::new(&env, "ADA");
+        let quote = Symbol::new(&env, "USDC");
+        client.set_price(&feeder, &base, &quote, &500_000i128);
+
+        // Advance exactly to global MAX_STALENESS_SECS
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + MAX_STALENESS_SECS,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        assert!(
+            client.try_get_price(&base, &quote).is_ok(),
+            "price at exactly global MAX_STALENESS_SECS must be accepted"
+        );
+
+        // Advance one more second → stale
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + 1,
+            protocol_version: 21,
+            sequence_number: 3,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1000,
+            min_persistent_entry_ttl: 1000,
+            max_entry_ttl: 100_000,
+        });
+        let result = client.try_get_price(&base, &quote);
+        assert!(result.is_err(), "price one second past global TTL must be rejected");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            PriceOracleError::AllFeedsStale,
+        );
+    }
+
     /// Verify the bubble-sort median path still works under MAX_FEEDERS entries
     /// (bound respected, no unbounded iteration).
     #[test]

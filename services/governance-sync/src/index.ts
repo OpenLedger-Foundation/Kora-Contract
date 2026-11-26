@@ -18,6 +18,7 @@ import axios, { AxiosInstance } from 'axios';
 import pino from 'pino';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -84,6 +85,7 @@ export enum GovernanceErrorCode {
   DECODING_ERROR = 'DECODING_ERROR',
   CONTRACT_ERROR = 'CONTRACT_ERROR',
   CONFIG_ERROR = 'CONFIG_ERROR',
+  NON_CANONICAL_PAYLOAD = 'NON_CANONICAL_PAYLOAD',
 }
 
 export class GovernanceSyncError extends Error {
@@ -227,13 +229,88 @@ export function proposalPayload(proposal: Proposal): ProposalPayload {
   };
 }
 
+// ── Payload canonicalization (issue #1185) ───────────────────────────────────
+//
+// Equivalent proposal payloads must hash/sign to the same bytes, otherwise
+// votes split across "different" proposals that describe the same action.
+// Canonical form:
+//   * exactly the CANONICAL_PAYLOAD_FIELDS, emitted in sorted key order;
+//   * strings Unicode-NFC normalized with CRLF/CR line endings folded to LF;
+//   * numbers must be non-negative safe integers (no floats, -0, NaN, 1e3 drift);
+//   * unknown, missing or wrongly-typed fields fail closed.
+// The signed message is domain-separated with a versioned prefix.
+
+export const PROPOSAL_PAYLOAD_DOMAIN = 'KORA_GOVERNANCE_PROPOSAL_V1';
+
+const STRING_PAYLOAD_FIELDS = new Set<keyof ProposalPayload>([
+  'proposer',
+  'title',
+  'description',
+  'proposal_type',
+  'voting_mode',
+]);
+
+function nonCanonical(message: string): GovernanceSyncError {
+  return new GovernanceSyncError(GovernanceErrorCode.NON_CANONICAL_PAYLOAD, message);
+}
+
+/** Returns a canonical copy of `payload`; throws NON_CANONICAL_PAYLOAD on invalid input. */
+export function canonicalizeProposalPayload(payload: unknown): ProposalPayload {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw nonCanonical('Proposal payload must be an object');
+  }
+  const record = payload as Record<string, unknown>;
+  const allowed = new Set<string>(CANONICAL_PAYLOAD_FIELDS);
+  const unknownFields = Object.keys(record).filter((key) => !allowed.has(key));
+  if (unknownFields.length > 0) {
+    throw nonCanonical(`Unknown proposal payload fields: ${unknownFields.sort().join(', ')}`);
+  }
+  const out: Record<string, string | number> = {};
+  for (const field of [...CANONICAL_PAYLOAD_FIELDS].sort()) {
+    const value = record[field];
+    if (value === undefined) throw nonCanonical(`Missing proposal payload field: ${field}`);
+    if (STRING_PAYLOAD_FIELDS.has(field)) {
+      if (typeof value !== 'string') throw nonCanonical(`Field ${field} must be a string`);
+      out[field] = value.replace(/\r\n?/g, '\n').normalize('NFC');
+    } else {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
+        throw nonCanonical(`Field ${field} must be a non-negative safe integer`);
+      }
+      out[field] = value;
+    }
+  }
+  return out as unknown as ProposalPayload;
+}
+
+/** Deterministic, domain-separated bytes to hash/sign for a proposal payload. */
+export function canonicalProposalMessage(payload: unknown): Buffer {
+  const canonical = canonicalizeProposalPayload(payload);
+  // Keys are inserted in sorted order above, so JSON.stringify is deterministic.
+  return Buffer.from(`${PROPOSAL_PAYLOAD_DOMAIN}\n${JSON.stringify(canonical)}`, 'utf8');
+}
+
+/** SHA-256 hex of the canonical proposal message. */
+export function proposalPayloadHash(payload: unknown): string {
+  return createHash('sha256').update(canonicalProposalMessage(payload)).digest('hex');
+}
+
 export function detectProposalDivergence(
   canonical: Proposal,
   offchain: ProposalPayload,
 ): ProposalDivergence | null {
   const canonicalPayload = proposalPayload(canonical);
+  // Compare canonical forms so encoding-only differences (NFD vs NFC, CRLF vs
+  // LF) are not reported as divergence; a non-canonicalizable off-chain
+  // payload diverges on every field it cannot represent.
+  const left = canonicalizeProposalPayload(canonicalPayload);
+  let right: ProposalPayload | null = null;
+  try {
+    right = canonicalizeProposalPayload(offchain);
+  } catch {
+    right = null;
+  }
   const fields = CANONICAL_PAYLOAD_FIELDS.filter(
-    (field) => canonicalPayload[field] !== offchain[field],
+    (field) => right === null || left[field] !== right[field],
   );
   return fields.length > 0
     ? { proposalId: canonical.id, fields, canonical: canonicalPayload, offchain }

@@ -208,6 +208,28 @@ make deploy-mainnet
 
 ---
 
+## Load Testing
+
+The `infra/load-testing/` harness exercises the marketplace fund path against a
+running API. When surge fee hints are enabled, the fund path must remain
+correct and bounded — see
+[`docs/MEV_RESISTANCE_NOTES.md`](docs/MEV_RESISTANCE_NOTES.md) for the
+surge + load behavior and the documented request budgets.
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOAD_TEST_SURGE_HINTS` | `false` | Enable surge fee hints during the fund-path load test |
+| `LOAD_TEST_FUND_CONCURRENCY` | `16` | Concurrent fund requests issued by the harness |
+| `LOAD_TEST_FUND_DURATION_SECS` | `60` | Duration of the fund-path load run |
+| `LOAD_TEST_RPC_BUDGET` | `5000` | Max RPC calls the run may issue before failing closed |
+
+```bash
+# Run the surge-enabled fund-path load test
+LOAD_TEST_SURGE_HINTS=true make load-test-fund
+```
+
+---
+
 ## Example Interactions
 
 After deployment, load the interaction helpers:
@@ -241,7 +263,7 @@ kora_list_invoice "$SME_ADDRESS" 1 9500000000 10000000000 "$USDC_TOKEN" 17500000
 
 **Fund the invoice (investor):**
 ```bash
-kora_fund_invoice "$INVESTOR_ADDRESS" 1 4750000000
+kora_fund_invoice "$INVESTOR_ADDRESS" 1 1000000000 "$USDC_TOKEN"
 ```
 
 **Repay:**
@@ -357,3 +379,36 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1161 -->
+- #1161: Reporting service CSV export for treasury transparency endpoints
+
+<!-- handsoff-issue-1162 -->
+- #1162: Health service dependency graph visualization data endpoint
+
+<!-- handsoff-issue-1163 -->
+- #1163: API gateway request idempotency-Key support for fund intents
+
+<!-- handsoff-issue-1165 -->
+- #1165: KYB vendor failover configuration and circuit breaker
+
+<!-- handsoff-issue-1168 -->
+- #1168: Blue-green traffic shadowing for API before cutover
+
+<!-- handsoff-issue-1154 -->
+- #1154: Marketplace listing metadata CID pin verification hook
+
+<!-- handsoff-issue-1155 -->
+- #1155: Risk pipeline score explanation payload for SME dashboard
+
+<!-- handsoff-issue-1156 -->
+- #1156: FX ingestion holiday calendar and weekend gap handling
+
+<!-- handsoff-issue-1142 -->
+- #1142: Add governance_voting snapshot block hash binding tests
+
+<!-- handsoff-issue-1143 -->
+- #1143: Price oracle multi-source median with outlier discard tests
+
+<!-- handsoff-issue-1159 -->
+- #1159: Offchain-voting quorum preview API before ballot close

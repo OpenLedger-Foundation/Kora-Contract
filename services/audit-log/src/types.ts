@@ -14,7 +14,8 @@ export type AuditService =
   | "kyb"
   | "debtor-verification"
   | "reporting"
-  | "admin-relay";
+  | "admin-relay"
+  | "feature-flags";
 
 /** Canonical action categories for off-chain privileged operations. */
 export type AuditAction =
@@ -38,7 +39,15 @@ export type AuditAction =
   | "admin.relay.transaction.confirmed"
   // Reporting
   | "reporting.export.requested"
-  | "reporting.export.completed";
+  | "reporting.export.completed"
+  // Feature flags (#1116) — every mutation, and every rejected attempt
+  | "feature-flag.created"
+  | "feature-flag.enabled"
+  | "feature-flag.disabled"
+  | "feature-flag.rules-updated"
+  | "feature-flag.deleted"
+  | "feature-flag.bulk-updated"
+  | "feature-flag.mutation-rejected";
 
 /** A single audit record — PII-free; only hashes/references allowed. */
 export interface AuditRecord {

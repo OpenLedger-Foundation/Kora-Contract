@@ -1,4 +1,10 @@
-import { DEFAULT_PINNING_CONFIG, sha256Hex, PinningService } from "../src/service";
+import {
+  contentMatchesType,
+  DEFAULT_PINNING_CONFIG,
+  normalizeContentType,
+  sha256Hex,
+  PinningService,
+} from "../src/service";
 import {
   HttpPinProvider,
   InMemoryPinProvider,
@@ -218,5 +224,111 @@ describe("ipfs-pinning (issue #754)", () => {
     expect(out2.failed).toContain(res.cid);
     expect(alerts.length).toBeGreaterThan(0);
     store.close();
+  });
+});
+
+describe("content-type allowlist (issue #1186)", () => {
+  const providers = () => [new InMemoryPinProvider("a"), new InMemoryPinProvider("b")];
+  const bytesReq = (bytes: Uint8Array, filename: string, contentType: string) => ({
+    filename,
+    content: bytes,
+    contentType,
+    claimedSha256Hex: sha256Hex(bytes),
+    piiHandled: true,
+  });
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0]);
+  const PDF = new TextEncoder().encode("%PDF-1.7\n...");
+
+  test("accepts allowlisted types whose content matches", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store);
+    await expect(svc.upload(bytesReq(PNG, "scan.png", "image/png"))).resolves.toHaveProperty("cid");
+    await expect(svc.upload(bytesReq(JPEG, "scan.JPEG", "image/jpeg"))).resolves.toHaveProperty("cid");
+    await expect(svc.upload(bytesReq(PDF, "invoice.pdf", "application/pdf"))).resolves.toHaveProperty("cid");
+    store.close();
+  });
+
+  test("normalizes case and utf-8 charset parameter", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store);
+    await expect(
+      svc.upload(req('{"invoice":9}', { contentType: " Application/JSON; charset=\"UTF-8\" " })),
+    ).resolves.toHaveProperty("cid");
+    store.close();
+  });
+
+  test("rejects unknown MIME parameters and missing type", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store);
+    await expect(
+      svc.upload(req('{"a":1}', { contentType: "application/json; charset=latin1" })),
+    ).rejects.toThrow(/UNSUPPORTED_TYPE/);
+    await expect(
+      svc.upload(req('{"a":1}', { contentType: "application/json; boundary=x" })),
+    ).rejects.toThrow(/UNSUPPORTED_TYPE/);
+    await expect(svc.upload(req('{"a":1}', { contentType: "" }))).rejects.toThrow(/UNSUPPORTED_TYPE/);
+    await expect(svc.upload(req("<svg/>", { contentType: "image/svg+xml", filename: "x.svg" }))).rejects.toThrow(
+      /UNSUPPORTED_TYPE/,
+    );
+    store.close();
+  });
+
+  test("rejects extension that does not belong to the declared type", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store);
+    await expect(svc.upload(bytesReq(PNG, "scan.pdf", "image/png"))).rejects.toThrow(
+      /EXTENSION_TYPE_MISMATCH/,
+    );
+    store.close();
+  });
+
+  test("rejects disguised HTML / non-JSON / invalid UTF-8 content", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store);
+    const html = new TextEncoder().encode("<html><script>alert(1)</script></html>");
+    await expect(svc.upload(bytesReq(html, "scan.png", "image/png"))).rejects.toThrow(/CONTENT_TYPE_MISMATCH/);
+    await expect(svc.upload(bytesReq(html, "scan.jpg", "image/jpeg"))).rejects.toThrow(/CONTENT_TYPE_MISMATCH/);
+    await expect(svc.upload(bytesReq(html, "i.pdf", "application/pdf"))).rejects.toThrow(/CONTENT_TYPE_MISMATCH/);
+    await expect(svc.upload(bytesReq(html, "i.json", "application/json"))).rejects.toThrow(/CONTENT_TYPE_MISMATCH/);
+    const badUtf8 = new Uint8Array([0x22, 0xff, 0x22]);
+    await expect(svc.upload(bytesReq(badUtf8, "i.json", "application/json"))).rejects.toThrow(/CONTENT_TYPE_MISMATCH/);
+    expect(store.listDeadLetters()).toHaveLength(0);
+    store.close();
+  });
+
+  test("enforces per-content-type size caps", async () => {
+    const store = new PinStore();
+    const svc = new PinningService(providers(), store, {
+      ...DEFAULT_PINNING_CONFIG,
+      maxSizeBytesByContentType: { "application/json": 8 },
+    });
+    await expect(svc.upload(req('{"invoice":123}'))).rejects.toThrow(/FILE_TOO_LARGE: 15 > 8/);
+    await expect(svc.upload(bytesReq(PNG, "scan.png", "image/png"))).resolves.toHaveProperty("cid");
+    store.close();
+  });
+
+  test("fails closed on empty or invalid allowlist configuration", () => {
+    const store = new PinStore();
+    const base = DEFAULT_PINNING_CONFIG;
+    expect(() => new PinningService(providers(), store, { ...base, allowedContentTypes: [] })).toThrow(/CONFIG_ERROR/);
+    expect(() => new PinningService(providers(), store, { ...base, allowedExtensions: [] })).toThrow(/CONFIG_ERROR/);
+    expect(() => new PinningService(providers(), store, { ...base, maxFileSizeBytes: 0 })).toThrow(/CONFIG_ERROR/);
+    expect(
+      () => new PinningService(providers(), store, { ...base, allowedContentTypes: ["text/html"] }),
+    ).toThrow(/CONFIG_ERROR/);
+    expect(
+      () =>
+        new PinningService(providers(), store, {
+          ...base,
+          maxSizeBytesByContentType: { "application/json": -1 },
+        }),
+    ).toThrow(/CONFIG_ERROR/);
+    store.close();
+  });
+
+  test("unknown types never pass content sniffing", () => {
+    expect(contentMatchesType("text/html", new Uint8Array([1]))).toBe(false);
+    expect(normalizeContentType("IMAGE/PNG;")).toBe("image/png");
   });
 });

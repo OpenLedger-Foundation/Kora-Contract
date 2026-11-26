@@ -101,8 +101,27 @@ The web invoice wizard talks to this service through `apps/web/src/services/ipfs
 
 Errors are returned as `{"error": "<CODE>", "message": "...", "providers": [...]}`
 with codes mirroring the pipeline (`FILE_TOO_LARGE`, `EMPTY_FILE`,
-`UNSUPPORTED_TYPE`, `UNSUPPORTED_EXTENSION`, `INTEGRITY_MISMATCH`,
-`PII_NOT_HANDLED`, `PIN_FAILED`). Duplicate pins of the same content hash are
+`UNSUPPORTED_TYPE`, `UNSUPPORTED_EXTENSION`, `EXTENSION_TYPE_MISMATCH`,
+`CONTENT_TYPE_MISMATCH`, `INTEGRITY_MISMATCH`, `PII_NOT_HANDLED`, `PIN_FAILED`).
+
+### Content-type allowlist (issue #1186)
+
+Pinned invoice metadata is restricted to `application/pdf`,
+`application/json`, `image/png` and `image/jpeg`:
+
+- The declared type is normalized (case, whitespace, `charset=utf-8` only);
+  any other MIME parameter is rejected as `UNSUPPORTED_TYPE`.
+- The filename extension must belong to the declared type
+  (`EXTENSION_TYPE_MISMATCH`, e.g. `invoice.pdf` declared as `image/png`).
+- Content is sniffed after the integrity check: PDF/PNG/JPEG magic bytes, and
+  strict UTF-8 + `JSON.parse` for JSON (`CONTENT_TYPE_MISMATCH`). This blocks
+  HTML/SVG/script blobs disguised as allowlisted types from being served as
+  active content by gateways.
+- `maxSizeBytesByContentType` adds per-type caps under `maxFileSizeBytes`
+  (default: JSON metadata ≤ 256 KiB) to protect pin quota.
+- Misconfiguration fails closed at construction with `CONFIG_ERROR`: empty
+  allowlists, a non-positive size cap, or an allowlisted type with no sniffing
+  rule. Duplicate pins of the same content hash are
 idempotent: the CID is SHA-256-derived and the pin record is upserted.
 
 Client configuration: set `VITE_IPFS_PINNING_URL` in `apps/web` (see

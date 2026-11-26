@@ -1,0 +1,144 @@
+name: Indexer Docker Smoke
+
+# Builds the community indexer Docker image and verifies the health endpoint
+# responds with HTTP 200 inside a Compose stack.
+#
+# Runs on every push/PR that touches the indexer source, Dockerfile, or
+# docker-compose.yml so regressions are caught before they reach main.
+#
+# This job is intentionally isolated from the main CI workflow so the Docker
+# build time (≈4 min) does not block faster Rust/lint checks.
+
+on:
+  push:
+    branches: ["main", "feature/**", "fix/**"]
+    paths:
+      - "services/indexer/**"
+      - "packaging/Dockerfile"
+      - "packaging/docker-compose.yml"
+      - ".github/workflows/indexer-docker-smoke.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "services/indexer/**"
+      - "packaging/Dockerfile"
+      - "packaging/docker-compose.yml"
+      - ".github/workflows/indexer-docker-smoke.yml"
+
+env:
+  COMPOSE_FILE: packaging/docker-compose.yml
+
+jobs:
+  docker-smoke:
+    name: docker build + health smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Build the image ──────────────────────────────────────────────────────
+      - name: Build kora-indexer Docker image
+        run: |
+          docker build \
+            -t kora-indexer:smoke \
+            -f packaging/Dockerfile \
+            .
+
+      # ── Write a minimal .env for the Compose stack ───────────────────────────
+      # The indexer would normally abort on missing SOROBAN_RPC_URL, but the
+      # smoke test only verifies that the binary starts and the HTTP layer is
+      # reachable. We supply a deliberately invalid RPC URL; the health endpoint
+      # returns 200 regardless of RPC connectivity.
+      - name: Write smoke .env
+        run: |
+          cat > .env <<'EOF'
+          STELLAR_NETWORK=testnet
+          SOROBAN_RPC_URL=http://smoke-placeholder:8000/soroban/rpc
+          CONTRACT_INVOICE_NFT=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_MARKETPLACE=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_FINANCING_POOL=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_RISK_REGISTRY=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_PRICE_ORACLE=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_GOVERNANCE=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          CONTRACT_ACCESS_CONTROL=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          EOF
+
+      # ── Start the Compose stack ──────────────────────────────────────────────
+      # The indexer image was already built above; override it so Compose does
+      # not attempt a second build from the registry.
+      - name: Start Compose stack
+        run: |
+          docker compose -f packaging/docker-compose.yml \
+            up -d --no-build \
+            --scale postgres=1 --scale indexer=1
+        env:
+          INDEXER_IMAGE: kora-indexer:smoke
+
+      # ── Wait for Postgres to be healthy ─────────────────────────────────────
+      - name: Wait for Postgres health check
+        run: |
+          echo "Waiting for Postgres to become healthy..."
+          for i in $(seq 1 30); do
+            status=$(docker compose -f packaging/docker-compose.yml \
+              ps --format json postgres 2>/dev/null \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('Health',''))" \
+              2>/dev/null || echo "")
+            if [ "$status" = "healthy" ]; then
+              echo "Postgres is healthy after ${i} attempts."
+              break
+            fi
+            echo "  attempt $i: status='$status'"
+            sleep 2
+          done
+
+      # ── Smoke: health endpoint ────────────────────────────────────────────────
+      # The indexer exposes port 3000. Retry up to 20 times with 3-second delay
+      # to give the binary time to boot and bind.
+      - name: Smoke test: GET /api/v1/health returns HTTP 200
+        run: |
+          echo "Waiting for indexer health endpoint..."
+          for i in $(seq 1 20); do
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 5 \
+              http://localhost:3000/api/v1/health || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "Health check passed on attempt $i (HTTP $http_code)."
+              exit 0
+            fi
+            echo "  attempt $i: HTTP $http_code"
+            sleep 3
+          done
+          echo "FAILED: health endpoint did not return 200 within 60 seconds."
+          docker compose -f packaging/docker-compose.yml logs indexer
+          exit 1
+
+      # ── Smoke: health response body ───────────────────────────────────────────
+      - name: Smoke test: health response contains status ok
+        run: |
+          body=$(curl -s --max-time 5 http://localhost:3000/api/v1/health)
+          echo "Response body: $body"
+          echo "$body" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          assert d.get('status') == 'ok', f'Expected status=ok, got: {d}'
+          print('Health response validated.')
+          "
+
+      # ── Smoke: metrics endpoint ────────────────────────────────────────────────
+      - name: Smoke test: GET /metrics returns Prometheus text
+        run: |
+          body=$(curl -s --max-time 5 http://localhost:3000/metrics)
+          echo "$body" | grep -q 'kora_indexer_lag_seconds' || {
+            echo "FAILED: /metrics did not contain expected kora_indexer_lag_seconds line."
+            echo "Response: $body"
+            exit 1
+          }
+          echo "Metrics endpoint validated."
+
+      # ── Teardown ───────────────────────────────────────────────────────────────
+      - name: Tear down Compose stack
+        if: always()
+        run: |
+          docker compose -f packaging/docker-compose.yml down -v --remove-orphans
+          docker rmi kora-indexer:smoke || true

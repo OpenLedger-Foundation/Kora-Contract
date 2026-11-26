@@ -46,6 +46,7 @@ NGN, KES, GHS, ZAR, TZS, UGX, XOF, EGP (configurable via `FX_CURRENCIES`)
 | `EXCHANGE_RATE_API_KEY` | _(required)_ | exchangerate-api.com API key |
 | `CURRENCY_API_KEY` | _(required)_ | currencyapi.com API key |
 | `FX_MAX_STALENESS_SECONDS` | `3600` | Max rate age before staleness rejection |
+| `FX_METRICS_PORT` | `8081` | Port for the Prometheus `/metrics` scrape endpoint |
 
 In deployed environments, inject `FX_RELAY_SECRET`, provider API keys, and any
 RPC credentials from the environment-specific `/kora/<environment>/fx-ingestion`
@@ -76,3 +77,109 @@ npm test
 ```
 
 Minimum 90% coverage enforced. All HTTP calls are mockable via the `FxSource` interface.
+
+---
+
+## Surge pricing monitor & fee hints (#1034)
+
+The same process runs a lightweight Stellar surge-pricing monitor
+(`src/fee-monitor.ts`) and serves advisory fee hints (`src/fee-hint-server.ts`),
+as recommended in [`docs/MEV_RESISTANCE_NOTES.md` §4.2](../../docs/MEV_RESISTANCE_NOTES.md#42-operational-best-practices).
+
+```
+Soroban RPC getFeeStats ──(poll)──► SurgePricingMonitor ──► GET /network/fee-hint
+                                                      └──► GET /metrics (kora_surge_pricing_active, …)
+```
+
+- **Detection:** every poll takes the larger `p90` of the classic
+  (`inclusionFee`) and Soroban (`sorobanInclusionFee`) distributions and
+  divides it by the 100-stroop network minimum. A surge episode is active while
+  that multiplier is `>= FEE_HINT_SURGE_THRESHOLD_BPS` (default 1.5x). Episodes
+  start/end on poll boundaries, so `kora_surge_pricing_active` and
+  `kora_surge_episodes_total` change within one poll interval.
+- **Clamp:** the multiplier is clamped to `[1.0x, FEE_HINT_MAX_MULTIPLIER_BPS]`.
+- **Degraded mode:** if `getFeeStats` errors, the service keeps running and
+  serves the last-known-good hint (or 1.0x if none) with `degraded: true`,
+  `stale: true` and header `X-Fee-Hint-Degraded: true`.
+- **Flat stats:** if the RPC reports the same `latestLedger` as the previous
+  poll, the reading is ignored and last-known-good is served with
+  `X-Fee-Hint-Stale: true`. Hints older than `FEE_HINT_STALE_AFTER_MS` are also
+  marked stale; `Age` reports seconds since observation.
+- **Keys:** the monitor receives only `STELLAR_RPC_URL`. It never sees
+  `FX_RELAY_SECRET` or any keeper/relayer key, and the endpoint never exposes
+  configuration.
+- **Rate limiting:** per-client fixed window (`FEE_HINT_RATE_LIMIT` per
+  `FEE_HINT_RATE_LIMIT_WINDOW_MS`) returns `429` + `Retry-After`. The handler
+  only reads cached state, so request volume never reaches the RPC. Keep the
+  public gateway's own limits in front of it as well.
+
+### `GET /network/fee-hint`
+
+```json
+{
+  "network": "testnet",
+  "base_fee": 100,
+  "surge_multiplier_bps": 25000,
+  "surge_multiplier": 2.5,
+  "suggested_fee": 250,
+  "surge_active": true,
+  "observed_at": "2026-11-22T10:15:00.000Z",
+  "latest_ledger": 1185010,
+  "stale": false,
+  "degraded": false,
+  "advisory": true
+}
+```
+
+Hints are **advisory**: a higher inclusion fee improves the chance of being
+included during congestion but guarantees neither inclusion nor ordering.
+
+### Fee denomination: testnet vs pubnet
+
+Both networks denominate inclusion fees in **stroops** (1 XLM = 10^7 stroops)
+with a 100-stroop minimum per operation, so `base_fee`/`suggested_fee` mean the
+same on both. Differences are in *level*, not unit: testnet is reset
+periodically and rarely congested, so surge episodes are mostly seen on
+pubnet. Soroban resource fees (CPU, I/O, rent) are computed by
+`simulateTransaction`/`prepareTransaction` and are **not** scaled by the hint.
+Set `STELLAR_NETWORK` so the hint labels which network it describes.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `FEE_HINT_ENABLED` | `true` | Set `false` to disable the monitor and endpoint |
+| `STELLAR_RPC_URL` | `https://soroban-testnet.stellar.org` | Soroban RPC polled for `getFeeStats` (shared with the relay) |
+| `STELLAR_NETWORK` | `testnet` | Network label reported in the hint |
+| `FEE_HINT_PORT` | `8089` | HTTP port for `/network/fee-hint` and `/metrics` |
+| `FEE_HINT_POLL_INTERVAL_MS` | `15000` | Fee-stats poll interval; also `Cache-Control: max-age` |
+| `FEE_HINT_SURGE_THRESHOLD_BPS` | `15000` | Multiplier at/above which surge is active (1.5x) |
+| `FEE_HINT_MAX_MULTIPLIER_BPS` | `100000` | Upper clamp for the suggested multiplier (10x) |
+| `FEE_HINT_STALE_AFTER_MS` | `3 x poll interval` | Age after which a hint is reported stale |
+| `FEE_HINT_RATE_LIMIT` | `60` | Requests per client per window |
+| `FEE_HINT_RATE_LIMIT_WINDOW_MS` | `60000` | Rate-limit window |
+
+Prometheus scrapes `fx-ingestion:8089/metrics` (`infra/monitoring/prometheus.yml`);
+the "Stellar surge pricing" and "Fee hint multiplier" panels live in
+`infra/monitoring/grafana-dashboard.json`. Tests replay recorded RPC fixtures
+from `tests/fixtures/fee-stats-*.json` (`tests/fee-monitor.test.ts`).
+
+---
+
+## Monitoring (staleness gauges)
+
+The service exposes a Prometheus `/metrics` endpoint on `FX_METRICS_PORT`
+(default `8081`) so monitoring alerts can detect stale FX rates before the
+oracle's on-chain staleness guard rejects them:
+
+- `kora_fx_rate_age_seconds{base,quote}` — seconds since the last successful
+  publication. **No samples yet → a comment is emitted, not a bogus zero**, so a
+  missing series drives alerts (see `infra/monitoring/README.md`).
+- `kora_fx_last_ingestion_timestamp_seconds{base,quote}` — last publication time.
+- `kora_fx_ingestion_cycles_total` — completed ingestion cycles.
+- `kora_fx_publication_skipped_total{reason}` — skipped publications by reason.
+
+Alert rules (`KoraFxRateStale`, `KoraFxRateNeverPublished`, `KoraFxIngestionDown`)
+and the scrape target live in `infra/monitoring/`. Validate with
+`promtool check rules infra/monitoring/alerts.yml` and
+`promtool test rules infra/monitoring/tests/alerts.test.yml`.

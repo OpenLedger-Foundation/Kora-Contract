@@ -530,7 +530,7 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::InvalidAmount);
         }
 
-        let late_penalty_bps: u32 = Self::get_late_penalty_bps(&env);
+        let late_penalty_bps: u32 = Self::late_penalty_bps(&env);
 
         let pool = Pool {
             invoice_id,
@@ -1407,7 +1407,7 @@ impl FinancingPoolContract {
             }
 
             // Apply late penalty if this installment is past its due_date.
-            let penalty_bps = Self::get_late_penalty_bps(env);
+            let penalty_bps = Self::late_penalty_bps(env);
             if !pool.penalty_applied && penalty_bps > 0 {
                 if env.ledger().timestamp() > installment.due_date {
                     let penalty = bps_of(pool.face_value, penalty_bps)?;
@@ -1458,7 +1458,7 @@ impl FinancingPoolContract {
             // The registry value is read here (not from the pool snapshot) so
             // governance can tune penalty rates for existing pools; the pool's
             // stored value is the pre-registry bootstrap default.
-            let penalty_bps = Self::get_late_penalty_bps(env);
+            let penalty_bps = Self::late_penalty_bps(env);
             if !pool.penalty_applied && penalty_bps > 0 {
                 if env.ledger().timestamp() > invoice.due_date {
                     let penalty = bps_of(pool.face_value, penalty_bps)?;
@@ -2982,7 +2982,7 @@ impl FinancingPoolContract {
     /// Read `LatePenaltyBps` from the `parameter_registry` when wired, falling
     /// back to the constructor-stored default (bootstrap value) when the
     /// registry is absent, the key is missing, or the read fails.
-    fn get_late_penalty_bps(env: &Env) -> u32 {
+    fn late_penalty_bps(env: &Env) -> u32 {
         Self::get_registry_bps(env, RegistryParamKey::LatePenaltyBps)
             .unwrap_or_else(|| {
                 env.storage()

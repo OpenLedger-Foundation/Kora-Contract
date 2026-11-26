@@ -338,6 +338,15 @@ Relevant errors:
 | `ParameterProposalNotFound` | No proposal exists with the given id |
 | `ParameterProposalAlreadyExecuted` | Proposal has already been executed |
 
+## Per-investor concentration cap (#435)
+
+`set_max_investor_share_bps(admin, bps)` caps how much of a single listing one address may fund, in basis points of `asking_price`; `0` (default) disables it. The cap is cumulative: the marketplace keeps a running gross (pre-fee) total per `(invoice_id, investor)` in listing-token units, read with `get_gross_contribution(invoice_id, investor)`.
+
+- Each `fund_invoice` adds its listing-token amount (after oracle conversion for cross-currency payments) to the running total. The exact cap is allowed; anything above it fails with `InvestorConcentrationExceeded` and changes no state.
+- The total is recorded even while the cap is disabled, so enabling or lowering the cap later counts prior funding. Lowering it below an existing holding blocks top-ups but never claws funds back.
+- The total is cleared when the investor is refunded (`cancel_listing` or `claim_refund`).
+- The cap is per address and per listing. Sybil resistance comes from accreditation: every funding address must be accredited with `set_investor_accredited`.
+
 ## Protocol-wide debtor concentration limits (#748)
 
 The marketplace tracks gross outstanding funding per debtor hash across invoices in `DebtorExposure(debtor_hash)`. This is separate from the existing per-investor share cap and per-token listing cap. Admins set fixed, nonnegative limits with `set_debtor_tier_cap(admin, tier, cap)`; `0` disables a tier limit. `get_debtor_tier_cap(tier)` and `get_debtor_exposure(debtor_hash)` expose the configured and recorded values.

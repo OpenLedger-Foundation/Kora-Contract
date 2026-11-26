@@ -5,6 +5,41 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
+/// Events requested per page in normal operation.
+pub const DEFAULT_BATCH_SIZE: u64 = 100;
+/// Hard cap on events requested or processed in one backfill batch.
+pub const MAX_BATCH_SIZE: u64 = 1_000;
+/// Hard cap on the RPC response body buffered for one batch.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexerError {
+    /// Requested batch size is zero or above `MAX_BATCH_SIZE`.
+    InvalidBatchSize(u64),
+    /// RPC returned more events than requested.
+    BatchOverflow { returned: usize, limit: u64 },
+    /// RPC body exceeds `MAX_RESPONSE_BYTES`.
+    ResponseTooLarge,
+    /// A single ledger fills the whole batch, so advancing could skip events.
+    LedgerExceedsBatch(u64),
+    Rpc(String),
+}
+
+impl std::fmt::Display for IndexerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for IndexerError {}
+
+fn validate_batch_size(limit: u64) -> Result<(), IndexerError> {
+    if limit == 0 || limit > MAX_BATCH_SIZE {
+        return Err(IndexerError::InvalidBatchSize(limit));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NormalizedEvent {
     pub contract: String,
@@ -216,7 +251,8 @@ impl IndexerService {
         Ok(inserted)
     }
 
-    pub async fn fetch_ledgers(&self, start_ledger: u64, limit: u64) -> Result<(u64, u64), String> {
+    pub async fn fetch_ledgers(&self, start_ledger: u64, limit: u64) -> Result<(u64, u64), IndexerError> {
+        validate_batch_size(limit)?;
         let params = serde_json::json!({
             "startLedger": start_ledger,
             "limit": limit,
@@ -227,29 +263,63 @@ impl IndexerService {
             "method": "getEvents",
             "params": params,
         });
-        let resp: RpcEventsResponse = reqwest::Client::new()
+        let mut resp = reqwest::Client::new()
             .post(&self.rpc_url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("RPC request failed: {}", e))?
-            .json()
+            .map_err(|e| IndexerError::Rpc(format!("RPC request failed: {}", e)))?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| format!("RPC response parse failed: {}", e))?;
+            .map_err(|e| IndexerError::Rpc(format!("RPC response read failed: {}", e)))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(IndexerError::ResponseTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let resp: RpcEventsResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| IndexerError::Rpc(format!("RPC response parse failed: {}", e)))?;
+        self.ingest_batch(resp.events, start_ledger, limit)
+    }
+
+    fn ingest_batch(
+        &self,
+        events: Vec<RpcEvent>,
+        start_ledger: u64,
+        limit: u64,
+    ) -> Result<(u64, u64), IndexerError> {
+        validate_batch_size(limit)?;
+        if events.len() as u64 > limit {
+            return Err(IndexerError::BatchOverflow { returned: events.len(), limit });
+        }
+        // A full page may end mid-ledger: resume at its last ledger (ingest is
+        // idempotent) rather than skipping that ledger's remaining events.
+        let full = events.len() as u64 == limit;
+        let last = events.iter().map(|e| e.ledger).max();
+        if let (true, Some(ledger)) = (full, last) {
+            if ledger <= start_ledger {
+                return Err(IndexerError::LedgerExceedsBatch(ledger));
+            }
+        }
 
         let mut inserted = 0u64;
-        let mut next_cursor = start_ledger;
-        for ev in resp.events {
+        let next_cursor = match last {
+            Some(ledger) if full => ledger,
+            Some(ledger) => ledger.saturating_add(1),
+            None => start_ledger,
+        };
+        for ev in events {
             let payload = serde_json::to_string(&ev.value).unwrap_or_else(|_| "{}".to_string());
             let idx = ev.event_index.unwrap_or(0);
             if self
-                .store
                 .ingest_raw_event(&ev.contract, &ev.event_type, ev.ledger, idx, &payload)
                 .unwrap_or(false)
             {
                 inserted += 1;
             }
-            next_cursor = ev.ledger + 1;
         }
         Ok((inserted, next_cursor))
     }
@@ -257,12 +327,18 @@ impl IndexerService {
     pub async fn run_ingestion_loop(&self, start_ledger: Option<u64>) {
         let mut backoff_ms = 1_000u64;
         let mut cursor = start_ledger.unwrap_or_else(|| self.checkpoint.read() + 1);
+        let mut limit = DEFAULT_BATCH_SIZE;
         loop {
-            match self.fetch_ledgers(cursor, 100).await {
+            match self.fetch_ledgers(cursor, limit).await {
                 Ok((_inserted, next_cursor)) => {
                     cursor = next_cursor;
+                    limit = DEFAULT_BATCH_SIZE;
                     backoff_ms = 1_000;
                     sleep(Duration::from_millis(500)).await;
+                }
+                Err(IndexerError::LedgerExceedsBatch(_)) if limit < MAX_BATCH_SIZE => {
+                    // Dense ledger: widen once, never past the hard cap.
+                    limit = MAX_BATCH_SIZE;
                 }
                 Err(_err) => {
                     backoff_ms = (backoff_ms * 2).min(30_000);
@@ -332,5 +408,57 @@ mod tests {
         let cp2 = FileCheckpoint::new(path);
         assert_eq!(cp2.read(), 42);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn rpc_events(ledgers: &[u64]) -> Vec<RpcEvent> {
+        ledgers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| RpcEvent {
+                ledger: *l,
+                contract: "pool".into(),
+                event_type: "default".into(),
+                event_index: Some(i as u32),
+                value: serde_json::json!({}),
+            })
+            .collect()
+    }
+
+    fn service(name: &str) -> IndexerService {
+        let path = std::env::temp_dir().join(format!("kora_{}_{}", name, std::process::id()));
+        IndexerService::with_rpc(Arc::new(IndexerStore::new()), String::new(), path)
+    }
+
+    #[tokio::test]
+    async fn test_batch_size_hard_cap_rejected_before_rpc() {
+        let s = service("cap");
+        for bad in [0, MAX_BATCH_SIZE + 1, u64::MAX] {
+            assert_eq!(s.fetch_ledgers(1, bad).await, Err(IndexerError::InvalidBatchSize(bad)));
+        }
+        // In-range sizes pass validation and fail only at the (empty) RPC URL.
+        assert!(matches!(s.fetch_ledgers(1, MAX_BATCH_SIZE).await, Err(IndexerError::Rpc(_))));
+    }
+
+    #[test]
+    fn test_batch_cursor_and_replay() {
+        let s = service("cursor");
+        assert_eq!(s.ingest_batch(vec![], 5, 3), Ok((0, 5)));
+        assert_eq!(s.ingest_batch(rpc_events(&[5, 6]), 5, 3), Ok((2, 7)));
+        assert_eq!(s.ingest_batch(rpc_events(&[5, 6]), 5, 3), Ok((0, 7)));
+        assert_eq!(s.ingest_batch(rpc_events(&[8, 9, 9]), 8, 3), Ok((3, 9)));
+    }
+
+    #[test]
+    fn test_oversized_batches_ingest_nothing() {
+        let s = service("oversize");
+        assert_eq!(
+            s.ingest_batch(rpc_events(&[1, 2, 3]), 1, 2),
+            Err(IndexerError::BatchOverflow { returned: 3, limit: 2 })
+        );
+        assert_eq!(
+            s.ingest_batch(rpc_events(&[4, 4]), 4, 2),
+            Err(IndexerError::LedgerExceedsBatch(4))
+        );
+        assert_eq!(s.store.get_checkpoint(), 0);
     }
 }

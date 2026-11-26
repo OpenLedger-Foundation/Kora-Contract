@@ -9,6 +9,7 @@
  */
 
 import { HealthAggregator, HealthFetcher, UpstreamService, DEFAULT_SLAS, buildDefaultServices } from "../health-aggregator";
+import { loadUpstreams } from "../index";
 import { createHealthHttpServer, renderPrometheusMetrics } from "../http-server";
 import { classifyPinningStatus, classifyServiceStatus, rollupStatus } from "../sla-classifier";
 import { ServiceHealthReport, ServiceSlaConfig } from "../types";
@@ -242,7 +243,7 @@ describe("reporting + ipfs-pinning probes", () => {
   });
 
   it("exposes env-configurable probe URLs", () => {
-    expect(buildDefaultServices().length).toBe(2);
+    expect(buildDefaultServices().length).toBe(5);
   });
 });
 
@@ -307,5 +308,20 @@ describe("createHealthHttpServer — smoke (#1024)", () => {
         server.close((err) => (err ? reject(err) : resolve()))
       );
     }
+  });
+});
+
+describe("HEALTH_SERVICES", () => {
+  afterEach(() => delete process.env.HEALTH_SERVICES);
+
+  it("polls everything by default and a subset when set", () => {
+    expect(loadUpstreams(1)).toHaveLength(5);
+    process.env.HEALTH_SERVICES = "indexer, api";
+    expect(loadUpstreams(1).map((s) => s.name)).toEqual(["indexer", "api"]);
+  });
+
+  it.each(["bogus", ","])("rejects %p", (value) => {
+    process.env.HEALTH_SERVICES = value;
+    expect(() => loadUpstreams(1)).toThrow("HEALTH_SERVICES is invalid");
   });
 });

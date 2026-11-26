@@ -3,7 +3,7 @@
 import { Address, SorobanRpc, xdr } from "@stellar/stellar-sdk";
 import { KeeperConfig, Deadline } from "./types";
 
-interface ActiveListing {
+export interface ActiveListing {
   invoiceId: string;
   isActive: boolean;
 }
@@ -13,23 +13,23 @@ interface ListingPage {
   nextCursor: string | null;
 }
 
-interface LedgerEntry {
+export interface LedgerEntry {
   key: xdr.LedgerKey;
   liveUntilLedgerSeq: number;
 }
 
-interface TtlRpc {
+export interface TtlRpc {
   getLedgerEntries(...keys: xdr.LedgerKey[]): Promise<{
     latestLedger: number;
     entries: LedgerEntry[];
   }>;
 }
 
-interface ListingSource {
+export interface ListingSource {
   getActiveListings(): Promise<ActiveListing[]>;
 }
 
-class HttpListingSource implements ListingSource {
+export class HttpListingSource implements ListingSource {
   constructor(
     private readonly endpoint: string,
     private readonly apiKey: string
@@ -68,6 +68,43 @@ class HttpListingSource implements ListingSource {
 
     return listings;
   }
+}
+
+/**
+ * Build the persistent ledger key for a marketplace `Listing(invoiceId)` entry.
+ * Shared by the live keeper and the dry-run analyzer so both reason about the
+ * exact same on-chain key.
+ */
+export function buildListingLedgerKey(
+  contractAddress: string,
+  invoiceId: string
+): xdr.LedgerKey {
+  const dataKey = xdr.ScVal.scvVec([
+    xdr.ScVal.scvSymbol("Listing"),
+    xdr.ScVal.scvU64(xdr.Uint64.fromString(invoiceId)),
+  ]);
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(contractAddress).toScAddress(),
+      key: dataKey,
+      durability: xdr.ContractDataDurability.persistent(),
+    })
+  );
+}
+
+/**
+ * Build the ledger key for the marketplace contract *instance* entry (the
+ * contract's instance storage / Wasm reference). This is the key Soroban's
+ * bump/restore footprint helpers use for the contract instance itself.
+ */
+export function buildInstanceLedgerKey(contractAddress: string): xdr.LedgerKey {
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(contractAddress).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent(),
+    })
+  );
 }
 
 export class ListingTtlKeeper {
@@ -139,16 +176,6 @@ export class ListingTtlKeeper {
   }
 
   private _listingLedgerKey(invoiceId: string): xdr.LedgerKey {
-    const dataKey = xdr.ScVal.scvVec([
-      xdr.ScVal.scvSymbol("Listing"),
-      xdr.ScVal.scvU64(xdr.Uint64.fromString(invoiceId)),
-    ]);
-    return xdr.LedgerKey.contractData(
-      new xdr.LedgerKeyContractData({
-        contract: new Address(this.config.marketplaceContractAddress).toScAddress(),
-        key: dataKey,
-        durability: xdr.ContractDataDurability.persistent(),
-      })
-    );
+    return buildListingLedgerKey(this.config.marketplaceContractAddress, invoiceId);
   }
 }

@@ -295,11 +295,11 @@ impl ParameterRegistryContract {
         Self::require_admin(&env, &admin)?;
         let mut count = 0u32;
         let mut checksum = Bytes::new(&env);
-        let fee: u32 = env.invoke_contract(&marketplace, &Symbol::new(&env, "get_fee_bps"), ());
-        let late_penalty: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_late_penalty_bps"), ());
-        let max_position: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_max_position_bps"), ());
-        let grace: u64 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_grace_period"), ());
-        let treasury_fee: u32 = env.invoke_contract(&treasury, &Symbol::new(&env, "get_fee_bps"), ());
+        let fee: u32 = env.invoke_contract(&marketplace, &Symbol::new(&env, "get_fee_bps"), Vec::new(&env));
+        let late_penalty: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_late_penalty_bps"), Vec::new(&env));
+        let max_position: u32 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_max_position_bps"), Vec::new(&env));
+        let grace: u64 = env.invoke_contract(&financing_pool, &Symbol::new(&env, "get_grace_period"), Vec::new(&env));
+        let treasury_fee: u32 = env.invoke_contract(&treasury, &Symbol::new(&env, "get_fee_bps"), Vec::new(&env));
         count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::MarketplaceFeeBps, fee as i128, force, &mut checksum)?;
         count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::LatePenaltyBps, late_penalty as i128, force, &mut checksum)?;
         count += Self::bootstrap_live_value(&env, &admin, RegistryParamKey::MaxPositionBps, max_position as i128, force, &mut checksum)?;
@@ -724,6 +724,16 @@ impl ParameterRegistryContract {
             RegistryParamKey::GracePeriodSecs => {
                 // Max 90 days
                 if value < 0 || value > 90 * 86_400 {
+                    return Err(RegistryError::ParamValueOutOfBounds);
+                }
+            }
+            RegistryParamKey::DebtorAttestationAaa
+            | RegistryParamKey::DebtorAttestationAa
+            | RegistryParamKey::DebtorAttestationA
+            | RegistryParamKey::DebtorAttestationB
+            | RegistryParamKey::DebtorAttestationC => {
+                // Policy flag: 0 = optional, 1 = required.
+                if value != 0 && value != 1 {
                     return Err(RegistryError::ParamValueOutOfBounds);
                 }
             }

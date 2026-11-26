@@ -98,10 +98,12 @@ env.storage()
     .persistent()
     .remove(&DataKey::Listing(invoice_id, seller.clone()));
 
-// Settle payment: fee to treasury, remainder to seller.
-let fee = bps_of(listing.price, fee_bps)?;
-let seller_proceeds = safe_sub(listing.price, fee)?;
+// Settle payment: fee to treasury, remainder to seller. A whole-position
+// purchase is the exact fill of a single-unit listing.
+let quote = quote_fill(listing.price, 1, 0, 1, fee_bps)?;
 ```
+
+Fill accounting invariants are documented in [secondary-market.md](secondary-market.md).
 
 1. **Atomic execution**: Once `list_position` is in a ledger, `buy_position` can only occur in a subsequent ledger (minimum ~5 seconds)
 2. **No intra-ledger races**: Multiple buyers submitting in the same ledger face deterministic ordering, not miner-controlled ordering
@@ -230,8 +232,43 @@ Stellar Consensus Protocol provides:
 | Concentration cap gaming | Negligible | Independent per-investor caps | ✅ Acceptable |
 | Priority window expiry timing | Negligible | Time-based, not order-based | ✅ By design |
 | Surge pricing fee manipulation | Medium | Transparent algorithmic prioritization | ✅ Economically rational |
+| Commit-reveal funding window | N/A | Not implemented — see §3.4 | ⛔ N/A (by design) |
 
 ---
+
+### 3.4 Commit-Reveal Funding Window — Status: N/A (issue #1181)
+
+**Status: N/A — not implemented, intentionally.** `marketplace::fund_invoice`
+is a single-step, first-come-first-served call. There is no
+`commit_funding` / `reveal_funding` entrypoint, no commitment storage key, and
+no reveal deadline. Integrators MUST NOT expect a two-phase funding flow.
+
+**Rationale:**
+
+1. **No mempool-observable price edge.** A listing's terms (discount, amount,
+   currency) are fixed when listed; funding does not move a price curve, so a
+   front-runner gains nothing a commitment would hide (§2.1).
+2. **Deterministic ordering.** Stellar SCP orders transactions without a
+   gas-price auction (§1, §3.2), removing the sandwich/priority-gas-auction
+   attacks commit-reveal exists to stop.
+3. **Fairness is handled by existing modules.** Early access is governed by
+   `PriorityWindow` (§2.5, appendix #976) and per-investor
+   `MaxInvestorShareBps` caps (§2.4) rather than hidden bids.
+4. **Cost of adding it.** Two-phase funding would add a reveal-liveness failure
+   mode (unrevealed commitments locking a listing), extra storage rent, and a
+   new pause/expiry state machine — a parallel subsystem the protocol avoids.
+
+**Behavioural guarantees this implies (tested):** pause blocks `fund_invoice`
+immediately (no pending commitments to drain or expire); repeated funding
+calls are independent single-step operations; there is no reveal config to be
+missing, so nothing can fail open.
+
+**Guard test:** `contracts/tests/mev_commit_reveal_status.rs`
+(`cargo test -p kora-tests --test mev_commit_reveal_status`) fails if a
+commit/reveal entrypoint appears in `contracts/marketplace/src` without this
+section being updated, and if this N/A declaration is removed. If commit-reveal
+is ever introduced, replace this section with the window parameters, pause and
+expiry semantics, and update `docs/ACCESS_MATRIX.md` and `docs/EVENTS.md`.
 
 ## 4. Recommendations and Monitoring
 
@@ -254,6 +291,31 @@ Stellar Consensus Protocol provides:
 1. **Simulate transactions before submission**: Use Soroban's simulation API to preview execution outcomes
 2. **Avoid stale assumptions**: Don't rely on client-side cached prices - let contracts fetch fresh oracle data
 3. **Fee estimation**: During surge pricing, provide users with fee estimates that increase likelihood of inclusion
+
+### 4.2.1 Surge Pricing Monitor and Fee Hints (#1034)
+
+Items 1 (operators) and 3 (integrators) above are implemented by the
+surge-pricing monitor in `services/fx-ingestion` and the SDK fee-hint helpers:
+
+- **Surge detection threshold:** surge pricing is considered active when the
+  larger p90 of the classic and Soroban inclusion-fee distributions reported by
+  Soroban RPC `getFeeStats` is at least **1.5x the 100-stroop network minimum**
+  (`FEE_HINT_SURGE_THRESHOLD_BPS=15000`). The suggested multiplier is that
+  ratio, clamped to 10x by default (`FEE_HINT_MAX_MULTIPLIER_BPS`).
+- **Monitoring:** `kora_surge_pricing_active` (gauge),
+  `kora_surge_episodes_total`, `kora_fee_hint_multiplier_bps` and
+  `kora_fee_stats_poll_errors_total` are scraped by Prometheus and plotted in
+  the "Stellar surge pricing" row of `infra/monitoring/grafana-dashboard.json`.
+- **Client hints:** `GET /network/fee-hint` returns `base_fee`,
+  `surge_multiplier_bps` and `observed_at`; the SDK applies it to
+  `TransactionBuilder` fees when `KORA_USE_FEE_HINTS=true`
+  (see `sdk/README.md`). When RPC fee stats are unavailable the endpoint keeps
+  answering with a degraded, last-known-good (or 1.0x) hint.
+
+Fee hints are **advisory only**. They raise the probability that a protocol
+transaction is included during congestion; they do not provide, and this
+document does not claim, any consensus, inclusion or ordering guarantee beyond
+the network properties described in §1.
 
 ### 4.3 Future Protocol Changes to Monitor
 

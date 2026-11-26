@@ -99,6 +99,11 @@ path = "auth_fuzzing.rs"
 name = "economic_attack_simulation"
 path = "economic_attack_simulation.rs"
 
+# ── MEV: commit-reveal funding window status guard (Issue #1181) ─────────────
+[[test]]
+name = "mev_commit_reveal_status"
+path = "mev_commit_reveal_status.rs"
+
 # ── Vesting grant lifecycle integration tests (Issue #965) ──────────────────
 [[test]]
 name = "vesting_lifecycle"
@@ -114,6 +119,10 @@ name = "fractionalizer_e2e"
 path = "fractionalizer_e2e.rs"
 
 [[test]]
+name = "fractionalizer_settle_claim_sequencing"
+path = "fractionalizer_settle_claim_sequencing.rs"
+
+[[test]]
 name = "marketplace_fee_property"
 path = "marketplace_fee_property.rs"
 
@@ -126,6 +135,44 @@ path = "referral_rewards_e2e.rs"
 [[test]]
 name = "referral_deposit_to_claim"
 path = "referral_deposit_to_claim.rs"
+
+# ── Fee clawback policy enforcement (Issue #1111) ────────────────────────────
+[[test]]
+name = "fee_clawback_policy"
+path = "fee_clawback_policy.rs"
+# ── Council failed-election grace path (Issue #1103) ─────────────────────────
+[[test]]
+name = "council_election_grace"
+path = "council_election_grace.rs"
+
+# ── Secondary market partial-fill accounting invariants (Issue #1101) ─────────
+[[test]]
+name = "secondary_market_fill_invariants"
+path = "secondary_market_fill_invariants.rs"
+
+# ── Tranche waterfall distribution properties (Issue #1102) ──────────────────
+[[test]]
+name = "tranche_waterfall_property"
+path = "tranche_waterfall_property.rs"
+# ── Parameter registry governance events (governance-sync) ───────────────────
+[[test]]
+name = "parameter_registry_events"
+path = "parameter_registry_events.rs"
+
+# ── Cross-contract pause propagation (fund/repay paths) ──────────────────────
+[[test]]
+name = "cross_contract_pause_propagation"
+path = "cross_contract_pause_propagation.rs"
+
+# ── Invoice NFT immutable field mutation fuzz (#nft) ─────────────────────────
+[[test]]
+name = "invoice_nft_immutable_field_mutation"
+path = "invoice_nft_immutable_field_mutation.rs"
+
+# ── Marketplace multisig approval required paths (#marketplace) ───────────────
+[[test]]
+name = "marketplace_multisig_approval_required"
+path = "marketplace_multisig_approval_required.rs"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -145,4 +192,5 @@ kora-vesting = { path = "../vesting" }
 kora-dispute-escrow = { path = "../dispute_escrow" }
 kora-dispute-resolution = { path = "../dispute_resolution" }
 kora-governance-voting = { path = "../governance_voting" }
+kora-tranche = { path = "../tranche" }
 proptest = "1.4"

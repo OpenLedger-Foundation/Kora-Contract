@@ -6,6 +6,9 @@
  *   - Fee bumping on retry
  *   - "Already triggered" no-op detection (graceful handling)
  *   - Hard-coded rate limit: max 10 tx/min via a token-bucket
+ *   - Default-mark eligibility precheck: `due_date` / `grace_period_end` jobs
+ *     are simulated first; ineligible or already-defaulted invoices are never
+ *     submitted, so blind default txs no longer burn fees on reverts (#1187)
  *
  * Issue #765
  */
@@ -61,7 +64,27 @@ const NOOP_ERROR_CODES = new Set([
   "FundingDeadlineNotReached",
 ]);
 
+/** Deadline kinds whose trigger is a default-mark and must pass a simulation precheck. */
+export const DEFAULT_MARK_KINDS: ReadonlySet<string> = new Set(["due_date", "grace_period_end"]);
+
+/** Outcome of a read-only eligibility simulation. */
+export type SimulationResult = { ok: true } | { ok: false; error: string };
+
+export interface PrecheckMetrics {
+  simulations: number;
+  /** Default-mark txs skipped because the simulation predicted a revert / no-op. */
+  skippedIneligible: number;
+  /** Simulations that could not run (RPC degraded); the tx is deferred, not sent blind. */
+  simulationErrors: number;
+}
+
 export class Dispatcher {
+  private readonly precheck: PrecheckMetrics = {
+    simulations: 0,
+    skippedIneligible: 0,
+    simulationErrors: 0,
+  };
+
   /** 10 transactions per minute maximum. */
   private readonly rateLimiter = new TokenBucket(10, 6_000);
   private readonly rpc: SorobanRpc.Server;
@@ -74,7 +97,16 @@ export class Dispatcher {
    * Attempt to submit the permissionless trigger transaction for a job.
    * Returns a TriggerResult describing the outcome.
    */
+  getPrecheckMetrics(): PrecheckMetrics {
+    return { ...this.precheck };
+  }
+
   async dispatch(job: Job): Promise<TriggerResult> {
+    // Precheck runs before the rate limiter so skipped jobs do not consume
+    // the keeper's tx budget.
+    const precheck = await this._precheckDefaultMark(job);
+    if (precheck) return precheck;
+
     if (!this.rateLimiter.consume()) {
       logger.warn({ dedupKey: job.dedupKey }, "Rate limit hit; deferring job");
       return { dedupKey: job.dedupKey, outcome: "failed", error: "rate_limit" };
@@ -120,6 +152,63 @@ export class Dispatcher {
       job.invoiceId,
       bumpedFee
     );
+  }
+
+  /**
+   * Simulates default-mark jobs. Returns a TriggerResult when the job must
+   * not be submitted, or null when the simulation predicts success (or the
+   * job kind does not need a precheck).
+   *
+   *  - simulation reports a no-op code (AlreadyDefaulted/AlreadyRepaid…) →
+   *    `already_triggered`; the job completes without spending a fee.
+   *  - simulation reports any other contract error (not yet due, grace period
+   *    running, paused, …) → classified like a submit error, prefixed with
+   *    `precheck:`; transient errors retry later, permanent ones dead-letter.
+   *  - simulation itself fails (RPC down) → `failed` (`precheck_unavailable`);
+   *    the keeper never falls back to a blind submit.
+   */
+  private async _precheckDefaultMark(job: Job): Promise<TriggerResult | null> {
+    if (!DEFAULT_MARK_KINDS.has(job.kind)) return null;
+    const fnName = this._triggerFunction(job.kind);
+    this.precheck.simulations += 1;
+    let simulation: SimulationResult;
+    try {
+      simulation = await this._simulateStellarTransaction(job.contractAddress, fnName, job.invoiceId);
+    } catch (err: unknown) {
+      this.precheck.simulationErrors += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ dedupKey: job.dedupKey, message }, "Default-mark precheck unavailable; deferring");
+      return { dedupKey: job.dedupKey, outcome: "failed", error: `precheck_unavailable: ${message}` };
+    }
+    if (simulation.ok) return null;
+    this.precheck.skippedIneligible += 1;
+    logger.info({ dedupKey: job.dedupKey, error: simulation.error }, "Default-mark precheck failed; not submitting");
+    return this._classifyError(job.dedupKey, new Error(`precheck: ${simulation.error}`));
+  }
+
+  /**
+   * Read-only simulation of the trigger call. Override in tests/subclasses.
+   * Throws only when the simulation could not be performed.
+   */
+  protected async _simulateStellarTransaction(
+    contractAddress: string,
+    fnName: string,
+    invoiceId: string
+  ): Promise<SimulationResult> {
+    const keypair = Keypair.fromSecret(this.config.keeperSecret);
+    const account = await this.rpc.getAccount(keypair.publicKey());
+    const transaction = new TransactionBuilder(account, { fee: "100" })
+      .addOperation(
+        new Contract(contractAddress).call(fnName, nativeToScVal(BigInt(invoiceId), { type: "u64" }))
+      )
+      .setTimeout(30)
+      .setNetworkPassphrase(this.config.networkPassphrase)
+      .build();
+    const simulation = await this.rpc.simulateTransaction(transaction);
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      return { ok: false, error: simulation.error };
+    }
+    return { ok: true };
   }
 
   /**

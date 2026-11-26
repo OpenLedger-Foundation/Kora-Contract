@@ -250,7 +250,73 @@ A weekly scheduled workflow runs `verify-restore --auto --json` for each of
 
 ---
 
-## Audit Log Hash-Chain Integrity After Restore
+## Restore Game-Day Drill
+
+The `game-day.ts` script runs a **full structured drill** against every backed-up service.  Unlike `verify-restore.ts` (which checks one service in isolation), `game-day` covers all three services, records aggregate timing, and enforces the RTO SLA.
+
+### What it does
+
+1. Discovers the latest backup for each service (across all tiers, or a specific tier)
+2. Verifies the SHA-256 checksum sidecar — rejects corrupt or tampered dumps immediately
+3. Restores each backup to an isolated scratch directory (`/tmp/kora-game-day-<service>-…`)
+4. Runs service-specific row-count and schema verification against the restored DB
+5. Records `restoreDurationMs`, `verificationDurationMs`, and `totalRtoMs` per service
+6. Checks all RTOs against the **5-minute SLA** (`GAME_DAY_RTO_LIMIT_MS`)
+7. Cleans up all scratch files
+8. Emits a human-readable summary to the terminal or a machine-readable JSON report (`--json`)
+
+**Edge cases handled:**
+- **Encrypted dumps** (`--encrypted`): detects missing SQLite magic header and reports `encrypted: true` without attempting to open the file
+- **Dry-run** (`--dry-run`): checks hash sidecars and runs basic SQLite introspection without copying files; reports `restoreDurationMs: 0`
+- **Missing backups**: reported as a structured failure (`ok: false`) without crashing
+
+### Usage
+
+```bash
+# Full drill — all services, auto-pick latest backup in any tier
+node dist/game-day.js --all
+
+# Drill all services from the warm tier only
+node dist/game-day.js --all --tier warm
+
+# Drill a single service and emit JSON
+node dist/game-day.js --service keeper --json
+
+# Dry-run (CI gate: verify backups exist and hashes are intact)
+node dist/game-day.js --all --dry-run
+
+# Check encrypted dump handling
+node dist/game-day.js --service audit-log --encrypted
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `GAME_DAY_RTO_LIMIT_MS` | `300000` (5 min) | RTO SLA threshold per service |
+| `BACKUP_ROOT` | `/backups` | Root backup directory |
+| `LOG_LEVEL` | `info` | Pino log level |
+
+### Scheduling
+
+Run the game-day drill weekly alongside the existing `backup-verify.yml` workflow, or as a standalone monthly exercise:
+
+```cron
+# Monthly full game-day drill on the 1st at 04:00 UTC
+0 4 1 * * cd /opt/kora/infra/backup && node dist/game-day.js --all --json \
+  >> /var/log/kora-game-day.log 2>&1
+```
+
+Add to `backup-verify.yml` for weekly CI coverage:
+
+```yaml
+- name: Game-day drill
+  run: node infra/backup/dist/game-day.js --all --json
+```
+
+---
+
+
 
 The audit log uses a cryptographic hash chain where each record's `prevHash` links to the previous record's `recordHash`. After restore:
 
@@ -307,6 +373,7 @@ infra/backup/
 ├── backup.js                    # Main backup script
 ├── restore.js                   # Restore script
 ├── verify-restore.js            # Restore verification + integrity check
+├── game-day.ts                  # Restore game-day drill (see below)
 ├── lib/
 │   ├── config.ts                # Configuration loader
 │   ├── sqlite.ts                # SQLite backup/restore utilities
@@ -315,6 +382,7 @@ infra/backup/
 ├── tests/
 │   ├── backup.test.ts           # Unit tests for backup logic
 │   ├── restore.test.ts          # Unit tests for restore logic
-│   └── verify-restore.test.ts   # Unit tests for verification
+│   ├── verify-restore.test.ts   # Unit tests for verification
+│   └── game-day.test.ts         # Unit tests for the game-day drill
 └── package.json                 # Dependencies for backup tooling
 ```

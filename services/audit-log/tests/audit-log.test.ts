@@ -219,6 +219,24 @@ describe("AuditClient", () => {
     expect(result.intact).toBe(true);
   });
 
+  test("accepts feature-flag mutation records and keeps the chain intact (#1116)", async () => {
+    await client.emit("feature-flags", "feature-flag.disabled", "admin@kora.finance", {
+      flagName: "secondary-market",
+      previousValue: true,
+      newValue: false,
+    });
+    await client.emit("feature-flags", "feature-flag.mutation-rejected", "intruder", {
+      flagName: "secondary-market",
+      attemptedAction: "enabled",
+    });
+    const records = store.getByService("feature-flags");
+    expect(records.map((r) => r.action)).toEqual([
+      "feature-flag.disabled",
+      "feature-flag.mutation-rejected",
+    ]);
+    expect(verifyChain(store.getAll()).intact).toBe(true);
+  });
+
   test("hashPii produces a deterministic hex string", () => {
     const h1 = AuditClient.hashPii("user@example.com");
     const h2 = AuditClient.hashPii("user@example.com");

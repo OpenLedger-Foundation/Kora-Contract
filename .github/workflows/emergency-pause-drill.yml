@@ -78,6 +78,19 @@ jobs:
           - [x] Guardian mode smoke executed
           - [x] Direct admin mode smoke executed
           EOF
+      - name: Verify pause took effect on every target (#1175)
+        env:
+          PAUSE_TARGETS: "${{ vars.TESTNET_PAUSE_TARGETS }}"
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-verify-pause-effect.sh
+          out="artifacts/emergency-pause/${DRILL_ENV}/pause-effect.prom"
+          if [ "${DRY_RUN}" = "true" ] || [ -z "${PAUSE_TARGETS}" ]; then
+            echo "dry run / no PAUSE_TARGETS: verifier exercised by tests only"
+          else
+            ./scripts/verify-pause-effect.sh --out "${out}"
+            cat "${out}"
+          fi
       - name: Upload timestamped drill logs
         if: always()
         uses: actions/upload-artifact@v4
