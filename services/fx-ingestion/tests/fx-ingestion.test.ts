@@ -17,6 +17,7 @@ import { CrossChecker } from "../src/crosscheck";
 import { OracleRelay, PublishResult } from "../src/relay";
 import { IngestionEngine } from "../src/engine";
 import { FxSource } from "../src/sources";
+import { FxMetrics } from "../src/metrics";
 import { CurrencyCode, FxQuote, FxIngestionConfig } from "../src/types";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,23 @@ class MockRelay extends OracleRelay {
   ): Promise<string> {
     this.published.push({ base, quote, rateScaled, fetchedAt });
     return "0xmocktxhash";
+  }
+}
+
+/** A relay whose publish always skips without a reason (defensive branch). */
+class NoReasonSkipRelay extends OracleRelay {
+  override async publish(
+    base: CurrencyCode,
+    quote: CurrencyCode,
+  ): Promise<PublishResult> {
+    return { base, quote, skipped: true };
+  }
+}
+
+/** A relay whose submission throws a non-Error value (defensive branch). */
+class StringThrowRelay extends OracleRelay {
+  protected override async _submitToOracle(): Promise<string> {
+    throw "string error";
   }
 }
 
@@ -145,6 +163,20 @@ describe("CrossChecker", () => {
     // mean of 6500 and 6600 = 6550
     expect(result.consensusRate).toBe(6550n);
   });
+
+  test("computes consensus regardless of source rate ordering", async () => {
+    // Descending order exercises the other branch of each reduce ternary.
+    const rate1 = 6600n;
+    const rate2 = 6500n;
+    const q1: FxQuote = { source: "a", base: "NGN", quote: "USDC", rateScaled: rate1, fetchedAt: 0 };
+    const q2: FxQuote = { source: "b", base: "NGN", quote: "USDC", rateScaled: rate2, fetchedAt: 0 };
+    const src1: FxSource = { name: "a", fetchRate: async () => q1 };
+    const src2: FxSource = { name: "b", fetchRate: async () => q2 };
+    const checker = new CrossChecker([src1, src2], 5000);
+    const result = await checker.check("NGN", "USDC");
+    expect(result.passed).toBe(true);
+    expect(result.consensusRate).toBe(6550n);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -155,6 +187,24 @@ describe("OracleRelay", () => {
   function makeRelay(overrides: Partial<FxIngestionConfig> = {}): MockRelay {
     return new MockRelay({ ...BASE_CONFIG, ...overrides });
   }
+
+  test("base OracleRelay reports a publish_error when _submitToOracle throws", async () => {
+    // Use the real OracleRelay (not the mock) so _submitToOracle throws its
+    // "Stellar RPC not configured" default, exercising the publish catch path.
+    const relay = new OracleRelay(BASE_CONFIG);
+    const now = Math.floor(Date.now() / 1000);
+    const result = await relay.publish("NGN", "USDC", 6500n, now);
+    expect(result.skipped).toBe(true);
+    expect(result.reason).toMatch(/publish_error/);
+  });
+
+  test("publish_error reason stringifies a non-Error throw", async () => {
+    const relay = new StringThrowRelay(BASE_CONFIG);
+    const now = Math.floor(Date.now() / 1000);
+    const result = await relay.publish("NGN", "USDC", 6500n, now);
+    expect(result.skipped).toBe(true);
+    expect(result.reason).toContain("string error");
+  });
 
   test("publishes a fresh rate successfully", async () => {
     const relay = makeRelay();
@@ -183,6 +233,20 @@ describe("OracleRelay", () => {
     expect(result.skipped).toBe(true);
     expect(result.reason).toBe("rate_limited");
     expect(relay.published).toHaveLength(1);
+  });
+
+  test("rate-limit: a second publish after the window elapses is allowed", async () => {
+    const relay = makeRelay({ pollIntervalMs: 1_000 }); // 1s window
+    let now = 1_000_000_000;
+    const dateSpy = jest
+      .spyOn(Date, "now")
+      .mockImplementation(() => now * 1000);
+    await relay.publish("NGN", "USDC", 6500n, now); // last = 1_000_000_000
+    now += 2; // 2s later — beyond the 1s window
+    const result = await relay.publish("NGN", "USDC", 6500n, now);
+    expect(result.skipped).toBe(false);
+    expect(relay.published).toHaveLength(2);
+    dateSpy.mockRestore();
   });
 
   test("different pairs are not rate-limited against each other", async () => {
@@ -264,5 +328,88 @@ describe("IngestionEngine", () => {
     // Only KES should have been published
     expect(relay.published.some((p) => p.base === "KES")).toBe(true);
     expect(relay.published.some((p) => p.base === "NGN")).toBe(false);
+  });
+
+  test("start() is idempotent and stop() clears the polling timer", () => {
+    const src1 = new StubSource("a", makeQuote("a", "NGN", "USDC", 0.00065));
+    const src2 = new StubSource("b", makeQuote("b", "NGN", "USDC", 0.000651));
+    const checker = new CrossChecker([src1, src2], 200);
+    const relay = new MockRelay(BASE_CONFIG);
+    const engine = new IngestionEngine(checker, relay, {
+      ...BASE_CONFIG,
+      pollIntervalMs: 60_000,
+    });
+
+    engine.start();
+    engine.start(); // idempotent — no double timer
+    engine.stop();
+    engine.stop(); // idempotent — safe to stop when not running
+  });
+
+  test("skips a pair where base equals quote", async () => {
+    const src1 = new StubSource("a", makeQuote("a", "USDC", "USDC", 1));
+    const src2 = new StubSource("b", makeQuote("b", "USDC", "USDC", 1));
+    const checker = new CrossChecker([src1, src2], 200);
+    const relay = new MockRelay(BASE_CONFIG);
+    const engine = new IngestionEngine(checker, relay, {
+      ...BASE_CONFIG,
+      currencies: ["USDC"],
+      quoteCurrency: "USDC",
+    });
+
+    await engine.runCycle();
+    expect(relay.published).toHaveLength(0);
+  });
+
+  test("records a skip when cross-check passes but consensusRate is missing", async () => {
+    // A stub checker that reports passed=true with no consensusRate, exercising
+    // the engine's `consensusRate == null` branch.
+    const stubChecker = {
+      check: async () => ({
+        base: "NGN",
+        quote: "USDC",
+        passed: true,
+        divergenceBps: 0,
+        quotes: [],
+      }),
+    } as unknown as CrossChecker;
+    const relay = new MockRelay(BASE_CONFIG);
+    const engine = new IngestionEngine(stubChecker, relay, BASE_CONFIG);
+
+    await engine.runCycle();
+    expect(relay.published).toHaveLength(0);
+  });
+
+  test("records a skip when the relay rejects a stale rate", async () => {
+    // Quotes with fetchedAt=0 are stale relative to now → the relay skips with
+    // stale_rate, exercising the engine's published.skipped branch.
+    const src1 = new StubSource("a", makeQuote("a", "NGN", "USDC", 0.00065, 0));
+    const src2 = new StubSource("b", makeQuote("b", "NGN", "USDC", 0.000651, 0));
+    const checker = new CrossChecker([src1, src2], 200);
+    const relay = new MockRelay({ ...BASE_CONFIG, maxStalenessSeconds: 60 });
+    const engine = new IngestionEngine(checker, relay, BASE_CONFIG);
+
+    await engine.runCycle();
+    expect(relay.published).toHaveLength(0);
+  });
+
+  test("records a generic skip reason when the relay skips without one", async () => {
+    // A relay that returns skipped:true with no reason exercises the engine's
+    // `published.reason ?? "publish_skipped"` fallback.
+    let now = 1_000_000_000;
+    const metrics = new FxMetrics({ now: () => now });
+    const src1 = new StubSource("a", makeQuote("a", "NGN", "USDC", 0.00065));
+    const src2 = new StubSource("b", makeQuote("b", "NGN", "USDC", 0.000651));
+    const checker = new CrossChecker([src1, src2], 200);
+    const relay = new NoReasonSkipRelay(BASE_CONFIG);
+    const engine = new IngestionEngine(checker, relay, {
+      ...BASE_CONFIG,
+      currencies: ["NGN"],
+    }, metrics);
+
+    await engine.runCycle();
+    expect(metrics.render()).toContain(
+      'kora_fx_publication_skipped_total{reason="publish_skipped"} 1',
+    );
   });
 });

@@ -5,6 +5,7 @@ target/
 .env.*
 # Committed configuration examples are documentation, not secrets.
 !.env.mev.example
+!.env.example
 
 # Test snapshots
 test_snapshots/
@@ -44,3 +45,5 @@ infra/mev-ordering/results/
 .agents/
 skills-lock.json
 issue.md
+# Reproducible-build attestation output (scripts/attest-wasm-hashes.sh)
+attestation/

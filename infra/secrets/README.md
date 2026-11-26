@@ -112,3 +112,13 @@ secret policy changes. Restrict write/rotation permissions to the operations
 role; service roles are read-only. Treat suspected keeper-key exposure as
 Sev-1 and follow [the incident response runbook](../../docs/INCIDENT_RESPONSE.md),
 including admin/key custody escalation where applicable.
+## Env example drift
+
+`infra/secrets/.env.example` lists, without values, every secret-named variable
+read under `services/` (`*_SECRET`, `*_KEY(S)`, `*_TOKEN`, `*_PASSWORD`). CI fails
+on missing, stale, duplicate, or populated keys:
+
+```bash
+node infra/secrets/check-env-example.js
+node --test infra/secrets/check-env-example.test.js
+```

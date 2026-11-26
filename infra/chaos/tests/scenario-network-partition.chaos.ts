@@ -18,9 +18,10 @@
  *      within the recovery window.
  *
  * GAP-1 status: closed. The gateway now marks the store degraded, invalidates
- * read-through cache entries, and fails data reads with 503/Retry-After until
- * the store health check recovers. Cache-hit metrics therefore fall during
- * the outage instead of masking the partition.
+ * read-through cache entries, and fails data reads with StaleCacheError (503,
+ * code "STALE_CACHE") or ApiUnavailableError until the store health recovers.
+ * Cache-hit metrics fall during the outage instead of masking the partition.
+ * See services/api/gateway/src/gateway.ts and CACHE_FRESHNESS_SLA_MS.
  */
 
 import {

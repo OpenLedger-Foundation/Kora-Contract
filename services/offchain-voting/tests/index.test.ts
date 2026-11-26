@@ -91,3 +91,34 @@ test('encrypted ballot store rejects invalid key material and duplicate key ids'
   expect(() => store.rotateKey({ id: 'v1', key: Buffer.alloc(32, 2) }))
     .toThrow('already exists');
 });
+
+describe('vote message canonicalization (issue #1185)', () => {
+  test('identical tuples produce identical bytes', () => {
+    expect(voteMessage('testnet', 'p', keypair.publicKey(), 'for')).toEqual(
+      voteMessage('testnet', 'p', keypair.publicKey(), 'for'),
+    );
+  });
+
+  test('rejects field-injection and encoding malleability', () => {
+    const v = keypair.publicKey();
+    // "p\nG..." could otherwise re-split into different (proposalId, voter) fields.
+    expect(() => voteMessage('testnet', `p\n${v}`, v, 'for')).toThrow('Non-canonical vote field: proposalId');
+    expect(() => voteMessage('test\rnet', 'p', v, 'for')).toThrow('Non-canonical vote field: chainId');
+    expect(() => voteMessage('testnet', 'p\u0000', v, 'for')).toThrow('Non-canonical vote field: proposalId');
+    expect(() => voteMessage('testnet', ' p', v, 'for')).toThrow('Non-canonical vote field: proposalId');
+    expect(() => voteMessage('testnet', 'café', v, 'for')).toThrow('Non-canonical vote field: proposalId');
+    expect(() => voteMessage('testnet', '', v, 'for')).toThrow('Non-canonical vote field: proposalId is empty');
+    expect(() => voteMessage('testnet', 'p', '', 'for')).toThrow('Non-canonical vote field: voter is empty');
+    expect(() => voteMessage('testnet', 'p', v, 'FOR' as any)).toThrow('Non-canonical vote field: choice');
+    expect(() => voteMessage('testnet', 'p', v, 'abstain' as any)).toThrow('Non-canonical vote field: choice');
+  });
+
+  test('cast rejects non-canonical input before weight lookup or storage', async () => {
+    const store = new MemoryVoteStore();
+    const votingWeight = jest.fn(source.votingWeight);
+    const service = new OffchainVotingService('testnet', { ...source, votingWeight }, store, () => 10);
+    await expect(service.cast('p\nx', keypair.publicKey(), 'for', 'AA==')).rejects.toThrow('Non-canonical vote field');
+    expect(votingWeight).not.toHaveBeenCalled();
+    expect(await store.votes('p\nx')).toHaveLength(0);
+  });
+});

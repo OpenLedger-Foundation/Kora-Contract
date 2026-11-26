@@ -18,7 +18,7 @@ import {
   TimeSeriesPoint,
 } from "./types";
 
-const ALL_GRANULARITIES: DownsampleGranularity[] = ["hourly", "daily", "weekly"];
+const ALL_GRANULARITIES: DownsampleGranularity[] = ["5min", "hourly", "daily", "weekly"];
 
 export class TimeSeriesService {
   constructor(

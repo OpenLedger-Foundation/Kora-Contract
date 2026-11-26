@@ -2,7 +2,7 @@
 
 **Issue:** #811  
 **Status:** Complete  
-**Last updated:** 2026-09-29
+**Last updated:** 2026-11-23
 
 This document is the durable, reviewable artifact required by issue #811. It
 enumerates every arithmetic operation site across all contracts, records the
@@ -39,6 +39,8 @@ helpers used by every contract) and from per-contract arithmetic in
 | V-3 | `a * b` | `safe_mul` | ✅ `0 * MAX = 0` | ✅ `MAX * 2 → overflow` | ✅ `i128::MAX * 2 → overflow` | N/A | `test_safe_mul_*` | ✅ Covered |
 | V-4 | `a / b` | `safe_div` | ✅ `X / 0 → err` | ✅ `MAX / 1 = MAX` | ✅ `i128::MIN / -1 → overflow` | N/A | `test_safe_div_*` | ✅ Covered |
 | V-5 | `amount * bps / 10_000` | `bps_of` | ✅ `0 bps` and `0 amount` | ✅ `MAX_AMOUNT * 10_000` safe | ✅ `i128::MAX * bps → overflow` | ✅ mul-first order verified | `test_bps_of_*` | ✅ Covered |
+| V-5b | `part * 10_000 > cap_bps * whole` | `exceeds_bps_share` | ✅ `0 part`, `0 cap` | ✅ exact cap boundary | ✅ `i128::MAX * 10_000 → overflow` | ✅ division-free compare | `test_exceeds_bps_share_*` | ✅ Covered |
+| V-5c | `bps > 10_000` rejected | `bps_of`, `bps_of_normalized`, `exceeds_bps_share` | ✅ `10_000` accepted | — | — | — | `test_bps_of_rejects_rate_above_100_percent` | ✅ Covered |
 | V-6 | `amount * bps / 10_000` (normalised) | `bps_of_normalized` | ✅ zero amount | ✅ large amount | ✅ overflow path | ✅ decimal scale then bps | `test_bps_of_normalized_*` | ✅ Covered |
 | V-7 | `10^(scale)` | `normalize_amount` | ✅ 0 decimals diff = noop | ✅ large scale | ✅ overflow on extreme scale | N/A | `test_normalize_amount_*` | ✅ Covered |
 | V-8 | `amount > MAX_AMOUNT` | `require_within_max_amount` | ✅ `0 ok` | ✅ `MAX_AMOUNT ok`, `MAX_AMOUNT+1 err` | ✅ `i128::MAX err` | N/A | `test_require_within_max_amount_*` | ✅ Covered |
@@ -65,6 +67,8 @@ helpers used by every contract) and from per-contract arithmetic in
 | MP-C | `listing.funded_amount + listing_amount` | `fund_invoice_internal` | funded = 0, funded + amount = asking_price, overflow | N/A | `test_mp_funded_amount_overflow_*` | ✅ Covered |
 | MP-D | `prospective * 10_000 > cap_bps * asking_price` (concentration cap) | `fund_invoice_internal` | prev_gross = 0, at cap, over cap | ✅ mul-before-compare | `test_mp_concentration_cap_*` | ✅ Covered |
 | MP-E | `cap_bps * asking_price` overflow guard | `fund_invoice_internal` | asking_price = MAX_AMOUNT, cap_bps = 10_000 | ✅ | `test_mp_concentration_cap_overflow_guard` | ✅ Covered |
+| MP-F | `bps_of(fee, referrer_split_bps)` (was local `fee * split / 10_000`, #1188) | `fund_invoice_internal` | split = 0, 2_000, 10_000 | ✅ | `test_referral*` | ✅ Covered |
+| MP-G | `exceeds_bps_share(prospective, asking_price, cap_bps)` (was local checked compare, #1188) | `fund_invoice_internal` | at cap, cap + 1 | ✅ | `test_exceeds_bps_share_*` | ✅ Covered |
 
 ### 4. `contracts/treasury/src/lib.rs`
 
@@ -87,6 +91,52 @@ helpers used by every contract) and from per-contract arithmetic in
 
 ---
 
+### 6. `contracts/shared/src/types.rs` — `DecaySchedule` linear interpolation
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| DS-A | `start_price - floor_price` (spread) | `effective_price` (marketplace caller) | zero floor, normal spread, floor > start underflows, MAX_AMOUNT start | N/A | `test_ds_spread_*` | ✅ Covered |
+| DS-B | `spread * elapsed / window` (discount interpolation) | `effective_price` | zero elapsed, full elapsed, zero window → divide-by-zero, MAX_AMOUNT overflow | ✅ mul-first | `test_ds_interpolation_*` | ✅ Covered |
+| DS-C | `start_price - discount` (effective price) | `effective_price` | zero discount, full decay = floor, never negative invariant | N/A | `test_ds_effective_price_*` | ✅ Covered |
+| DS-D | `floor_price` invariant (0 < floor < start) | constructor / validation | floor = 0 valid, floor ≥ start invalid | N/A | `test_ds_floor_*` | ✅ Covered |
+
+### 7. `contracts/shared/src/types.rs` — `InstallmentSchedule` cumulative sum
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| IS-A | `sum += installment.amount` (safe_add accumulation) | installment schedule validation | three equal tranches, MAX_AMOUNT / 10 × 10, overflow on two i128::MAX/2+1 | N/A | `test_is_installment_sum_*` | ✅ Covered |
+| IS-B | `face_value - paid_so_far` (remaining) | repayment tracking | paid = 0, paid = face_value → 0, paid > face_value underflows | N/A | `test_is_remaining_amount_*` | ✅ Covered |
+| IS-C | `next_index + 1` (u32 counter) | installment advance | u32::MAX overflows | N/A | `test_is_next_index_u32_overflow` | ✅ Covered |
+
+### 8. `contracts/shared/src/types.rs` — `DiscretionaryWithdrawal` amount
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| DW-A | `amount > 0` guard | proposal creation | amount = 0 rejected, negative rejected | N/A | `test_dw_amount_*` | ✅ Covered |
+| DW-B | `amount ≤ MAX_AMOUNT` guard | proposal creation | MAX_AMOUNT ok, MAX_AMOUNT+1 rejected | N/A | `test_dw_amount_*` | ✅ Covered |
+| DW-C | `balance - amount` (safe_sub) | execution | amount = balance → 0, amount > balance underflows, MAX_AMOUNT withdrawal | N/A | `test_dw_withdrawal_*` | ✅ Covered |
+
+### 9. `contracts/shared/src/types.rs` — `RiskTierDefinition` score boundaries
+
+| # | Operation | Function | Boundary tested | Mul-before-div | Test name | Status |
+|---|-----------|----------|----------------|----------------|-----------|--------|
+| RT-A | Tier boundary comparisons at 20/21, 40/41, 60/61, 80/81 | `RiskTier::from_score` | Scores at exact boundary values map to correct tier | N/A | `test_rt_score_to_tier_boundary_*` | ✅ Covered |
+| RT-B | Interior values per tier | `RiskTier::from_score` | Scores 10, 30, 50, 70, 90 each in correct tier | N/A | `test_rt_score_interior_values_all_tiers` | ✅ Covered |
+| RT-C | Extremes: 0 → AAA, 100 → C, u32::MAX → C | `RiskTier::from_score` | Min, max, and saturating values | N/A | `test_rt_score_zero_is_aaa`, `test_rt_score_100_is_c`, `test_rt_score_u32_max_maps_to_c` | ✅ Covered |
+| RT-D | `require_valid_risk_score` gate (> 100 rejected) | validation | 100 ok, 101 err, u32::MAX err | N/A | `test_rt_require_valid_risk_score_guard` | ✅ Covered |
+
+---
+
+### 10. `contracts/secondary_market/src/lib.rs`
+
+| ID | Function | Operation | Boundaries | Tests | Status |
+|----|----------|-----------|------------|-------|--------|
+| SM-1 | `buy_position` | `bps_of(price, fee_bps)` (mul before div) | 0, rounding edge, largest safe price (`i128::MAX / fee_bps`), MAX_AMOUNT and i128 extremes fail closed | `test_secondary_fee_*` | ✅ Covered |
+| SM-2 | `buy_position` | `safe_sub(price, fee)` | 0, largest safe price, 0–1000 bps | `test_secondary_fee_conserves_price` | ✅ Covered |
+| SM-3 | `update_protocol_fee_bps` | 0–1000 bps range | 1000, 1001, non-admin | `fee_rate_bounds_and_admin_are_enforced` (`secondary_market_fee_routing.rs`) | ✅ Covered |
+
+---
+
 ## Coverage Summary
 
 | Module | Operations enumerated | Covered | Gaps |
@@ -96,7 +146,11 @@ helpers used by every contract) and from per-contract arithmetic in
 | `marketplace` | 5 | 5 | 0 |
 | `treasury` | 4 | 4 | 0 |
 | `risk_registry` | 5 | 5 | 0 |
-| **Total** | **30** | **30** | **0** |
+| `DecaySchedule` interpolation | 4 | 4 | 0 |
+| `InstallmentSchedule` cumulative sum | 3 | 3 | 0 |
+| `DiscretionaryWithdrawal` amount | 3 | 3 | 0 |
+| `RiskTierDefinition` boundaries | 4 | 4 | 0 |
+| **Total** | **44** | **44** | **0** |
 
 ---
 
@@ -131,3 +185,11 @@ When adding a new arithmetic operation to any contract:
 4. Add at least one test per boundary class in
    `contracts/tests/arithmetic_overflow_matrix.rs`.
 5. Mark the row ✅ Covered.
+
+### Shared bps helpers (#1188)
+
+All basis-point math goes through `kora_shared::validation`
+(`BPS_DENOMINATOR`, `bps_of`, `bps_of_normalized`, `exceeds_bps_share`).
+Contracts must not inline `* bps / 10_000`; the helpers reject negative
+amounts and rates above 100 % and always round toward zero, so fee rounding
+cannot diverge between `marketplace`, `secondary_market` and `financing_pool`.

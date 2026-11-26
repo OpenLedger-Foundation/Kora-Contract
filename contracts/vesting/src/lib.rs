@@ -694,14 +694,14 @@ mod tests {
             soroban_sdk::FromVal::from_val(&env, &last.2);
         assert_eq!(payload, (admin.clone(), token.address.clone(), env.ledger().timestamp()));
 
-        // 2. create_grant -> VEST_GRANT
+        // 2. create_grant -> VEST_GRNT
         token.mint(&contract_id, &10_000);
         let start_time = env.ledger().timestamp();
         client.create_grant(&admin, &beneficiary, &10_000, &start_time, &100, &1000);
         let evs = env.events().all();
         let last = evs.last().unwrap();
         let topic_sym: Symbol = Symbol::try_from_val(&env, &last.1.get(1).unwrap()).unwrap();
-        assert_eq!(topic_sym, symbol_short!("VEST_GRANT"));
+        assert_eq!(topic_sym, symbol_short!("VEST_GRNT"));
         let payload: (Address, Address, i128, u64, u64, u64, u64) =
             soroban_sdk::FromVal::from_val(&env, &last.2);
         assert_eq!(

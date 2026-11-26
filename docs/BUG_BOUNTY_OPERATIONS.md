@@ -406,6 +406,11 @@ python scripts/triage_vulnerability.py update KORA-2026-001 \
 # List all open vulnerabilities
 python scripts/triage_vulnerability.py list --status Open
 
+# Flag likely duplicates of closed reports / issues (read-only; a human decides)
+gh issue list --state closed --limit 1000 --json number,title,body,state > closed.json
+python scripts/triage_vulnerability.py check-duplicate \
+  --summary "Admin bypass in treasury" --issues closed.json --threshold 0.6
+
 # Export for incident response drill
 python scripts/triage_vulnerability.py export KORA-2026-001 --format json
 ```

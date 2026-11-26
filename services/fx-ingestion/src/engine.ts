@@ -12,6 +12,7 @@
 import { CrossChecker } from "./crosscheck";
 import { OracleRelay } from "./relay";
 import { FxIngestionConfig, CurrencyCode } from "./types";
+import { FxMetrics } from "./metrics";
 import pino from "pino";
 
 const logger = pino({ name: "fx-ingestion:engine" });
@@ -23,7 +24,8 @@ export class IngestionEngine {
   constructor(
     private readonly checker: CrossChecker,
     private readonly relay: OracleRelay,
-    private readonly config: FxIngestionConfig
+    private readonly config: FxIngestionConfig,
+    private readonly metrics?: FxMetrics
   ) {}
 
   start(): void {
@@ -56,6 +58,7 @@ export class IngestionEngine {
       this._processPair(base, this.config.quoteCurrency)
     );
     await Promise.allSettled(promises);
+    this.metrics?.recordCycle();
     logger.info("FX ingestion cycle complete");
   }
 
@@ -72,6 +75,7 @@ export class IngestionEngine {
         { base, quote, reason: result.reason },
         "Cross-check failed — skipping publication"
       );
+      this.metrics?.recordSkip(base, quote, result.reason ?? "cross_check_failed");
       return;
     }
 
@@ -81,6 +85,16 @@ export class IngestionEngine {
       0
     );
 
-    await this.relay.publish(base, quote, result.consensusRate, fetchedAt);
+    const published = await this.relay.publish(
+      base,
+      quote,
+      result.consensusRate,
+      fetchedAt
+    );
+    if (published.skipped) {
+      this.metrics?.recordSkip(base, quote, published.reason ?? "publish_skipped");
+    } else {
+      this.metrics?.recordPublication(base, quote, fetchedAt);
+    }
   }
 }

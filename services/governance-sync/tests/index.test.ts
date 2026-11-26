@@ -10,7 +10,12 @@ import { Address, Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import axios, { AxiosInstance } from 'axios';
 import Database from 'better-sqlite3';
 import {
+  canonicalizeProposalPayload,
+  canonicalProposalMessage,
   decodeProposal,
+  detectProposalDivergence,
+  PROPOSAL_PAYLOAD_DOMAIN,
+  proposalPayloadHash,
   ForumClient,
   GovernanceErrorCode,
   GovernanceMonitor,
@@ -358,5 +363,68 @@ describe('syncProposals', () => {
     expect(forum.createThread).toHaveBeenCalledTimes(1);
     // second cycle re-fetches (tally refresh) but does not recreate
     expect(reader.getProposal).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('proposal payload canonicalization (issue #1185)', () => {
+  const fixture = require('./fixtures/divergent-proposal.json');
+  const base = fixture.canonical;
+
+  it('hashes key-order, NFC/NFD and CRLF/LF variants identically', () => {
+    const reordered = Object.fromEntries(Object.entries(base).reverse());
+    const nfd = { ...base, title: 'Cafe\u0301 reserve', description: 'line1\r\nline2' };
+    const nfc = { ...base, title: 'Caf\u00e9 reserve', description: 'line1\nline2' };
+    expect(proposalPayloadHash(reordered)).toBe(proposalPayloadHash(base));
+    expect(proposalPayloadHash(nfd)).toBe(proposalPayloadHash(nfc));
+    expect(canonicalProposalMessage(nfd).equals(canonicalProposalMessage(nfc))).toBe(true);
+  });
+
+  it('domain-separates and sorts keys in the signed message', () => {
+    const message = canonicalProposalMessage(base).toString('utf8');
+    expect(message.startsWith(`${PROPOSAL_PAYLOAD_DOMAIN}\n`)).toBe(true);
+    const keys = Object.keys(JSON.parse(message.split('\n').slice(1).join('\n')));
+    expect(keys).toEqual([...keys].sort());
+  });
+
+  it('distinct actions hash differently', () => {
+    expect(proposalPayloadHash(fixture.offchain)).not.toBe(proposalPayloadHash(base));
+  });
+
+  it.each([
+    ['null', null],
+    ['array', [base]],
+    ['unknown field', { ...base, extra: 1 }],
+    ['missing field', (() => { const { title, ...rest } = base; return rest; })()],
+    ['string number', { ...base, created_at: '1000' }],
+    ['float', { ...base, quorum_required: 100.5 }],
+    ['negative zero', { ...base, expires_at: -0 }],
+    ['negative', { ...base, expires_at: -1 }],
+    ['unsafe integer', { ...base, id: Number.MAX_SAFE_INTEGER + 1 }],
+    ['NaN', { ...base, id: Number.NaN }],
+    ['non-string title', { ...base, title: 42 }],
+  ])('rejects %s with a typed NON_CANONICAL_PAYLOAD error', (_label, payload) => {
+    expect(() => canonicalizeProposalPayload(payload)).toThrow(GovernanceSyncError);
+    try {
+      canonicalizeProposalPayload(payload);
+    } catch (error) {
+      expect((error as GovernanceSyncError).code).toBe(GovernanceErrorCode.NON_CANONICAL_PAYLOAD);
+      expect((error as GovernanceSyncError).retryable).toBe(false);
+    }
+  });
+
+  it('canonicalization is idempotent', () => {
+    const once = canonicalizeProposalPayload({ ...base, title: 'Cafe\u0301' });
+    expect(canonicalizeProposalPayload(once)).toEqual(once);
+  });
+
+  it('does not report encoding-only differences as divergence', () => {
+    const onChain = freshProposal({ ...base, description: 'Caf\u00e9' });
+    const offchain = { ...base, description: 'Cafe\u0301' };
+    expect(detectProposalDivergence(onChain, offchain)).toBeNull();
+  });
+
+  it('treats a non-canonicalizable off-chain payload as fully divergent', () => {
+    const divergence = detectProposalDivergence(freshProposal(base), { ...base, id: -1 } as any);
+    expect(divergence?.fields).toHaveLength(9);
   });
 });

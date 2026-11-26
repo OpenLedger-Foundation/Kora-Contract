@@ -14,7 +14,7 @@
 # See docker-compose.yml for a batteries-included Postgres setup.
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:1.78-slim-bookworm AS builder
+FROM rust:1.78-slim-bookworm@sha256:0fea967628dc796a2b9d1d57ddb3af3b3f0a35b6c8c0e23690dbe0ceb71a2dc9 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev ca-certificates git \
@@ -40,10 +40,10 @@ RUN cargo build --release --locked -p kora-indexer \
  && strip target/release/kora-indexer
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
+    ca-certificates libssl3 wget \
  && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user matching the systemd unit's `kora` user convention.

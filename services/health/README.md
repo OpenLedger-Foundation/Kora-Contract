@@ -34,3 +34,5 @@ exits cleanly on `SIGTERM`/`SIGINT` for container deployments.
 
 A misconfigured URL classifies that upstream as unreachable (`down`), never a
 process crash. Upstream list changes require a restart.
+
+`HEALTH_SERVICES` — optional comma-separated subset of upstreams to poll; unknown names fail startup.

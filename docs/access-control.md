@@ -232,6 +232,59 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 
 ---
 
+### Paginated Role Enumeration
+
+```rust
+pub fn get_role_members(
+    env: Env,
+    role: Role,
+    start: u32,
+    limit: u32,
+) -> Result<RoleMembersPage, KoraError>
+```
+
+**Purpose:** Enumerate the addresses holding a given role in bounded pages, so admin UIs and off-chain tooling never perform an unbounded role walk.
+
+**Parameters:**
+- `env` — Soroban environment
+- `role` — The role to enumerate (`Operator` or `Verifier`)
+- `start` — Zero-based index of the first member to return (the cursor)
+- `limit` — Maximum number of members to return in this page
+
+**Returns:** A `RoleMembersPage` containing:
+- `members` — up to `limit` addresses starting at `start`
+- `next` — `Some(next_start)` when more members remain, or `None` on the final page
+
+or a typed error:
+- `KoraError::InvalidPageLimit` if `limit` is `0` or exceeds the maximum page size
+- `KoraError::Unauthorized` if `role` is `Admin` or `None` (only enumerable roles are exposed)
+
+**Authorization:** No authorization check (public view).
+
+**Security:**
+- Page size is capped at `MAX_ROLE_PAGE_SIZE`; oversized requests fail closed with `InvalidPageLimit` rather than silently truncating
+- Enumeration is read-only and does not mutate role storage or TTLs
+- An empty role (or a `start` at/after the end) returns an empty `members` list with `next == None`
+- Re-issuing the same `(role, start, limit)` query is idempotent and returns identical results
+
+**Pagination pattern:**
+
+```rust
+let mut cursor = 0u32;
+loop {
+    let page = contract.get_role_members(env.clone(), Role::Verifier, cursor, 50)?;
+    for member in page.members.iter() {
+        // process member
+    }
+    match page.next {
+        Some(next) => cursor = next,
+        None => break,
+    }
+}
+```
+
+---
+
 ## Security Invariants
 
 ### 1. Admin Uniqueness
@@ -259,9 +312,9 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 - Instance storage (admin, paused flag) is tied to the contract instance and does not expire
 
 ### 6. Cross-Contract Safety
-- The `pause` flag is read by `invoice_nft` and `marketplace` via cross-contract calls
-- The calling contract's address is used as the authorized signer (implicit trust)
-- No circular dependencies exist between contracts
+- The `pause` flag is read by `invoice_nft` and `marketplace` before any state-mutating operation
+- Dependent contracts treat a paused protocol as a hard stop (fail closed)
+- Role enumeration is read-only and never bypasses pause or auth checks on mutating paths
 
 ### 7. Council Rotation & Term-Limit Enforcement (#845)
 - **Defined Term Limits:** Council seats possess configurable term lengths (`configure_council_terms`) preventing indefinite tenure.
@@ -269,6 +322,23 @@ pub fn get_admin(env: Env) -> Result<Address, KoraError>
 - **Quorum Safety:** An expiring seat's authority only lapses once a replacement is confirmed; safe minimum quorum is preserved throughout transitions.
 - **Failed-Election Fallback:** If an election fails to reach quorum or confirm a successor, an automatic term extension grace period activates, preventing any gap in protocol authority.
 - **Key Rotation Integration:** Leverages the key-rotation procedures for secure credential handoff.
+
+#### Failed-election grace path (#1103)
+
+| Rule | Behaviour | Test (`contracts/tests/council_election_grace.rs`) |
+|------|-----------|------|
+| Quorum | `votes_for >= MultisigConfig.threshold`; the initiator's vote counts as the first "for" vote. Exactly `threshold` confirms, `threshold - 1` fails. | `exact_quorum_confirms_rotation_without_grace`, `failed_election_without_votes_activates_grace`, `against_votes_do_not_block_exact_quorum` |
+| Failed election | Expiring seat stays in the signer set and keeps council powers; its term start moves to `old_start + grace` (old start defaults to the conclusion timestamp). | `failed_quorum_activates_grace_and_keeps_seat`, `grace_extension_starts_from_election_conclusion_time` |
+| Repeated failures | Each failed election adds another `grace` to the seat's term start. | `repeated_failed_elections_compound_grace` |
+| Default grace | `259_200` s (3 days) when `configure_council_terms` was never called. | `default_grace_applies_when_terms_unconfigured` |
+| Expiry boundary | `is_council_seat_term_expired` is strict: expired iff `now > term_start + term_length`. | all grace tests check `expiry` (false) and `expiry + 1` (true) |
+| Confirmed election | Seat swapped, successor's term starts at conclusion (no grace); outgoing seat loses signer authority. | `exact_quorum_confirms_rotation_without_grace` |
+| Minimum quorum | A confirmation with `threshold < 2` reverts with `QuorumSafetyViolation`; the election stays open. | `confirmation_below_minimum_quorum_reverts_without_concluding` |
+| Outside the rules | Non-signers cannot vote or conclude (`SignerNotFound`) — so an outsider cannot force the grace path; concluded elections reject votes and re-conclusion (`RotationElectionAlreadyConcluded`); double votes (`AlreadyVoted`); unknown ids (`RotationElectionNotFound`); `configure_council_terms` is admin-only with non-zero term. | `non_signer_cannot_force_failed_election`, `concluded_election_rejects_further_votes_and_conclusions`, `double_vote_and_unknown_election_rejected`, `grace_configuration_is_admin_gated_and_validated`, `rotation_requires_configured_council` |
+
+The `governance_voting` quorum boundary (`total_votes == quorum_required` executes, one below returns `InsufficientVotingWeight`) is pinned in the same file (`governance_voting_quorum_boundary`). See also [governance.md](governance.md#multi-sig-council-rotation--term-limit-enforcement-845) and [ACCESS_MATRIX.md](ACCESS_MATRIX.md).
+
+Run: `cargo test -p kora-tests --test council_election_grace`
 
 ## Known Limitations (v1)
 

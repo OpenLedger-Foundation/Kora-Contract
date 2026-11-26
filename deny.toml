@@ -23,9 +23,12 @@ unmaintained = "warn"
 # The lint level for crates that have been marked as yanked in the registry
 yanked = "warn"
 # Known-accepted advisories — add entries here with rationale + tracking issue.
+# Every entry MUST be a table with `id` and a `reason` containing an
+# `expires=YYYY-MM-DD` marker, and MUST be mirrored in `.cargo/audit.toml`.
+# Enforced by scripts/security/check_advisory_allowlist.py (issue #1173).
 # Example:
 # ignore = [
-#   { id = "RUSTSEC-2024-XXXXX", reason = "Not reachable in our usage; tracked in #NNN" },
+#   { id = "RUSTSEC-2024-XXXX", reason = "Not reachable in our usage; owner=@sec; expires=2027-01-31; tracked in #NNN" },
 # ]
 # Note: Reviewed and assessed for Issue #892 (Scheduled dependency scan).
 # Transitive reachability assessed; no unreachable vulnerabilities active.

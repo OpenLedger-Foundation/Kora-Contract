@@ -84,7 +84,7 @@ fn test_rapid_fund_refund_cycling() {
         env.ledger().set(LedgerInfo {
             timestamp: 1_700_000_000 + (cycle + 1) * 86_400,
             protocol_version: 21,
-            sequence_number: 1000 + (cycle + 1) * 17_280,
+            sequence_number: 1000 + (cycle as u32 + 1) * 17_280,
             network_id: Default::default(),
             base_reserve: 10,
             min_temp_entry_ttl: 1000,

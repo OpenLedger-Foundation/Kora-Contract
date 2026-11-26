@@ -25,6 +25,9 @@ pub enum FractionalizerError {
     NotShareHolder = 12,
     InvalidShareCount = 13,
     PositionNotFound = 14,
+    /// `settle` was already called for this wrap. Re-settling would reset
+    /// `total_payout`/`outstanding_shares` accounting mid-redemption.
+    AlreadySettled = 15,
 }
 
 #[contracttype]
@@ -175,6 +178,17 @@ impl FractionalizerContract {
             return Err(FractionalizerError::InvalidAmount);
         }
 
+        // A holder that already redeemed can never redeem again, so any shares
+        // sent to it would be stranded forever (and `outstanding_shares` could
+        // never reach zero, locking the dust remainder in the contract).
+        if env.storage().persistent().has(&DataKey::Claimed(
+            invoice_id,
+            original_investor.clone(),
+            to.clone(),
+        )) {
+            return Err(FractionalizerError::AlreadyClaimed);
+        }
+
         let from_bal = Self::share_balance(&env, invoice_id, &original_investor, &from);
         if from_bal < amount {
             return Err(FractionalizerError::NotShareHolder);
@@ -195,7 +209,13 @@ impl FractionalizerContract {
     /// Record the payout for a settled wrap. Must be called after the pool closes.
     ///
     /// Anyone can call this — it reads the pool's repaid_amount and records it.
-    /// The pool must be closed (is_closed == true).
+    /// The pool must be closed (is_closed == true), otherwise `PoolNotClosed`.
+    ///
+    /// Settlement is one-shot: a second call returns `AlreadySettled` and
+    /// leaves the stored payout untouched. This matters once redemptions have
+    /// started, because `redeem` decrements `total_payout` and
+    /// `outstanding_shares`; re-running settle would re-inflate the payout
+    /// against the already-reduced share supply and over-pay later holders.
     pub fn settle(
         env: Env,
         invoice_id: u64,
@@ -208,7 +228,7 @@ impl FractionalizerContract {
             .ok_or(FractionalizerError::WrapNotFound)?;
 
         if wrap.settled {
-            return Ok(());
+            return Err(FractionalizerError::AlreadySettled);
         }
 
         let pool_addr = Self::financing_pool(&env)?;
@@ -248,9 +268,11 @@ impl FractionalizerContract {
 
     /// Redeem shares for a pro-rata portion of the payout.
     ///
-    /// The pool must be settled first (call `settle`). Each share holder
-    /// may call this once. Dust from integer division is given to the first
-    /// redeemer (the one with the most shares, or simply the first caller).
+    /// The pool must be settled first (call `settle`); until then this returns
+    /// `PoolNotClosed`, even if the underlying pool has already closed. A
+    /// rejected early call writes no state, so the holder can redeem normally
+    /// once settled. Each share holder may call this once (`AlreadyClaimed`).
+    /// Dust from integer division goes to the last redeemer.
     pub fn redeem(
         env: Env,
         holder: Address,
@@ -599,7 +621,7 @@ mod tests {
         let s = setup();
         seed_pool_and_position(&s, 1, 10_000_000_000);
         s.client.wrap(&s.investor, &1u64, &100u64);
-        let wrap = s.client.get_wrap(&1u64, &s.investor).unwrap();
+        let wrap = s.client.get_wrap(&1u64, &s.investor);
         assert_eq!(wrap.total_shares, 100);
         assert_eq!(wrap.outstanding_shares, 100);
         assert_eq!(wrap.contributed, 10_000_000_000);

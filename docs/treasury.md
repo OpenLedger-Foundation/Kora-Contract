@@ -320,6 +320,32 @@ therefore convert those integer amounts to human units without relying on
 off-chain guesses. Generation fails with `TokenDecimalsNotRegistered` rather
 than publishing a report with ambiguous units.
 
+### Multi-asset balance view (reporting API, issue #1184)
+
+The public, read-only `GET /treasury/balances` endpoint of `services/reporting`
+returns one entry per asset the treasury holds (USDC, EURC, …), not only USDC:
+
+```json
+{
+  "balances": [
+    { "asset": "EURC", "balance": "1200000000", "totalInflows": "1200000000", "totalOutflows": "0" },
+    { "asset": "USDC", "balance": "2450000000", "totalInflows": "3000000000", "totalOutflows": "550000000" }
+  ],
+  "assets": ["EURC", "USDC"],
+  "lastIndexedLedger": 51200000,
+  "partial": false
+}
+```
+
+- Balances are sorted by asset code; `assets` lists the codes present.
+- Asset codes are case-normalised, so `usdc` and `USDC` events roll up into one balance.
+- `?asset=<code>` (1–12 alphanumerics, case-insensitive) narrows the view; an
+  unknown asset returns an empty list and a malformed code returns `400`.
+- Indexer lag is reported via `partial` / `lagWarning`; an unavailable data
+  source returns `500` (fail closed) and no source configured returns `503`.
+
+No new environment variables are introduced.
+
 ## Community Grants
 
 `submit_grant_proposal` accepts a public request containing a recipient, a

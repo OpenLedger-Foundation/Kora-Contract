@@ -23,6 +23,9 @@ export const DEFAULT_PINNING_CONFIG: PinningServiceConfig = {
   maxFileSizeBytes: 10 * 1024 * 1024, // 10 MiB
   allowedContentTypes: ["application/pdf", "application/json", "image/png", "image/jpeg"],
   allowedExtensions: [".pdf", ".json", ".png", ".jpg", ".jpeg"],
+  maxSizeBytesByContentType: {
+    "application/json": 256 * 1024, // invoice metadata is small; cap pin quota abuse
+  },
   minSuccesses: 1,
   pinRetryAttempts: 3,
   pinRetryBackoffMs: 250,
@@ -51,6 +54,89 @@ function extOf(filename: string): string {
   return i >= 0 ? filename.slice(i).toLowerCase() : "";
 }
 
+/**
+ * Content-type allowlist enforcement for pinned invoice metadata (issue #1186).
+ *
+ * The declared MIME type is normalized (case, whitespace, parameters), must be
+ * consistent with the filename extension, and must match the content's magic
+ * bytes. This stops renamed HTML/SVG/script blobs from being pinned under an
+ * allowlisted type and later served by a gateway as active content.
+ */
+const EXTENSIONS_BY_CONTENT_TYPE: Record<string, string[]> = {
+  "application/pdf": [".pdf"],
+  "application/json": [".json"],
+  "image/png": [".png"],
+  "image/jpeg": [".jpg", ".jpeg"],
+};
+
+const ALLOWED_CHARSETS = new Set(["utf-8", "utf8"]);
+
+/** Lowercase the MIME type and strip parameters; reject unknown parameters. */
+export function normalizeContentType(raw: string): string {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new Error("UNSUPPORTED_TYPE: missing content type");
+  }
+  const [base, ...params] = raw.split(";").map((part) => part.trim().toLowerCase());
+  for (const param of params) {
+    if (param === "") continue;
+    const [name, value = ""] = param.split("=").map((part) => part.trim().replace(/^"|"$/g, ""));
+    if (name !== "charset" || !ALLOWED_CHARSETS.has(value)) {
+      throw new Error(`UNSUPPORTED_TYPE: ${raw}`);
+    }
+  }
+  return base;
+}
+
+function startsWith(content: Uint8Array, signature: number[]): boolean {
+  return signature.every((byte, i) => content[i] === byte);
+}
+
+/** Returns true when `content` structurally matches the normalized `contentType`. */
+export function contentMatchesType(contentType: string, content: Uint8Array): boolean {
+  switch (contentType) {
+    case "application/pdf":
+      return startsWith(content, [0x25, 0x50, 0x44, 0x46, 0x2d]); // %PDF-
+    case "image/png":
+      return startsWith(content, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case "image/jpeg":
+      return startsWith(content, [0xff, 0xd8, 0xff]);
+    case "application/json": {
+      try {
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+        JSON.parse(text);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    default:
+      // Unknown types have no sniffing rule; fail closed.
+      return false;
+  }
+}
+
+function validateConfig(config: PinningServiceConfig): void {
+  if (!Array.isArray(config.allowedContentTypes) || config.allowedContentTypes.length === 0) {
+    throw new Error("CONFIG_ERROR: allowedContentTypes must be a non-empty allowlist");
+  }
+  if (!Array.isArray(config.allowedExtensions) || config.allowedExtensions.length === 0) {
+    throw new Error("CONFIG_ERROR: allowedExtensions must be a non-empty allowlist");
+  }
+  if (!Number.isInteger(config.maxFileSizeBytes) || config.maxFileSizeBytes <= 0) {
+    throw new Error("CONFIG_ERROR: maxFileSizeBytes must be a positive integer");
+  }
+  for (const type of config.allowedContentTypes) {
+    if (!EXTENSIONS_BY_CONTENT_TYPE[normalizeContentType(type)]) {
+      throw new Error(`CONFIG_ERROR: no content sniffing rule for allowlisted type ${type}`);
+    }
+  }
+  for (const [type, cap] of Object.entries(config.maxSizeBytesByContentType ?? {})) {
+    if (!Number.isInteger(cap) || cap <= 0) {
+      throw new Error(`CONFIG_ERROR: size cap for ${type} must be a positive integer`);
+    }
+  }
+}
+
 export class PinningService {
   private contentCache = new Map<string, Uint8Array>();
   private readonly metrics: PinningMetrics = {
@@ -71,6 +157,7 @@ export class PinningService {
     if (providers.length < 2) {
       throw new Error("At least two independent pinning providers are required for redundancy");
     }
+    validateConfig(config);
     if (!Number.isInteger(config.pinRetryAttempts ?? 3) || (config.pinRetryAttempts ?? 3) < 1) {
       throw new Error("pinRetryAttempts must be a positive integer");
     }
@@ -142,16 +229,22 @@ export class PinningService {
     if (!req.piiHandled) {
       throw new Error("PII_NOT_HANDLED: debtor PII must be hashed/encrypted before pinning");
     }
-    if (!this.config.allowedContentTypes.includes(req.contentType)) {
+    const contentType = normalizeContentType(req.contentType);
+    const allowedTypes = this.config.allowedContentTypes.map(normalizeContentType);
+    if (!allowedTypes.includes(contentType)) {
       throw new Error(`UNSUPPORTED_TYPE: ${req.contentType}`);
     }
-    if (!this.config.allowedExtensions.includes(extOf(req.filename))) {
+    const ext = extOf(req.filename);
+    if (!this.config.allowedExtensions.includes(ext)) {
       throw new Error(`UNSUPPORTED_EXTENSION: ${req.filename}`);
     }
-    if (req.content.byteLength > this.config.maxFileSizeBytes) {
-      throw new Error(
-        `FILE_TOO_LARGE: ${req.content.byteLength} > ${this.config.maxFileSizeBytes}`,
-      );
+    if (!EXTENSIONS_BY_CONTENT_TYPE[contentType]?.includes(ext)) {
+      throw new Error(`EXTENSION_TYPE_MISMATCH: ${req.filename} is not ${contentType}`);
+    }
+    const typeCap = this.config.maxSizeBytesByContentType?.[contentType];
+    const maxBytes = Math.min(this.config.maxFileSizeBytes, typeCap ?? Infinity);
+    if (req.content.byteLength > maxBytes) {
+      throw new Error(`FILE_TOO_LARGE: ${req.content.byteLength} > ${maxBytes}`);
     }
     if (req.content.byteLength === 0) throw new Error("EMPTY_FILE");
 
@@ -159,6 +252,9 @@ export class PinningService {
     const actual = sha256Hex(req.content);
     if (actual.toLowerCase() !== req.claimedSha256Hex.toLowerCase()) {
       throw new Error("INTEGRITY_MISMATCH: claimed sha256 does not match content");
+    }
+    if (!contentMatchesType(contentType, req.content)) {
+      throw new Error(`CONTENT_TYPE_MISMATCH: content is not valid ${contentType}`);
     }
 
     // Content-derived CID (hex digest; gateway maps to CIDv0/v1 on read).

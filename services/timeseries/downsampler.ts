@@ -18,12 +18,14 @@ import {
 
 // ── Bucket window helpers ─────────────────────────────────────────────────────
 
+const MS_PER_5MIN  = 5  * 60 * 1_000;
 const MS_PER_HOUR = 60 * 60 * 1_000;
 const MS_PER_DAY  = 24 * MS_PER_HOUR;
 const MS_PER_WEEK = 7  * MS_PER_DAY;
 
 export function bucketWindowMs(granularity: DownsampleGranularity): number {
   switch (granularity) {
+    case "5min":   return MS_PER_5MIN;
     case "hourly": return MS_PER_HOUR;
     case "daily":  return MS_PER_DAY;
     case "weekly": return MS_PER_WEEK;

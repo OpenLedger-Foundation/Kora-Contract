@@ -36,6 +36,7 @@ services:
       retries: 5
 
   indexer:
+    image: ${KORA_INDEXER_IMAGE:-kora-indexer:latest}
     build:
       context: ..
       dockerfile: packaging/Dockerfile
@@ -57,6 +58,55 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Community node profile: `./packaging/community-node.sh`
+  api:
+    profiles: ["community"]
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile.services
+    command: ["tsx", "services/treasury-api/src/index.ts"]
+    restart: unless-stopped
+    depends_on:
+      indexer:
+        condition: service_healthy
+    environment:
+      PORT: "3001"
+      INDEXER_URL: http://indexer:3000
+      STELLAR_RPC_URL: ${SOROBAN_RPC_URL:-}
+      TREASURY_CONTRACT_ID: ${TREASURY_CONTRACT_ID:-}
+    ports:
+      - "3001:3001"
+    networks:
+      - kora
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Not gated on indexer/api health, so it can report them as down.
+  health:
+    profiles: ["community"]
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile.services
+    command: ["tsx", "services/health/index.ts"]
+    restart: unless-stopped
+    environment:
+      HEALTH_PORT: "8081"
+      HEALTH_SERVICES: indexer,api
+      INDEXER_HEALTH_URL: http://indexer:3000/api/v1/health
+      API_HEALTH_URL: http://api:3001/health
+    ports:
+      - "8081:8081"
+    networks:
+      - kora
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   kora:

@@ -27,6 +27,7 @@ pub mod fund_refund_gaming;
 pub mod referral_self_dealing;
 pub mod insurance_pool_timing;
 pub mod concentration_cap_manipulation;
+pub mod secondary_wash_trading;
 
 use soroban_sdk::{Address, Env};
 

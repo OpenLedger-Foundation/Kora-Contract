@@ -1988,6 +1988,10 @@ impl AccessControlContract {
     ) -> Result<(), AccessControlError> {
         caller.require_auth();
         let mut config = Self::load_multisig_config(&env)?;
+        // Only a sitting council signer may conclude (see docs/ACCESS_MATRIX.md).
+        // Without this, any address could conclude an election before votes are
+        // cast and force the failed-election grace path.
+        Self::require_signer(&config, &caller)?;
 
         let mut election: CouncilElectionRecord = env
             .storage()
@@ -2046,7 +2050,7 @@ impl AccessControlContract {
 
             env.storage().persistent().set(
                 &DataKey::CouncilSeatTermStart(election.current_seat.clone()),
-                &(current_term_start + grace_period),
+                &current_term_start.saturating_add(grace_period),
             );
         }
 
@@ -2065,7 +2069,7 @@ impl AccessControlContract {
                 .persistent()
                 .get(&DataKey::CouncilSeatTermStart(seat))
                 .unwrap_or(0);
-            if term_start > 0 && env.ledger().timestamp() > term_start + length {
+            if term_start > 0 && env.ledger().timestamp() > term_start.saturating_add(length) {
                 return true;
             }
         }

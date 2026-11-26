@@ -40,7 +40,7 @@ export interface TimeSeriesPoint {
 
 // ── Downsampled / aggregated bucket ──────────────────────────────────────────
 
-export type DownsampleGranularity = "hourly" | "daily" | "weekly";
+export type DownsampleGranularity = "5min" | "hourly" | "daily" | "weekly";
 
 export interface DownsampledBucket {
   kind: SeriesKind;
@@ -79,4 +79,26 @@ export interface RetentionPolicy {
 export const DEFAULT_RETENTION: RetentionPolicy = {
   rawRetentionDays: 90,
   downsampledRetentionDays: 730, // 2 years
+};
+
+/**
+ * Retention windows per granularity tier.
+ *
+ * | Granularity | Retained for  | Rationale                                           |
+ * |-------------|---------------|-----------------------------------------------------|
+ * | 5min        | 7 days        | High-resolution; only needed for recent dashboards. |
+ * | hourly      | 90 days       | Matches raw retention; covers quarterly views.      |
+ * | daily       | 730 days      | 2-year rolling window; primary chart resolution.    |
+ * | weekly      | 1825 days     | 5-year archive; long-range trend views.             |
+ *
+ * Raw points follow `RetentionPolicy.rawRetentionDays` (default 90 days).
+ * After raw pruning, downsampled buckets remain queryable up to their tier
+ * window, ensuring long-range APR/marketplace charts continue to work even
+ * after raw data has been pruned.
+ */
+export const GRANULARITY_RETENTION_DAYS: Record<DownsampleGranularity, number> = {
+  "5min":   7,
+  hourly:  90,
+  daily:   730,
+  weekly:  1_825,
 };
