@@ -379,3 +379,12 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1161 -->
+- #1161: Reporting service CSV export for treasury transparency endpoints
+
+<!-- handsoff-issue-1162 -->
+- #1162: Health service dependency graph visualization data endpoint
+
+<!-- handsoff-issue-1163 -->
+- #1163: API gateway request idempotency-Key support for fund intents
