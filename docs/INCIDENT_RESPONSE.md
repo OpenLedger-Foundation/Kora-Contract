@@ -26,6 +26,10 @@ This document outlines procedures for responding to security incidents, critical
 | **Medium** | Issue affecting functionality | 24-48 hours | Contract state inconsistency, degraded performance |
 | **Low** | Minor issue, no security impact | Best effort | UI bug, documentation error |
 
+To get a suggested level from observed symptoms, run
+`scripts/classify_incident_sev.py --symptom <id> ...` (see
+[incident-response-templates/README.md](incident-response-templates/README.md#suggesting-a-severity)).
+
 ---
 
 ## Response Team

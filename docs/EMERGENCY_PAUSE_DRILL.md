@@ -319,3 +319,45 @@ Before executing a WASM upgrade during the 24-hour timelock window:
 
 > Fill in this table with actual names and contacts before mainnet deployment.
 > Rotate the on-call assignment weekly and test reachability monthly.
+
+---
+
+## Pause-effect verification metrics
+
+> Issue #1175.
+
+A pause is not considered effective until `is_paused` returns `true` on **every**
+target contract. After triggering the pause, run:
+
+```bash
+PAUSE_TARGETS="access_control=C...,treasury=C...,price_oracle=C..." \
+  ./scripts/verify-pause-effect.sh --out /var/lib/node_exporter/textfile/kora_pause.prom
+```
+
+| Metric | Meaning |
+|--------|---------|
+| `kora_pause_effective{target,contract}` | `1` paused, `0` not paused or unverifiable |
+| `kora_pause_probe_error{target,contract}` | `1` if the `is_paused` query failed (degraded RPC) |
+| `kora_pause_drill_targets_total` | Targets verified this run |
+| `kora_pause_drill_unpaused_targets` | Targets not confirmed paused |
+| `kora_pause_drill_last_run_timestamp_seconds` | Last run time |
+
+Alerts (`infra/monitoring/alerts.yml`, group `kora-pause-effect`):
+`KoraPauseNotEffective` and `KoraPauseProbeFailed` (both Sev-1).
+
+Behaviour: exit `0` all paused, `1` any target live or probe failed (a failed or
+unparseable probe is treated as **not paused**), `2` config error — empty
+`PAUSE_TARGETS`, malformed `name=ID` entry, duplicate target, or missing
+`--targets-file` (`ERR_CONFIG_MISSING` / `ERR_CONFIG_SCHEMA`). Re-running is
+idempotent; the output file is replaced atomically.
+
+| Env var | Purpose |
+|---------|---------|
+| `PAUSE_TARGETS` | Comma-separated `name=CONTRACT_ID` list (CI: `vars.TESTNET_PAUSE_TARGETS`) |
+| `PAUSE_METRICS_OUT` | Default output file (else stdout) |
+| `PAUSE_STATE_CMD` | Override probe command (tests / dry runs) |
+| `STELLAR_NETWORK`, `STELLAR_SOURCE` | Default `stellar contract invoke` probe settings |
+
+The drill workflow runs the verifier tests on every drill and the live
+verification when `dry_run=false` and `TESTNET_PAUSE_TARGETS` is set.
+Tests: `bash scripts/tests/test-verify-pause-effect.sh` and `promtool test rules infra/monitoring/tests/alerts.test.yml`.
