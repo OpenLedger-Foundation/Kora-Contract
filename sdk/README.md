@@ -311,3 +311,16 @@ Behaviour:
 - Only the inclusion fee is scaled; Soroban resource fees from
   `prepareTransaction` are unchanged. Fees are in stroops on both testnet and
   pubnet.
+
+## Typed contract errors
+
+```ts
+import { KoraErrorCode, mapContractError } from "@kora-protocol/sdk";
+
+const { code, retryable } = mapContractError(err, "marketplace");
+if (code === KoraErrorCode.ProtocolPaused) showPausedBanner();
+```
+
+Codes are per contract; unrecognised contracts or codes map to
+`KoraErrorCode.Unknown` and are not retryable. After changing a contract error
+enum, run `npm run generate:errors`.

@@ -1,3 +1,5 @@
+import { CONTRACT_ERROR_CODES, KoraErrorCode } from "./contractErrors";
+
 export const CONTRACT_ERROR_MESSAGES: Record<number, string> = {
   1: "Unauthorized",
   2: "Not admin",
@@ -177,4 +179,57 @@ export function getErrorMessage(code: number, contract?: string): string | undef
     }
   }
   return CONTRACT_ERROR_MESSAGES[code];
+}
+
+/** Typed form of an on-chain failure, for i18n keys and retry decisions. */
+export interface MappedContractError {
+  code: KoraErrorCode;
+  /** Raw on-chain code; undefined when the input carried none. */
+  contractCode?: number;
+  contract: string;
+  /** True when the same call may succeed later without changed inputs. */
+  retryable: boolean;
+}
+
+const RETRYABLE: ReadonlySet<string> = new Set([
+  "ProtocolPaused",
+  "ContractPaused",
+  "Paused",
+  "CircuitBreakerTripped",
+  "MintRateLimitExceeded",
+  "WithdrawalRateLimitExceeded",
+  "UpgradeTimelockNotElapsed",
+  "GovernanceTimelockNotElapsed",
+  "ScoreUpdateCooldownNotElapsed",
+  "DependencyUpdateTimelockNotElapsed",
+  "TokenWhitelistTimelockNotElapsed",
+  "RecipientTimelockNotElapsed",
+]);
+
+/** Extract the code from a number, `Error(Contract, #N)` text, or an Error. */
+function extractContractCode(error: unknown): number | undefined {
+  if (typeof error === "number") return Number.isInteger(error) ? error : undefined;
+  if (typeof error === "string") {
+    const match = /Error\(Contract,\s*#(\d+)\)/.exec(error);
+    return match ? Number(match[1]) : undefined;
+  }
+  if (typeof error === "object" && error !== null) {
+    return extractContractCode((error as { message?: unknown }).message);
+  }
+  return undefined;
+}
+
+/**
+ * Map a Soroban contract failure to a stable SDK enum. Numeric codes are only
+ * meaningful per contract, so an unknown contract or code yields `Unknown`.
+ * Never throws.
+ */
+export function mapContractError(error: unknown, contract: string): MappedContractError {
+  const key = contract.replace(/([a-z])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
+  const contractCode = extractContractCode(error);
+  const tables: Record<string, Record<number, KoraErrorCode>> = CONTRACT_ERROR_CODES;
+  const table = Object.prototype.hasOwnProperty.call(tables, key) ? tables[key] : undefined;
+  const code =
+    (contractCode === undefined ? undefined : table?.[contractCode]) ?? KoraErrorCode.Unknown;
+  return { code, contractCode, contract, retryable: RETRYABLE.has(code) };
 }

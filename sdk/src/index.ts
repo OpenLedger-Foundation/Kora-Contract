@@ -33,7 +33,11 @@ export {
   SECONDARY_MARKET_ERROR_MESSAGES,
   GOVERNANCE_VOTING_ERROR_MESSAGES,
   getErrorMessage,
+  mapContractError,
 } from "./errorMapping";
+export type { MappedContractError } from "./errorMapping";
+export { CONTRACT_ERROR_CODES, KoraErrorCode } from "./contractErrors";
+export type { KoraContractName } from "./contractErrors";
 export type {
   DelegationRecord,
   EscrowDispute,

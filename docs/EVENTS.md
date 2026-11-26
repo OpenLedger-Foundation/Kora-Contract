@@ -243,6 +243,134 @@ match topic {
 }
 ```
 
+## Generated On-Chain Event Table
+
+Generated from `contracts/shared/src/events.rs`; this table is authoritative for
+the topic symbols emitted on-chain by the shared helpers. Do not edit by hand.
+Regenerate with `cargo run -p kora-xtask --bin gen_events`.
+
+<!-- BEGIN GENERATED EVENTS -->
+| Topic | Function | Parameters | Payload |
+|---|---|---|---|
+| `INV_CRT` | `invoice_created` | `invoice_id: u64, sme: &Address, amount: i128, currency: Symbol` | `(sme, invoice_id, amount, currency, timestamp)` |
+| `INV_LIST` | `invoice_listed` | `invoice_id: u64, seller: &Address, asking_price: i128, currency: Symbol` | `(seller, invoice_id, asking_price, currency, timestamp)` |
+| `INV_FUND` | `invoice_funded` | `invoice_id: u64, investor: &Address, amount: i128, currency: Symbol` | `(investor, invoice_id, amount, currency, timestamp)` |
+| `INV_RPD` | `invoice_repaid` | `invoice_id: u64, sme: &Address, amount: i128, currency: Symbol` | `(sme, invoice_id, amount, currency, timestamp)` |
+| `INV_DFT` | `invoice_defaulted` | `invoice_id: u64, actor: &Address, amount: i128, currency: Symbol` | `(actor, invoice_id, amount, currency, timestamp)` |
+| `INV_AMD` | `invoice_amended` | `invoice_id: u64, sme: &Address, currency: Symbol` | `(invoice_id, sme, currency, timestamp)` |
+| `INV_WTH` | `invoice_withdrawn` | `invoice_id: u64, sme: &Address, currency: Symbol` | `(invoice_id, sme, currency, timestamp)` |
+| `INV_BATCH` | `invoice_batch_minted` | `batch_id: u64, sme: &Address, invoice_ids: &Vec<u64>` | `(sme, batch_id, invoice_ids, timestamp)` |
+| `RISK_RFSH` | `risk_score_refreshed` | `invoice_id: u64, caller: &Address, old_score: u32, new_score: u32, old_tier: &RiskTier, new_tier: &RiskTier` | `(caller, invoice_id, old_score, new_score, old_tier, new_tier, timestamp)` |
+| `INV_ARC` | `invoice_archived` | `invoice_id: u64, sme: &Address, amount: i128, _status: InvoiceStatus` | `(invoice_id, sme, amount, timestamp)` |
+| `REPAY` | `repayment_made` | `invoice_id: u64, payer: &Address, amount: i128` | `(payer, invoice_id, amount, timestamp)` |
+| `REP_APPR` | `repayment_approved` | `invoice_id: u64, payer: &Address, amount: i128` | `(payer, invoice_id, amount, timestamp)` |
+| `INSTMT_PD` | `installment_paid` | `invoice_id: u64, payer: &Address, index: u32, amount: i128` | `(payer, invoice_id, index, amount, timestamp)` |
+| `YIELD` | `yield_distributed` | `invoice_id: u64, investor: &Address, yield_amount: i128` | `(investor, invoice_id, yield_amount, timestamp)` |
+| `LATE_PEN` | `late_penalty_applied` | `invoice_id: u64, penalty_amount: i128, total_owed: i128` | `(invoice_id, penalty_amount, total_owed, timestamp)` |
+| `PEN_SPLIT` | `late_penalty_split` | `invoice_id: u64, total_penalty: i128, treasury_cut: i128, investor_cut: i128` | `(invoice_id, total_penalty, treasury_cut, investor_cut, timestamp)` |
+| `PEN_SPL_U` | `late_penalty_split_updated` | `split_bps: u32` | `(split_bps, timestamp)` |
+| `LST_CXL` | `listing_cancelled` | `invoice_id: u64, seller: &Address` | `(seller, invoice_id, timestamp)` |
+| `MKTPL_EXPIRED` | `listing_expired` | `invoice_id: u64, seller: &Address` | `(seller, invoice_id, timestamp)` |
+| `DA_VERI` | `debtor_attestation_verified` | `invoice_id: u64` | `(invoice_id, timestamp)` |
+| `DA_CFG` | `debtor_attestation_configured` | `admin: &Address, addr: Option<&Address>` | `(admin, addr, timestamp)` |
+| `FEE_COL` | `fee_collected` | `investor: &Address, invoice_id: u64, fee_amount: i128, token: &Address` | `(investor, invoice_id, fee_amount, token, timestamp)` |
+| `FEE_WTH` | `fee_withdrawn` | `actor: &Address, token: &Address, amount: i128` | `(actor, token, amount, timestamp)` |
+| `FEE_REV` | `fee_reversed` | `marketplace: &Address, invoice_id: u64, investor: &Address, amount: i128, token: &Address` | `(marketplace, invoice_id, investor, amount, token, timestamp)` |
+| `EMRG_WTH` | `emergency_withdrawn` | `by: &Address, token: &Address, amount: i128` | `(by, token, amount, timestamp)` |
+| `FEE_UPD` | `fee_rate_updated` | `by: &Address, old_bps: u32, new_bps: u32` | `(by, old_bps, new_bps, timestamp)` |
+| `REF_FEE` | `referral_fee_paid` | `invoice_id: u64, referrer: &Address, referral_fee: i128` | `(invoice_id, referrer, referral_fee, timestamp)` |
+| `TRES_INI` | `treasury_initialized` | `admin: &Address, fee_bps: u32` | `(admin, fee_bps, timestamp)` |
+| `AC_PAUSED` | `protocol_paused` | `by: &Address` | `(by, timestamp)` |
+| `UNPAUSED` | `protocol_unpaused` | `by: &Address` | `(by, timestamp)` |
+| `TOK_WL` | `token_whitelisted` | `actor: &Address, token: &Address` | `(actor, token, timestamp)` |
+| `TOK_UNWL` | `token_whitelist_removed` | `actor: &Address, token: &Address` | `(actor, token, timestamp)` |
+| `ADM_TRF` | `admin_transferred` | `actor: &Address, new_admin: &Address` | `(actor, new_admin, timestamp)` |
+| `ADM_PRP` | `admin_proposed` | `proposer: &Address, proposed: &Address` | `(proposer, proposed, timestamp)` |
+| `ADM_CXL` | `admin_proposal_cancelled` | `admin: &Address` | `(admin, timestamp)` |
+| `ADM_ROT` | `admin_rotated` | `executor: &Address, old_admin: &Address, new_admin: &Address` | `(executor, old_admin, new_admin, timestamp)` |
+| `ROL_GRT` | `role_granted` | `admin: &Address, target: &Address` | `(admin, target, timestamp)` |
+| `ROL_RVK` | `role_revoked` | `admin: &Address, target: &Address` | `(admin, target, timestamp)` |
+| `POOL_OPN` | `pool_opened` | `marketplace: &Address, invoice_id: u64, token: &Address, face_value: i128` | `(marketplace, invoice_id, token, face_value, timestamp)` |
+| `POS_RECRD` | `position_recorded` | `admin: &Address, invoice_id: u64, investor: &Address, contributed: i128, share_bps: u32` | `(admin, invoice_id, investor, contributed, share_bps, timestamp)` |
+| `NET_SETTL` | `net_settled` | `payer: &Address, invoice_ids: &Vec<u64>, total_amount: i128` | `(payer, invoice_ids, total_amount, timestamp)` |
+| `VRF_ADD` | `verifier_added` | `admin: &Address, verifier: &Address` | `(admin, verifier, timestamp)` |
+| `VRF_REM` | `verifier_removed` | `admin: &Address, verifier: &Address` | `(admin, verifier, timestamp)` |
+| `SME_REG` | `sme_registered` | `verifier: &Address, sme: &Address, risk_score: u32` | `(verifier, sme, risk_score, timestamp)` |
+| `SME_UPD` | `sme_score_updated` | `verifier: &Address, sme: &Address, new_score: u32` | `(verifier, sme, new_score, timestamp)` |
+| `SME_DFT` | `sme_default_recorded` | `admin: &Address, sme: &Address, total_defaults: u32` | `(admin, sme, total_defaults, timestamp)` |
+| `SME_INV` | `sme_invoice_count_incremented` | `sme: &Address, new_total: u32` | `(sme, new_total, timestamp)` |
+| `DBT_SCORE` | `debtor_score_set` | `verifier: &Address, debtor_hash: &Bytes, score: u32` | `(verifier, debtor_hash, score, timestamp)` |
+| `REG_INI` | `registry_initialized` | `admin: &Address, invoice_nft: &Address` | `(admin, invoice_nft, timestamp)` |
+| `SUB_ADD` | `sub_account_added` | `primary: &Address, sub_account: &Address` | `(primary, sub_account, timestamp)` |
+| `SUB_RMV` | `sub_account_removed` | `primary: &Address, sub_account: &Address` | `(primary, sub_account, timestamp)` |
+| `UPG_PROP` | `upgrade_proposed` | `admin: &Address, wasm_hash: &soroban_sdk::BytesN<32>` | `(admin, wasm_hash, timestamp)` |
+| `UPG_EXEC` | `upgrade_executed` | `admin: &Address, wasm_hash: &soroban_sdk::BytesN<32>` | `(admin, wasm_hash, timestamp)` |
+| `MS_CFG` | `multisig_configured` | `threshold: u32, signer_count: u32` | `(threshold, signer_count, timestamp)` |
+| `MS_PROP` | `action_proposed` | `proposal_id: u64, proposer: &Address` | `(proposal_id, proposer, timestamp)` |
+| `MS_APPR` | `action_approved` | `proposal_id: u64, approver: &Address, approval_count: u32` | `(proposal_id, approver, approval_count, timestamp)` |
+| `MS_EXEC` | `action_executed` | `proposal_id: u64, executor: &Address` | `(proposal_id, executor, timestamp)` |
+| `MS_STALE` | `stale_votes_discarded` | `proposal_id: u64, executor: &Address, discarded_count: u32, valid_count: u32` | `(proposal_id, executor, discarded_count, valid_count, timestamp)` |
+| `REFUND` | `refund_claimed` | `invoice_id: u64, investor: &Address, amount: i128` | `(investor, invoice_id, amount, timestamp)` |
+| `POS_SALE` | `position_listed_for_sale` | `invoice_id: u64, seller: &Address, price: i128` | `(invoice_id, seller, price, timestamp)` |
+| `POS_SOLD` | `position_sold` | `invoice_id: u64, seller: &Address, buyer: &Address, price: i128` | `(invoice_id, seller, buyer, price, timestamp)` |
+| `POS_XFER` | `position_transferred` | `invoice_id: u64, from: &Address, to: &Address` | `(invoice_id, from, to, timestamp)` |
+| `SM_INIT` | `secondary_market_initialized` | `admin: &Address, financing_pool: &Address, fee_bps: u32` | `(admin, financing_pool, fee_bps, timestamp)` |
+| `SM_PAUS` | `secondary_market_paused` | `` | `(timestamp)` |
+| `SM_UNP` | `secondary_market_unpaused` | `` | `(timestamp)` |
+| `SM_FEE` | `secondary_market_fee_updated` | `fee_bps: u32` | `(fee_bps, timestamp)` |
+| `WTH_CAP_P` | `withdrawal_cap_proposed` | `admin: &Address, token: &Address, new_cap: i128` | `(admin, token, new_cap, timestamp)` |
+| `WTH_CAP_U` | `withdrawal_cap_updated` | `admin: &Address, token: &Address, old_cap: i128, new_cap: i128` | `(admin, token, old_cap, new_cap, timestamp)` |
+| `EMRG_DECL` | `emergency_declared` | `admin: &Address` | `(admin, timestamp)` |
+| `EMRG_REVK` | `emergency_revoked` | `admin: &Address` | `(admin, timestamp)` |
+| `AC_SET` | `access_control_updated` | `admin: &Address, access_control: &Address` | `(admin, access_control, timestamp)` |
+| `RCP_PROP` | `recipient_proposed` | `admin: &Address, recipient: &Address` | `(admin, recipient, timestamp)` |
+| `RCP_ALLOW` | `recipient_allowed` | `admin: &Address, recipient: &Address` | `(admin, recipient, timestamp)` |
+| `RSRV_DISB` | `reserve_disbursed` | `caller: &Address, token: &Address, recipient: &Address, amount: i128` | `(caller, token, recipient, amount, timestamp)` |
+| `SME_CL` | `sme_credit_limit_set` | `verifier: &Address, sme: &Address, credit_limit: i128` | `(verifier, sme, credit_limit, timestamp)` |
+| `SME_REAS` | `sme_verifier_reassigned` | `admin: &Address, sme: &Address, new_verifier: &Address` | `(admin, sme, new_verifier, timestamp)` |
+| `INV_FRZ` | `invoice_frozen` | `invoice_id: u64, admin: &Address` | `(admin, invoice_id, timestamp)` |
+| `INV_UFRZ` | `invoice_unfrozen` | `invoice_id: u64, admin: &Address` | `(admin, invoice_id, timestamp)` |
+| `CXL_REQ` | `cancellation_requested` | `invoice_id: u64, caller: &Address` | `(caller, invoice_id, timestamp)` |
+| `MTD_DISP` | `metadata_mismatch_flagged` | `invoice_id: u64, challenger: &Address` | `(challenger, invoice_id, timestamp)` |
+| `MTD_RES` | `metadata_dispute_resolved` | `invoice_id: u64, admin: &Address, upheld: bool` | `(admin, invoice_id, upheld, timestamp)` |
+| `MTD_CORR` | `metadata_hash_corrected` | `invoice_id: u64, admin: &Address, old_hash: &Bytes, new_hash: &Bytes` | `(admin, invoice_id, old_hash, new_hash, timestamp)` |
+| `MTD_CID` | `metadata_cid_updated` | `invoice_id: u64, sme: &Address, new_cid: &String` | `(sme, invoice_id, new_cid, timestamp)` |
+| `DECAY_SET` | `decay_schedule_set` | `invoice_id: u64, seller: &Address, floor_price: i128, decay_end_ts: u64` | `(seller, invoice_id, floor_price, decay_end_ts, timestamp)` |
+| `BID_SUBM` | `bid_submitted` | `invoice_id: u64, investor: &Address, bid_price: i128, amount: i128` | `(investor, invoice_id, bid_price, amount, timestamp)` |
+| `BID_ACCP` | `bid_accepted` | `invoice_id: u64, seller: &Address, investor: &Address, bid_price: i128, amount: i128` | `(seller, invoice_id, investor, bid_price, amount, timestamp)` |
+| `UPG_CNCL` | `upgrade_cancelled` | `admin: &Address` | `(admin, timestamp)` |
+| `ADM_AUDIT` | `admin_action_audited` | `entry: &AdminAuditEntry` | `(entry.sequence, entry.actor, entry.action, entry.source, entry.timestamp)` |
+| `ADM_AUDT` | `adm_audit` | `sequence: u64, action: soroban_sdk::String, actor: &Address, timestamp: u64` | `(sequence, action, actor, timestamp)` |
+| `AUDT_CHK` | `audit_checkpoint` | `total_entries: u64, checksum: soroban_sdk::BytesN<32>, discarded_action: soroban_sdk::String, discarded_actor: &Address, discarded_timestamp: u64, discarded_sequence: u64` | `(total_entries, checksum, discarded_action, discarded_actor, discarded_timestamp, discarded_sequence)` |
+| `MKT_SET` | `marketplace_configured` | `admin: &Address, marketplace: &Address` | `(admin, marketplace, timestamp)` |
+| `SHARE_CRT` | `position_share_created` | `invoice_id: u64, original_investor: &Address, share_index: u32, amount: i128, new_owner: &Address` | `(invoice_id, original_investor, share_index, amount, new_owner, timestamp)` |
+| `SHARE_TRF` | `position_share_transferred` | `invoice_id: u64, original_investor: &Address, share_index: u32, from: &Address, to: &Address` | `(invoice_id, original_investor, share_index, from, to, timestamp)` |
+| `SHARE_SALE` | `share_listed_for_sale` | `invoice_id: u64, share_index: u32, price: i128` | `(invoice_id, share_index, price, timestamp)` |
+| `SHARE_SOLD` | `share_sold` | `invoice_id: u64, share_index: u32, buyer: &Address, price: i128` | `(invoice_id, share_index, buyer, price, timestamp)` |
+| `DISP_OPEN` | `dispute_opened` | `invoice_id: u64, challenger: &Address` | `(challenger, invoice_id, timestamp)` |
+| `DISP_EVID` | `dispute_evidence_submitted` | `invoice_id: u64, evidence_cid: &String` | `(invoice_id, evidence_cid, timestamp)` |
+| `DISP_RES` | `dispute_resolved` | `invoice_id: u64, resolver: &Address, upheld: bool` | `(resolver, invoice_id, upheld, timestamp)` |
+| `DISP_FUND` | `dispute_funded` | `invoice_id: u64, amount: i128` | `(invoice_id, amount, timestamp)` |
+| `DISP_PAY` | `dispute_payout` | `invoice_id: u64, amount: i128` | `(invoice_id, amount, timestamp)` |
+| `SWP_CFG` | `sweep_splits_configured` | `admin: &Address, split_count: u32, timestamp: u64` | `(admin, split_count, timestamp)` |
+| `SWP_EXEC` | `sweep_executed` | `token: &Address, destination: &Address, amount: i128, timestamp: u64` | `(token, destination, amount, timestamp)` |
+| `TRN_CRTD` | `tranche_created` | `id: u64, creator: &Address, total_face_value: i128` | `(id, creator, total_face_value)` |
+| `TRN_FNDD` | `tranche_funded` | `tranche_id: u64, investor: &Address, amount: i128` | `(tranche_id, investor, amount)` |
+| `TOK_WLP` | `token_whitelist_proposed` | `actor: &Address, token: &Address` | `(actor, token, timestamp)` |
+| `DEP_PROP` | `dependency_update_proposed` | `actor: &Address, field_tag: u32, new_address: &Address` | `(actor, field_tag, new_address, timestamp)` |
+| `DEP_EXEC` | `dependency_updated` | `actor: &Address, field_tag: u32, old_address: &Address, new_address: &Address` | `(actor, field_tag, old_address, new_address, timestamp)` |
+| `INV_CONC` | `investor_concentration_exceeded` | `invoice_id: u64, investor: &Address, prospective: i128, cap_bps: u32` | `(investor, invoice_id, prospective, cap_bps, timestamp)` |
+| `LST_AMND` | `listing_amended` | `invoice_id: u64, caller: &Address, old_asking_price: i128, new_asking_price: i128, old_deadline: u64, new_deadline: u64` | `(caller, invoice_id, old_asking_price, new_asking_price, old_deadline, new_deadline, timestamp)` |
+| `REG_INIT` | `registry_param_initialized` | `admin: &Address` | `(admin, timestamp)` |
+| `PAR_PROP` | `param_update_proposed` | `proposer: &Address, key: u32, value: i128` | `(proposer, key, value, timestamp)` |
+| `PAR_APRV` | `param_update_approved` | `approver: &Address, proposal_id: u64, approvals: u32` | `(approver, proposal_id, approvals, timestamp)` |
+| `PAR_EXEC` | `param_updated` | `executor: &Address, key: u32, old_value: i128, new_value: i128` | `(executor, key, old_value, new_value, timestamp)` |
+| `VEST_INIT` | `vesting_initialized` | `admin: &Address, token: &Address` | `(admin, token, timestamp)` |
+| `VEST_GRANT` | `vesting_grant_created` | `admin: &Address, beneficiary: &Address, total_amount: i128, start_time: u64, cliff_duration: u64, vesting_duration: u64` | `(admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp)` |
+| `VEST_REL` | `vesting_tokens_released` | `beneficiary: &Address, amount: i128` | `(beneficiary, amount, timestamp)` |
+| `VEST_REV` | `vesting_grant_revoked` | `admin: &Address, beneficiary: &Address, revoked_at: u64` | `(admin, beneficiary, revoked_at, timestamp)` |
+<!-- END GENERATED EVENTS -->
+
 ## Migration Notes
 
 Events use Soroban's `symbol_short!()` macro, which is more efficient than `Symbol::new()` for constants. All topic symbols are 8-14 characters and fit comfortably within the 32-character limit.
