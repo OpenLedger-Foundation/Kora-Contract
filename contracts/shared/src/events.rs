@@ -840,6 +840,26 @@ pub fn secondary_market_fee_updated(env: &Env, fee_bps: u32) {
     );
 }
 
+/// Emitted when an address is added to the secondary-market fee-recipient
+/// allowlist. Schema: (admin, recipient, timestamp)
+pub fn secondary_market_fee_recipient_added(env: &Env, admin: &Address, recipient: &Address) {
+    emit(
+        env,
+        symbol_short!("SM_R_ADD"),
+        (admin.clone(), recipient.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when an address is removed from the secondary-market fee-recipient
+/// allowlist. Schema: (admin, recipient, timestamp)
+pub fn secondary_market_fee_recipient_removed(env: &Env, admin: &Address, recipient: &Address) {
+    emit(
+        env,
+        symbol_short!("SM_R_REM"),
+        (admin.clone(), recipient.clone(), env.ledger().timestamp()),
+    );
+}
+
 // ── Treasury Cap Events ───────────────────────────────────────────────────────
 
 /// Schema: (actor=admin, token, new_cap, timestamp)

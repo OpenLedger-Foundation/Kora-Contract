@@ -10,11 +10,12 @@ import { IngestionEngine } from "./engine";
 import { FxIngestionConfig, CurrencyCode } from "./types";
 import { SurgePricingMonitor, loadFeeMonitorConfig } from "./fee-monitor";
 import { startFeeHintServer, loadFeeHintServerConfig } from "./fee-hint-server";
+import { FxMetrics, readFxMetricsPort, startMetricsServer } from "./metrics";
 import pino from "pino";
 
 const logger = pino({ name: "fx-ingestion" });
 
-function loadConfig(): FxIngestionConfig {
+export function loadConfig(): FxIngestionConfig {
   const currencies = (process.env.FX_CURRENCIES ?? "NGN,KES,GHS,ZAR,TZS,UGX,XOF,EGP")
     .split(",")
     .map((c) => c.trim() as CurrencyCode);
@@ -33,15 +34,23 @@ function loadConfig(): FxIngestionConfig {
   };
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig();
-
+/** Validate that required secrets/config are present; throws on missing. */
+export function validateConfig(config: FxIngestionConfig): void {
   if (!config.relaySecret) {
-    logger.error("FX_RELAY_SECRET is required");
-    process.exit(1);
+    throw new Error("FX_RELAY_SECRET is required");
   }
   if (!config.oracleContractAddress) {
-    logger.error("ORACLE_CONTRACT_ADDRESS is required");
+    throw new Error("ORACLE_CONTRACT_ADDRESS is required");
+  }
+}
+
+export async function main(): Promise<void> {
+  const config = loadConfig();
+
+  try {
+    validateConfig(config);
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
@@ -52,7 +61,12 @@ async function main(): Promise<void> {
 
   const checker = new CrossChecker(sources, config.maxDivergenceBps);
   const relay = new OracleRelay(config);
-  const engine = new IngestionEngine(checker, relay, config);
+  const metrics = new FxMetrics();
+  const engine = new IngestionEngine(checker, relay, config, metrics);
+
+  const metricsPort = readFxMetricsPort();
+  const metricsServer = startMetricsServer(metrics, metricsPort);
+  logger.info({ port: metricsPort }, "FX ingestion metrics server listening");
 
   engine.start();
 
@@ -71,6 +85,7 @@ async function main(): Promise<void> {
     engine.stop();
     feeMonitor?.stop();
     feeServer?.close();
+    metricsServer.close();
     process.exit(0);
   };
 
@@ -78,7 +93,9 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
 }
 
-main().catch((err) => {
-  logger.error(err, "FX ingestion service crashed");
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    logger.error(err, "FX ingestion service crashed");
+    process.exit(1);
+  });
+}

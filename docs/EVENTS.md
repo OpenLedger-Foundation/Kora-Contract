@@ -173,6 +173,17 @@ emissions is removed.
 | `UPG_PROP` | upgrade_proposed | (admin, wasm_hash, timestamp) | Upgrade proposed |
 | `UPG_EXEC` | upgrade_executed | (admin, wasm_hash, timestamp) | Upgrade executed |
 
+### Secondary Market Contract (SM_*)
+
+| Topic | Function | Payload | Description |
+|-------|----------|---------|-------------|
+| `SM_INIT` | secondary_market_initialized | (admin, financing_pool, fee_bps, timestamp) | Secondary market initialized |
+| `SM_PAUS` | secondary_market_paused | (timestamp) | Secondary market paused |
+| `SM_UNP` | secondary_market_unpaused | (timestamp) | Secondary market unpaused |
+| `SM_FEE` | secondary_market_fee_updated | (fee_bps, timestamp) | Protocol fee rate updated |
+| `SM_R_ADD` | secondary_market_fee_recipient_added | (admin, recipient, timestamp) | Address added to the fee-recipient allowlist |
+| `SM_R_REM` | secondary_market_fee_recipient_removed | (admin, recipient, timestamp) | Address removed from the fee-recipient allowlist |
+
 ### Shared / Cross-Contract Events (PROTOCOL_*)
 
 | Topic | Function | Payload | Description |
@@ -257,3 +268,52 @@ The aggregated tables are exposed through an internal read-only query API
 (`GET /internal/analytics/{metric}?from=&to=&bucket=&tier=`) consumed by the
 frontend analytics dashboard (tracked separately). The API performs no
 aggregation itself; it only filters and returns pre-computed rows.
+
+
+---
+
+## Subscription Authorization (#769)
+
+The off-chain subscription service (`services/api/subscriptions/`) streams the
+invoice events above to clients over Server-Sent Events. To prevent leaking
+counterparty commercial data, **every stream is authorized against a verified
+wallet/session before any event is delivered**.
+
+### Authorization gate
+
+| Step | Check | Failure response |
+|---|---|---|
+| 1 | Valid, non-expired session token (HMAC-signed, bound to a wallet address) | HTTP 401 `UNAUTHORIZED` |
+| 2 | Requested topic is permitted and, for `position-status-change`, scoped to the authenticated wallet | HTTP 403 `FORBIDDEN` |
+| 3 | Per-wallet new-connection rate limit not exceeded | HTTP 429 `RATE_LIMITED` + `Retry-After` |
+| 4 | Mid-stream: session must not expire while the stream is open | `event: session_expired` + close |
+
+The service never trusts a caller-supplied address. The wallet address is read
+from the verified session token and passed to the in-process EventBus as the
+subscriber identity, which enforces per-investor scoping for
+`position-status-change`.
+
+### Permitted subscription topics
+
+The subscription service exposes three topics, each mapped from the on-chain
+events in the registry above:
+
+| Subscription topic | On-chain source | Scoping |
+|---|---|---|
+| `listing-funding-progress` | `INV_FUNDED` | Public funding progress per invoice |
+| `position-status-change` | `POS_RECORDED`, `PROTOCOL_YIELD_DIST` | Scoped to the authenticated investor only |
+| `repayment` | `PROTOCOL_REPAYMENT` | Repayment events per invoice |
+
+A subscriber authenticated as wallet `A` may **not** request
+`position-status-change` with `investorAddress=B`; the server auto-scopes the
+stream to the authenticated wallet.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `SESSION_SECRET` | _(required)_ | HMAC secret validating session tokens (≥16 chars; fail-closed) |
+| `SUBSCRIPTION_RATE_LIMIT_PER_MIN` | `30` | Max new subscriptions per wallet per minute |
+
+See `services/api/subscriptions/README.md` for the integration contract and
+the mid-stream session-expiry eviction behavior.

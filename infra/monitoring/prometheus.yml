@@ -35,3 +35,8 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["fx-ingestion:8089"]
+
+  - job_name: kora-fx-ingestion-rates
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["fx-ingestion:8081"]

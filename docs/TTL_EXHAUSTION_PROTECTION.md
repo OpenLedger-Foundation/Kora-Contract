@@ -396,6 +396,23 @@ impl RiskRegistryContract {
 - PagerDuty for critical entries
 - On-chain event emission for transparency
 
+### Dry-run rehearsal (#<keeper-dry-run>)
+
+Operators need a safe rehearsal before burning fees on a mass extend. The
+keeper exposes a read-only dry run that classifies each watched key as
+**instance** (contract instance entry) or **persistent** (per-listing entries)
+and reports which need a TTL bump — **without enqueuing, dispatching, or
+submitting any transaction**:
+
+- One-shot CLI: `KEEPER_DRY_RUN=1 npm start` prints the report and exits.
+- HTTP: `GET /dry-run` on the running keeper.
+
+The report flags keys below `KEEPER_TTL_THRESHOLD_LEDGERS` as `needsBump`,
+surfacing archived/expired entries as `needsBump + missing` (never silently
+skipped) so they can be restored. Empty/missing config fails closed with a
+typed `DryRunConfigError`. Re-running the dry run is idempotent and produces an
+identical report. See `docs/storage-rent-cost-model.md § Dry-run rehearsal`.
+
 ### Deployment
 
 ```bash

@@ -3,7 +3,7 @@
 use kora_access_control::{AccessControlContract, AccessControlContractClient};
 use kora_financing_pool::FinancingPoolContractClient;
 use kora_invoice_nft::InvoiceNftContractClient;
-use kora_secondary_market::SecondaryMarketClient;
+use kora_secondary_market::{SecondaryMarketClient, SecondaryMarketError};
 use soroban_sdk::{Bytes, String as SorobanString, Symbol};
 use kora_treasury::TreasuryContractClient;
 use soroban_sdk::{
@@ -168,4 +168,94 @@ fn buy_uses_admin_updated_fee_rate_for_settlement() {
     t.market
         .update_protocol_fee_bps(&t.admin, &updated_fee_bps);
     assert_fee_settlement(&t, updated_fee_bps);
+}
+
+// ── Fee-recipient allowlist (#<fee-recipient>) ────────────────────────────────
+
+#[test]
+fn treasury_is_auto_allowlisted_at_initialize() {
+    let t = setup(250);
+    assert!(t.market.is_fee_recipient_allowed(&t.treasury_address));
+}
+
+#[test]
+fn admin_can_add_and_remove_fee_recipient_idempotently() {
+    let t = setup(250);
+    assert!(!t.market.is_fee_recipient_allowed(&t.observer));
+
+    t.market.add_fee_recipient(&t.admin, &t.observer);
+    assert!(t.market.is_fee_recipient_allowed(&t.observer));
+    // Idempotent add.
+    t.market.add_fee_recipient(&t.admin, &t.observer);
+    assert!(t.market.is_fee_recipient_allowed(&t.observer));
+
+    t.market.remove_fee_recipient(&t.admin, &t.observer);
+    assert!(!t.market.is_fee_recipient_allowed(&t.observer));
+    // Idempotent remove.
+    t.market.remove_fee_recipient(&t.admin, &t.observer);
+    assert!(!t.market.is_fee_recipient_allowed(&t.observer));
+}
+
+#[test]
+fn non_admin_cannot_modify_fee_recipient_allowlist() {
+    let t = setup(250);
+
+    let add_res = t.market.try_add_fee_recipient(&t.observer, &t.buyer);
+    assert!(add_res.is_ok());
+    assert_eq!(add_res.unwrap(), Err(SecondaryMarketError::NotAdmin));
+
+    let rem_res = t.market.try_remove_fee_recipient(&t.observer, &t.treasury_address);
+    assert!(rem_res.is_ok());
+    assert_eq!(rem_res.unwrap(), Err(SecondaryMarketError::NotAdmin));
+
+    // Treasury still allowed (the unauthorized calls changed nothing).
+    assert!(t.market.is_fee_recipient_allowed(&t.treasury_address));
+}
+
+#[test]
+fn removing_active_treasury_fails_closed_until_restored() {
+    let t = setup(250);
+    t.market
+        .list_position(&t.seller, &INVOICE_ID, &t.token_address, &TRADE_PRICE);
+
+    // Remove the treasury from the allowlist → settlement fails closed.
+    t.market
+        .remove_fee_recipient(&t.admin, &t.treasury_address);
+    let res = t.market
+        .try_buy_position(&t.buyer, &INVOICE_ID, &t.seller);
+    assert!(res.is_ok());
+    assert_eq!(
+        res.unwrap(),
+        Err(SecondaryMarketError::FeeRecipientNotAllowed)
+    );
+
+    // No state mutated on failure: the listing is still active (the retry
+    // fails closed with FeeRecipientNotAllowed, not ListingNotFound).
+    let retry = t.market
+        .try_buy_position(&t.buyer, &INVOICE_ID, &t.seller);
+    assert!(retry.is_ok());
+    assert_eq!(
+        retry.unwrap(),
+        Err(SecondaryMarketError::FeeRecipientNotAllowed)
+    );
+
+    // Re-allow → settlement succeeds and the position transfers.
+    t.market
+        .add_fee_recipient(&t.admin, &t.treasury_address);
+    t.market.buy_position(&t.buyer, &INVOICE_ID, &t.seller);
+    let buyer_position = t.pool.get_position(&INVOICE_ID, &t.buyer);
+    assert_eq!(buyer_position.investor, t.buyer);
+}
+
+#[test]
+fn paused_buy_returns_protocol_paused_before_allowlist_check() {
+    let t = setup(250);
+    t.market
+        .list_position(&t.seller, &INVOICE_ID, &t.token_address, &TRADE_PRICE);
+
+    t.market.pause(&t.admin);
+    let res = t.market
+        .try_buy_position(&t.buyer, &INVOICE_ID, &t.seller);
+    assert!(res.is_ok());
+    assert_eq!(res.unwrap(), Err(SecondaryMarketError::ProtocolPaused));
 }
