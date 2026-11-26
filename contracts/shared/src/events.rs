@@ -1545,34 +1545,6 @@ pub fn param_updated(env: &Env, executor: &Address, key: u32, old_value: i128, n
     );
 }
 
-/// Schema: (actor=admin, seeded_count, checksum, timestamp).
-pub fn parameter_registry_bootstrap(
-    env: &Env,
-    admin: &Address,
-    count: u32,
-    checksum: soroban_sdk::Bytes,
-) {
-    emit(
-        env,
-        symbol_short!("REG_BOOT"),
-        (admin.clone(), count, checksum, env.ledger().timestamp()),
-    );
-}
-
-/// Schema: (invoice_id, risk_tier, attestation_required, timestamp).
-pub fn debtor_attestation_policy_decision(
-    env: &Env,
-    invoice_id: u64,
-    tier: &crate::types::RiskTier,
-    required: bool,
-) {
-    emit(
-        env,
-        symbol_short!("DBT_POL"),
-        (invoice_id, tier.clone(), required, env.ledger().timestamp()),
-    );
-}
-
 // ── Vesting Events ──────────────────────────────────────────────────────────
 
 /// Schema: (actor=admin, token, timestamp)

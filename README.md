@@ -379,3 +379,36 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-758 -->
 - #758: [High] Build Debtor Identity Verification Microservice
+
+<!-- handsoff-issue-1161 -->
+- #1161: Reporting service CSV export for treasury transparency endpoints
+
+<!-- handsoff-issue-1162 -->
+- #1162: Health service dependency graph visualization data endpoint
+
+<!-- handsoff-issue-1163 -->
+- #1163: API gateway request idempotency-Key support for fund intents
+
+<!-- handsoff-issue-1165 -->
+- #1165: KYB vendor failover configuration and circuit breaker
+
+<!-- handsoff-issue-1168 -->
+- #1168: Blue-green traffic shadowing for API before cutover
+
+<!-- handsoff-issue-1154 -->
+- #1154: Marketplace listing metadata CID pin verification hook
+
+<!-- handsoff-issue-1155 -->
+- #1155: Risk pipeline score explanation payload for SME dashboard
+
+<!-- handsoff-issue-1156 -->
+- #1156: FX ingestion holiday calendar and weekend gap handling
+
+<!-- handsoff-issue-1142 -->
+- #1142: Add governance_voting snapshot block hash binding tests
+
+<!-- handsoff-issue-1143 -->
+- #1143: Price oracle multi-source median with outlier discard tests
+
+<!-- handsoff-issue-1159 -->
+- #1159: Offchain-voting quorum preview API before ballot close
