@@ -15,6 +15,7 @@ pub enum ReferralError {
     NotAdmin = 4,
     InvalidAmount = 5,
     AllocationExceeded = 6,
+    DepthExceeded = 7,
 }
 
 #[contracttype]
@@ -26,6 +27,8 @@ enum Key {
     Allocation,
     Funded,
     Paid,
+    MaxDepth,
+    Depth(Address),
     Claimed(Address),
 }
 
@@ -58,7 +61,24 @@ impl ReferralRewards {
         env.storage().instance().set(&Key::Allocation, &allocation);
         env.storage().instance().set(&Key::Funded, &0i128);
         env.storage().instance().set(&Key::Paid, &0i128);
+        // Default anti-sybil graph depth limit; admin may tighten via set_max_depth.
+        env.storage().instance().set(&Key::MaxDepth, &1u32);
         Ok(())
+    }
+
+    /// Admin sets the maximum referral graph depth (>= 1). Fails closed on bad input.
+    pub fn set_max_depth(env: Env, admin: Address, max_depth: u32) -> Result<(), ReferralError> {
+        admin.require_auth();
+        let configured: Address = env.storage().instance().get(&Key::Admin)
+            .ok_or(ReferralError::NotInitialized)?;
+        if admin != configured { return Err(ReferralError::NotAdmin); }
+        if max_depth == 0 { return Err(ReferralError::InvalidConfiguration); }
+        env.storage().instance().set(&Key::MaxDepth, &max_depth);
+        Ok(())
+    }
+
+    pub fn max_depth(env: Env) -> u32 {
+        env.storage().instance().get(&Key::MaxDepth).unwrap_or(0)
     }
 
     /// Fund the dedicated reward balance, up to the configured total allocation.
@@ -81,9 +101,14 @@ impl ReferralRewards {
 
     /// Anyone can settle an eligible first-invoice referral after `set_repaid`.
     /// Returns false for ineligible, duplicate, unfunded, or exhausted claims.
+    /// Enforces the anti-sybil referral graph depth limit; a referrer already at
+    /// the max depth cannot accrue further referrals (fails closed).
     pub fn claim_referral_reward(env: Env, sme: Address) -> Result<bool, ReferralError> {
         let nft_addr: Address = env.storage().instance().get(&Key::InvoiceNft)
             .ok_or(ReferralError::NotInitialized)?;
+        let max_depth: u32 = env.storage().instance().get(&Key::MaxDepth)
+            .ok_or(ReferralError::NotInitialized)?;
+        if max_depth == 0 { return Err(ReferralError::InvalidConfiguration); }
         let key = Key::Claimed(sme.clone());
         if env.storage().persistent().has(&key) { return Ok(false); }
         let nft = InvoiceNftContractClient::new(&env, &nft_addr);
@@ -99,6 +124,10 @@ impl ReferralRewards {
             Ok(Ok(invoice)) if invoice.sme == sme && invoice.status == InvoiceStatus::Repaid => {},
             _ => return Ok(false),
         }
+        // Anti-sybil: the referrer's own depth must be below the configured limit.
+        let referrer_depth: u32 = env.storage().persistent()
+            .get(&Key::Depth(referrer.clone())).unwrap_or(0);
+        if referrer_depth >= max_depth { return Ok(false); }
         let bonus: i128 = env.storage().instance().get(&Key::Bonus).unwrap();
         let funded: i128 = env.storage().instance().get(&Key::Funded).unwrap();
         let paid: i128 = env.storage().instance().get(&Key::Paid).unwrap();
@@ -109,6 +138,11 @@ impl ReferralRewards {
         // Claim is recorded before token transfer; a failed transfer rolls back both writes.
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(&key, 518_400, 518_400);
+        // Record the sme's depth in the referral graph (referrer depth + 1).
+        let sme_depth = referrer_depth.saturating_add(1);
+        let depth_key = Key::Depth(sme.clone());
+        env.storage().persistent().set(&depth_key, &sme_depth);
+        env.storage().persistent().extend_ttl(&depth_key, 518_400, 518_400);
         env.storage().instance().set(&Key::Paid, &(paid + bonus));
         token_client.transfer(&env.current_contract_address(), &referrer, &bonus);
         env.events().publish((symbol_short!("referral"), sme), (referrer, first, bonus));
@@ -117,6 +151,10 @@ impl ReferralRewards {
 
     pub fn has_claimed(env: Env, sme: Address) -> bool {
         env.storage().persistent().has(&Key::Claimed(sme))
+    }
+
+    pub fn depth_of(env: Env, sme: Address) -> u32 {
+        env.storage().persistent().get(&Key::Depth(sme)).unwrap_or(0)
     }
 
     pub fn paid_total(env: Env) -> i128 {
@@ -227,5 +265,55 @@ mod tests {
             &Symbol::new(&env, "USDC"), &(env.ledger().timestamp() + 86_400),
             &String::from_str(&env, "cid"), &30, &None, &Some(referrer));
         assert_eq!(late.unwrap_err().unwrap(), InvoiceNftError::ReferralAlreadyLocked);
+    }
+
+    // ── Anti-sybil graph depth limit (#1147) ─────────────────────────────────
+
+    #[test]
+    fn default_max_depth_is_one() {
+        let (_env, _nft, rewards, _, _, _, _, _) = setup();
+        assert_eq!(rewards.max_depth(), 1);
+    }
+
+    #[test]
+    fn set_max_depth_rejects_zero_and_requires_admin() {
+        let (env, _nft, rewards, admin, _, _, _, _) = setup();
+        assert_eq!(rewards.try_set_max_depth(&admin, &0), Err(Ok(ReferralError::InvalidConfiguration)));
+        let stranger = Address::generate(&env);
+        assert_eq!(rewards.try_set_max_depth(&stranger, &3), Err(Ok(ReferralError::NotAdmin)));
+        rewards.set_max_depth(&admin, &3);
+        assert_eq!(rewards.max_depth(), 3);
+    }
+
+    #[test]
+    fn depth_limit_blocks_deep_sybil_chain() {
+        let (env, nft, rewards, admin, market, pool, sme, referrer) = setup();
+        rewards.deposit(&admin, &20);
+        // referrer (depth 0) refers sme -> sme depth becomes 1 on a paid claim.
+        let first = mint(&env, &nft, &sme, Some(referrer.clone()));
+        nft.set_listed(&market, &first);
+        nft.set_funded(&pool, &first);
+        nft.set_repaid(&pool, &first);
+        assert!(rewards.claim_referral_reward(&sme));
+        assert_eq!(rewards.depth_of(&sme), 1);
+        // sme is now at the default max depth (1); a downstream referral is blocked.
+        let leaf = Address::generate(&env);
+        let leaf_id = mint(&env, &nft, &leaf, Some(sme.clone()));
+        nft.set_listed(&market, &leaf_id);
+        nft.set_funded(&pool, &leaf_id);
+        nft.set_repaid(&pool, &leaf_id);
+        assert!(!rewards.claim_referral_reward(&leaf));
+        assert!(!rewards.has_claimed(&leaf));
+        assert_eq!(rewards.paid_total(), 10);
+    }
+
+    #[test]
+    fn claim_fails_closed_when_uninitialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let rewards_addr = env.register_contract(None, ReferralRewards);
+        let rewards = ReferralRewardsClient::new(&env, &rewards_addr);
+        let sme = Address::generate(&env);
+        assert_eq!(rewards.try_claim_referral_reward(&sme), Err(Ok(ReferralError::NotInitialized)));
     }
 }
