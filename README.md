@@ -409,3 +409,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-1143 -->
 - #1143: Price oracle multi-source median with outlier discard tests
+
+<!-- handsoff-issue-1159 -->
+- #1159: Offchain-voting quorum preview API before ballot close
