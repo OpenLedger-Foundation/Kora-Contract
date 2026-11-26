@@ -26,6 +26,27 @@ or slash support. A declined or timed-out nomination cannot be selected again.
 When support is withdrawn from a timed-out accepted nomination, it is marked
 expired so eligibility is revoked before the backing is returned.
 
+## Post-slash renomination cool-down
+
+A verifier that has been slashed must wait out a configurable cool-down before
+it can be nominated again. Instant renomination after a slash would let a
+penalized verifier immediately re-enter the selection pool and defeat the
+penalty.
+
+- The cool-down is configured at initialization (in ledgers) and stored on the
+  contract. A zero cool-down disables the restriction.
+- When a slash is recorded for a candidate, the contract stores the ledger at
+  which the cool-down expires (`slash_ledger + cool_down`).
+- `nominate` and `stake` reject a candidate whose cool-down has not yet elapsed
+  with a typed `CoolDownActive` error (fail closed). The check is applied to the
+  candidate address, not the supporter.
+- Renomination is allowed once the cool-down has elapsed. The boundary is
+  inclusive of the expiry ledger: a nomination at exactly the expiry ledger
+  succeeds, while a nomination one ledger before expiry is rejected.
+- The cool-down is idempotent: re-recording a slash for the same candidate
+  refreshes the expiry to the later of the existing and new expiry, so repeated
+  slashes cannot shorten an active cool-down.
+
 ## Operational limits
 
 The current implementation caps a deployment at 50 nomination IDs to keep

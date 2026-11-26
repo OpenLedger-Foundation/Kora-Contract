@@ -20,6 +20,7 @@ pub enum NominationError {
     NoEligibleCandidate = 10,
     TooManyNominations = 11,
     ArithmeticOverflow = 12,
+    InCoolDown = 13,
 }
 
 #[contracttype]
@@ -55,6 +56,8 @@ enum DataKey {
     NextId,
     Nomination(u64),
     Stake(u64, Address),
+    CoolDown,
+    SlashedAt(Address),
 }
 
 #[contract]
@@ -96,6 +99,7 @@ impl VerifierNominationContract {
         if id >= MAX_NOMINATIONS {
             return Err(NominationError::TooManyNominations);
         }
+        Self::assert_not_in_cool_down(&env, &candidate)?;
         let next_id = id.checked_add(1).ok_or(NominationError::ArithmeticOverflow)?;
         let nomination = Nomination {
             id,
