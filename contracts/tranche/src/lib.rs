@@ -4,6 +4,16 @@
 //!
 //! Pools multiple individually-listed invoices into a single diversified
 //! investment product with blended risk/yield.
+//!
+//! ## Cross-default propagation
+//!
+//! By default a default in one tranche is isolated: it does not affect other
+//! tranches. The admin may opt into cross-default propagation via
+//! [`TrancheContract::set_cross_default_propagation`]. When enabled, marking a
+//! tranche as defaulted (`mark_tranche_default`) closes every other open
+//! tranche as well, so junior/senior expectations are explicit and consistent.
+//! The flag is stored under [`DataKey::CrossDefaultPropagation`] and fails
+//! closed: if it is unset, propagation is treated as disabled.
 
 use kora_shared::{
     errors::CommonError,
@@ -26,6 +36,7 @@ pub enum TrancheError {
     PoolNotFound = 7,
     PoolAlreadyClosed = 8,
     TrancheNotFound = 9,
+    TrancheAlreadyDefaulted = 10,
 }
 
 impl From<CommonError> for TrancheError {
@@ -48,6 +59,8 @@ pub enum DataKey {
     AccessControl,
     Tranche(u64),
     TranchePositions(u64, Address),
+    CrossDefaultPropagation,
+    TrancheDefaulted(u64),
 }
 
 #[contracttype]
@@ -187,12 +200,150 @@ impl TrancheContract {
             .get(&DataKey::Tranche(tranche_id))
             .ok_or(TrancheError::TrancheNotFound)
     }
+
+    /// Admin-only toggle for cross-default propagation. When enabled, a default
+    /// in one tranche closes every other open tranche. Defaults to disabled
+    /// (fail closed) when never set.
+    pub fn set_cross_default_propagation(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), TrancheError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TrancheError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(TrancheError::NotAdmin);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CrossDefaultPropagation, &enabled);
+        Ok(())
+    }
+
+    /// Returns whether cross-default propagation is enabled. Unset config is
+    /// treated as disabled (fail closed).
+    pub fn cross_default_propagation(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::CrossDefaultPropagation)
+            .unwrap_or(false)
+    }
+
+    /// Marks a tranche as defaulted. If cross-default propagation is enabled,
+    /// every other open tranche is closed as well. Re-entry on an already
+    /// defaulted tranche is idempotent and returns `TrancheAlreadyDefaulted`.
+    pub fn mark_tranche_default(
+        env: Env,
+        admin: Address,
+        tranche_id: u64,
+    ) -> Result<(), TrancheError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TrancheError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(TrancheError::NotAdmin);
+        }
+
+        let mut tranche: Tranche = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Tranche(tranche_id))
+            .ok_or(TrancheError::TrancheNotFound)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::TrancheDefaulted(tranche_id))
+        {
+            return Err(TrancheError::TrancheAlreadyDefaulted);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::TrancheDefaulted(tranche_id), &true);
+        tranche.is_closed = true;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Tranche(tranche_id), &tranche);
+
+        let propagate: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::CrossDefaultPropagation)
+            .unwrap_or(false);
+
+        if propagate {
+            let next_id: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Tranche(0))
+                .unwrap_or(1);
+            let mut id: u64 = 1;
+            while id < next_id {
+                if id != tranche_id {
+                    if let Some(mut other) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, Tranche>(&DataKey::Tranche(id))
+                    {
+                        if !other.is_closed {
+                            other.is_closed = true;
+                            env.storage()
+                                .persistent()
+                                .set(&DataKey::Tranche(id), &other);
+                        }
+                    }
+                }
+                id += 1;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Address, Env};
+
+    fn setup(env: &Env) -> (TrancheContractClient, Address) {
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, TrancheContract);
+        let client = TrancheContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let nft = Address::generate(env);
+        let pool = Address::generate(env);
+        let treasury = Address::generate(env);
+        let ac = Address::generate(env);
+        client.initialize(&admin, &nft, &pool, &treasury, &ac);
+        (client, admin)
+    }
+
+    fn seed_tranche(env: &Env, client: &TrancheContractClient, id: u64) {
+        let creator = Address::generate(env);
+        let tranche = Tranche {
+            id,
+            creator,
+            invoice_ids: Vec::new(env),
+            total_face_value: 0,
+            total_funded: 0,
+            is_closed: false,
+            created_at: 0,
+        };
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Tranche(id), &tranche);
+        });
+    }
 
     #[test]
     fn test_create_tranche_success() {
@@ -210,5 +361,95 @@ mod tests {
         let invoice_ids = Vec::new(&env);
         let result = client.try_create_tranche(&creator, &invoice_ids);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cross_default_flag_defaults_disabled() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        assert!(!client.cross_default_propagation());
+    }
+
+    #[test]
+    fn test_cross_default_flag_toggle() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        client.set_cross_default_propagation(&admin, &true);
+        assert!(client.cross_default_propagation());
+        client.set_cross_default_propagation(&admin, &false);
+        assert!(!client.cross_default_propagation());
+    }
+
+    #[test]
+    fn test_cross_default_flag_requires_admin() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let stranger = Address::generate(&env);
+        let result = client.try_set_cross_default_propagation(&stranger, &true);
+        assert_eq!(result, Err(Ok(TrancheError::NotAdmin)));
+    }
+
+    #[test]
+    fn test_default_isolated_when_flag_disabled() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        seed_tranche(&env, &client, 1);
+        seed_tranche(&env, &client, 2);
+        client.mark_tranche_default(&admin, &1);
+        assert!(client.get_tranche(&1).is_closed);
+        assert!(!client.get_tranche(&2).is_closed);
+    }
+
+    #[test]
+    fn test_default_propagates_when_flag_enabled() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        seed_tranche(&env, &client, 1);
+        seed_tranche(&env, &client, 2);
+        seed_tranche(&env, &client, 3);
+        client.set_cross_default_propagation(&admin, &true);
+        client.mark_tranche_default(&admin, &2);
+        assert!(client.get_tranche(&1).is_closed);
+        assert!(client.get_tranche(&2).is_closed);
+        assert!(client.get_tranche(&3).is_closed);
+    }
+
+    #[test]
+    fn test_mark_default_requires_admin() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        seed_tranche(&env, &client, 1);
+        let stranger = Address::generate(&env);
+        let result = client.try_mark_tranche_default(&stranger, &1);
+        assert_eq!(result, Err(Ok(TrancheError::NotAdmin)));
+    }
+
+    #[test]
+    fn test_mark_default_missing_tranche_fails_closed() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        let result = client.try_mark_tranche_default(&admin, &99);
+        assert_eq!(result, Err(Ok(TrancheError::TrancheNotFound)));
+    }
+
+    #[test]
+    fn test_mark_default_idempotent_reentry() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        seed_tranche(&env, &client, 1);
+        client.mark_tranche_default(&admin, &1);
+        let result = client.try_mark_tranche_default(&admin, &1);
+        assert_eq!(result, Err(Ok(TrancheError::TrancheAlreadyDefaulted)));
+    }
+
+    #[test]
+    fn test_fund_closed_tranche_rejected() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+        seed_tranche(&env, &client, 1);
+        client.mark_tranche_default(&admin, &1);
+        let investor = Address::generate(&env);
+        let result = client.try_fund_tranche(&investor, &1, &100);
+        assert_eq!(result, Err(Ok(TrancheError::PoolAlreadyClosed)));
     }
 }
