@@ -201,6 +201,41 @@ RATE_EX: (base, quote, prev_price, new_price, change_bps, max_change_bps, timest
 
 ---
 
+## Staleness Circuit-Breaker on Read Paths
+
+### Centralized Staleness Guard
+
+**Implementation:** `get_price` is the single enforcement point for all staleness checks. Every read path — `get_price`, `convert`, `convert_with_decimals` — flows through this function and inherits its staleness rejection. No caller can bypass the guard by calling a lower-level helper directly.
+
+**TTL resolution order:**
+1. Per-pair override via `set_max_staleness` (stored as `DataKey::MaxStaleness(base, quote)`)
+2. Global default: `MAX_STALENESS_SECS = 3600`
+
+**Boundary semantics:** Age is computed as `now.saturating_sub(timestamp)`. A price is fresh when `age <= max_staleness` (inclusive at the boundary).
+
+### Read-Path Staleness Tests
+
+These tests are in `contracts/price_oracle/src/lib.rs` under the `// ── Staleness circuit-breaker on read paths` section:
+
+| Test | What it proves |
+|------|----------------|
+| `test_staleness_circuit_breaker_fresh_read_succeeds` | Fresh price is accepted |
+| `test_staleness_circuit_breaker_exactly_at_ttl_boundary_accepted` | Age == TTL is still fresh |
+| `test_staleness_circuit_breaker_one_second_past_ttl_rejected_typed_error` | Age == TTL+1 returns typed `AllFeedsStale` |
+| `test_staleness_circuit_breaker_convert_rejects_stale_price` | `convert` rejects stale backing price |
+| `test_staleness_circuit_breaker_convert_with_decimals_rejects_stale_price` | `convert_with_decimals` rejects stale backing price |
+| `test_staleness_circuit_breaker_partial_staleness_triggers_quorum_error` | One stale / one fresh with quorum=2 returns `InsufficientFreshFeeders` |
+| `test_staleness_circuit_breaker_per_pair_override_tightens_read_window` | Per-pair TTL rejects before global 3600s would |
+| `test_staleness_circuit_breaker_global_default_ttl_boundary` | Global TTL boundary: exact passes, +1 fails with `AllFeedsStale` |
+
+**Acceptance criteria mapping:**
+- ✅ Stale price cannot fund — `convert`/`convert_with_decimals` both reject
+- ✅ Fresh price succeeds — boundary-inclusive test confirms the exact TTL passes
+- ✅ Error typed — all stale-read rejections return `AllFeedsStale` or `InsufficientFreshFeeders`, never a panic
+- ✅ Exactly at TTL boundary — dedicated boundary test for both global and per-pair TTL
+
+---
+
 ## Consumer Defense Validation
 
 ### Marketplace: Funding with Manipulated FX Rates ✅ **[IMPLEMENTED - Issue #977]**

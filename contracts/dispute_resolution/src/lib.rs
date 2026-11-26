@@ -335,4 +335,235 @@ mod tests {
         assert!(dispute.resolved);
         assert!(dispute.upheld);
     }
+
+    // ── Appeal window enforcement ─────────────────────────────────────────────
+    //
+    // These tests verify the DISPUTE_WINDOW_SECS boundary: resolution must be
+    // rejected after the window expires, and must be accepted just before it.
+
+    /// Resolution attempted before the dispute window expires must succeed.
+    #[test]
+    fn test_resolve_before_window_expiry_succeeds() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &10u64);
+
+        // Advance to 1 second before window expiry
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp() + DISPUTE_WINDOW_SECS - 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10_000,
+            min_persistent_entry_ttl: 10_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = client.try_resolve_dispute(&admin, &10u64, &false);
+        assert!(
+            result.is_ok(),
+            "resolution just before window expiry must succeed"
+        );
+        let dispute = client.get_dispute(&10u64).unwrap();
+        assert!(dispute.resolved);
+        assert!(!dispute.upheld);
+    }
+
+    /// Resolution attempted exactly at the window boundary (opened_at + DISPUTE_WINDOW_SECS)
+    /// must be rejected — the boundary is exclusive on the expired side.
+    #[test]
+    fn test_resolve_exactly_at_window_boundary_rejected() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        let opened_at = env.ledger().timestamp();
+        client.open_dispute(&challenger, &11u64);
+
+        // Advance to exactly opened_at + DISPUTE_WINDOW_SECS
+        env.ledger().set(LedgerInfo {
+            timestamp: opened_at + DISPUTE_WINDOW_SECS,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10_000,
+            min_persistent_entry_ttl: 10_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = client.try_resolve_dispute(&admin, &11u64, &true);
+        assert!(
+            result.is_err(),
+            "resolution at exactly the window boundary must be rejected (window expired)"
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeWindowExpired,
+            "expired-window rejection must surface the typed DisputeWindowExpired error"
+        );
+    }
+
+    /// Resolution attempted one second past the window must also be rejected.
+    #[test]
+    fn test_resolve_past_window_expiry_rejected_typed_error() {
+        use soroban_sdk::testutils::{Ledger, LedgerInfo};
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        let opened_at = env.ledger().timestamp();
+        client.open_dispute(&challenger, &12u64);
+
+        // Advance one second past the window
+        env.ledger().set(LedgerInfo {
+            timestamp: opened_at + DISPUTE_WINDOW_SECS + 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10_000,
+            min_persistent_entry_ttl: 10_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = client.try_resolve_dispute(&admin, &12u64, &true);
+        assert!(
+            result.is_err(),
+            "resolution past window must be rejected"
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeWindowExpired,
+        );
+    }
+
+    // ── Post-finality immutability ─────────────────────────────────────────────
+    //
+    // Once a dispute is resolved (finalized), all subsequent mutation attempts
+    // must return `DisputeAlreadyResolved` — the final state is immutable.
+
+    /// Attempting to resolve an already-resolved dispute must be rejected with
+    /// the typed `DisputeAlreadyResolved` error.
+    #[test]
+    fn test_resolved_dispute_is_immutable() {
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &20u64);
+        client.resolve_dispute(&admin, &20u64, &true);
+
+        // Any further resolution attempt must be rejected
+        let result = client.try_resolve_dispute(&admin, &20u64, &false);
+        assert!(result.is_err(), "re-resolving a finalized dispute must fail");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeAlreadyResolved,
+            "finalized dispute must surface typed DisputeAlreadyResolved, not a panic"
+        );
+    }
+
+    /// Submitting evidence to an already-resolved dispute must be rejected.
+    #[test]
+    fn test_submit_evidence_after_finality_rejected() {
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &21u64);
+        client.resolve_dispute(&admin, &21u64, &false);
+
+        let cid = soroban_sdk::String::from_str(
+            &env,
+            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        );
+        let result = client.try_submit_evidence(&challenger, &21u64, &cid);
+        assert!(result.is_err(), "evidence submission after finality must fail");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeAlreadyResolved,
+        );
+    }
+
+    /// The resolved state persists correctly: upheld flag is immutable after resolution.
+    #[test]
+    fn test_resolved_state_persists_after_resolution() {
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &22u64);
+        client.resolve_dispute(&admin, &22u64, &true);
+
+        // State should remain permanently set
+        let dispute = client.get_dispute(&22u64).unwrap();
+        assert!(dispute.resolved);
+        assert!(dispute.upheld);
+        // resolved_at must be non-zero
+        assert!(dispute.resolved_at > 0, "resolved_at must be set on resolution");
+
+        // Verify has_open_dispute correctly reflects finality
+        assert!(
+            !client.has_open_dispute(&22u64),
+            "finalized dispute must not appear as open"
+        );
+    }
+
+    /// Upheld=false (rejected dispute) is also immutable.
+    #[test]
+    fn test_rejected_dispute_upheld_false_immutable() {
+        let (env, admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &23u64);
+        client.resolve_dispute(&admin, &23u64, &false);
+
+        let dispute = client.get_dispute(&23u64).unwrap();
+        assert!(dispute.resolved);
+        assert!(!dispute.upheld, "upheld flag must stay false after rejection");
+
+        // Cannot flip to upheld via re-resolve
+        let result = client.try_resolve_dispute(&admin, &23u64, &true);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeAlreadyResolved,
+        );
+    }
+
+    // ── Governance gate ───────────────────────────────────────────────────────
+
+    /// Non-governance caller cannot resolve a dispute.
+    #[test]
+    fn test_non_governance_cannot_resolve() {
+        let (env, _admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &30u64);
+
+        let stranger = Address::generate(&env);
+        let result = client.try_resolve_dispute(&stranger, &30u64, &true);
+        assert!(result.is_err(), "non-governance caller must be rejected");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::NotGovernance,
+        );
+        // Dispute remains open — governance gate must not corrupt state
+        assert!(client.has_open_dispute(&30u64), "dispute must remain open after rejected resolution attempt");
+    }
+
+    /// Attempting to open a second dispute for the same invoice is rejected.
+    #[test]
+    fn test_open_dispute_duplicate_same_invoice_rejected() {
+        let (env, _admin, _ac, client) = setup();
+        let challenger = Address::generate(&env);
+        client.open_dispute(&challenger, &40u64);
+        let result = client.try_open_dispute(&challenger, &40u64);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeAlreadyOpen,
+        );
+    }
+
+    /// Resolving a non-existent dispute returns a typed error, not a panic.
+    #[test]
+    fn test_resolve_nonexistent_dispute_typed_error() {
+        let (_env, admin, _ac, client) = setup();
+        let result = client.try_resolve_dispute(&admin, &999u64, &true);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            DisputeResolutionError::DisputeNotFound,
+        );
+    }
 }
