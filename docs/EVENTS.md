@@ -4,7 +4,7 @@ This document defines the standardized event topic naming convention across all 
 
 ---
 
-## Schema Versioning (#583)
+## Schema Versioning (#583, #1152)
 
 All Kora on-chain events carry an explicit schema version so off-chain indexers can
 detect contract upgrades that alter event shapes without silently breaking.
@@ -61,6 +61,45 @@ env.events().get_events()
 ```
 
 Pre-v1 events (no `SCHEMA_V` topic) can be identified by their single-element topic tuple.
+
+### Consumer compatibility contract (#1152)
+
+Indexers must **fail loudly** rather than silently mis-index when they encounter an
+event they cannot interpret. The shared event helpers expose a single classification
+point so every consumer behaves identically:
+
+```rust
+use kora_shared::events::{classify_event, EventCompat, EVENT_SCHEMA_VERSION};
+
+match classify_event(&topics) {
+    EventCompat::Current { topic } => { /* parse payload with current schema */ }
+    EventCompat::Legacy { topic } => { /* pre-v1: no SCHEMA_V topic */ }
+    EventCompat::Unsupported { topic, version } => {
+        // version > EVENT_SCHEMA_VERSION: halt indexing for this stream and alert.
+        // Do NOT attempt to parse the payload — its shape is unknown.
+        panic!("unsupported event schema v{version} for {topic:?}");
+    }
+    EventCompat::Malformed { reason } => {
+        // SCHEMA_V present but version topic missing/not a u32: fail closed.
+        panic!("malformed versioned event: {reason}");
+    }
+}
+```
+
+Compatibility rules:
+
+| Observed topics | Classification | Consumer action |
+|---|---|---|
+| `(SCHEMA_V, topic, v)` with `v == EVENT_SCHEMA_VERSION` | `Current` | Parse payload normally |
+| `(SCHEMA_V, topic, v)` with `v < EVENT_SCHEMA_VERSION` | `Unsupported` | Fail loudly — no downgrade parser is shipped |
+| `(SCHEMA_V, topic, v)` with `v > EVENT_SCHEMA_VERSION` | `Unsupported` | Fail loudly — upgrade the indexer |
+| `(SCHEMA_V, topic)` — version topic missing or not `u32` | `Malformed` | Fail closed with a typed error |
+| `(topic)` — no `SCHEMA_V` sentinel | `Legacy` | Treat as pre-v1; parse only if a legacy parser is configured |
+
+These rules are pinned by `contracts/shared/src/events.rs` unit tests
+(`classify_event_*`) and by the indexer compatibility tests in
+`services/indexer/`, which assert that an unknown version aborts the batch instead
+of writing partial state.
 
 ---
 
