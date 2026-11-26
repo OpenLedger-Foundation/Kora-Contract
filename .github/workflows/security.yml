@@ -29,6 +29,10 @@ jobs:
           else
             echo "OK: bad fixture correctly rejected"
           fi
+      - name: Check env example drift
+        run: |
+          node infra/secrets/check-env-example.js
+          node --test infra/secrets/check-env-example.test.js
 
   # Issue #1173 — RustSec advisory gate with a documented, time-bounded allowlist.
   advisory-gate:

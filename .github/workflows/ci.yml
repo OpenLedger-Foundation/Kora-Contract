@@ -185,6 +185,25 @@ jobs:
       - name: cargo run -p kora-xtask --bin check_pause_matrix
         run: cargo run -p kora-xtask --bin check_pause_matrix
 
+      - name: EVENTS.md is in sync with shared event definitions
+        run: |
+          cargo test -p kora-xtask --bin gen_events
+          cargo run -p kora-xtask --bin gen_events -- --check
+
+  # ── Community node packaging and SDK error mapping ────────────────────────
+  node-packaging:
+    name: community node and SDK errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: ./packaging/test-community-node.sh
+      - run: node sdk/scripts/generate-errors.js --check
+      - run: npm ci && npx jest tests/error-mapping.test.ts
+        working-directory: sdk
+
   # ── Unit & integration tests ──────────────────────────────────────────────
   test:
     name: cargo test

@@ -900,6 +900,7 @@ dependencies = [
  "kora-risk-registry",
  "kora-secondary-market",
  "kora-shared",
+ "kora-tranche",
  "kora-treasury",
  "kora-vesting",
  "proptest",

@@ -1,0 +1,7 @@
+# Node services for the community profile (treasury API, health aggregator).
+FROM node:20-alpine
+RUN npm install -g tsx@4.19.2
+WORKDIR /opt/kora
+COPY services/treasury-api ./services/treasury-api
+COPY services/health ./services/health
+USER node

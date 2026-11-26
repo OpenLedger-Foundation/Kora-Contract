@@ -19,6 +19,8 @@ export {
   optionalString,
 } from "./clients";
 export { TESTNET, MAINNET } from "./base";
+export { applyFeeHint, fetchFeeHint, feeHintsEnabled, resolveFee } from "./feeHints";
+export type { FeeHint, FeeHintOptions } from "./feeHints";
 export { TransactionOutcomeUnknownError } from "./transactionRecovery";
 export type { NetworkConfig } from "./base";
 export type { TransactionReconciliation } from "./transactionRecovery";
@@ -31,7 +33,11 @@ export {
   SECONDARY_MARKET_ERROR_MESSAGES,
   GOVERNANCE_VOTING_ERROR_MESSAGES,
   getErrorMessage,
+  mapContractError,
 } from "./errorMapping";
+export type { MappedContractError } from "./errorMapping";
+export { CONTRACT_ERROR_CODES, KoraErrorCode } from "./contractErrors";
+export type { KoraContractName } from "./contractErrors";
 export type {
   DelegationRecord,
   EscrowDispute,

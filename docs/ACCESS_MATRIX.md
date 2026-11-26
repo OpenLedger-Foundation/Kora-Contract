@@ -490,8 +490,11 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `unpause` | **Admin** | Direct invoker must equal stored admin | No require_auth; invoker-equality check |
 | `update_protocol_fee_bps` | **Admin** | Direct invoker must equal stored admin; 0 to 1000 bps | No require_auth; invoker-equality check |
 | `list_position` | **Seller (Self)** | Pool open; seller holds financing_pool position; one active listing | Verifies position via pool cross-call |
-| `buy_position` | **Buyer (Self)** | Listing exists; buyer is not seller; pool open | Downstream pool transfer_position requires seller auth (see pool hook note) |
+| `buy_position` | **Buyer (Self)** | Listing exists; buyer is not seller; pool open; fee recipient (treasury) on the allowlist | Fails closed with `FeeRecipientNotAllowed` if the treasury is not allowlisted; downstream pool transfer_position requires seller auth (see pool hook note) |
 | `cancel_listing` | **Seller (Self)** | Listing exists | Only lister may cancel; not pause-gated |
+| `add_fee_recipient` | **Admin** | Direct invoker must equal stored admin | Adds an address to the fee-recipient allowlist (idempotent) |
+| `remove_fee_recipient` | **Admin** | Direct invoker must equal stored admin | Removes an address from the allowlist (idempotent); removing the active treasury fails `buy_position` closed |
+| `is_fee_recipient_allowed` | Permissionless | Read-only | Returns whether an address may receive protocol fees |
 
 **Pool-Authorized Hook (cross-reference):**
 - `buy_position` settles payment (fee to treasury, proceeds to seller) then calls `financing_pool.transfer_position`, which authenticates the seller (`from.require_auth()`). The seller's authorization is therefore enforced at the pool boundary even though `buy_position` itself only authenticates the buyer. Reviewers can trace `buy_position` here to `financing_pool.transfer_position` in section 5.

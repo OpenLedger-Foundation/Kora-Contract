@@ -7,7 +7,7 @@ use kora_shared::{
     reentrancy::ReentrancyGuard,
     types::{InvoiceStatus, Listing, MultisigConfig, RegistryParamKey, RiskTier},
     validation::{
-        bps_of_normalized, require_non_zero_amount, require_valid_fee_bps,
+        bps_of, bps_of_normalized, require_non_zero_amount, require_valid_fee_bps,
         require_within_max_amount, safe_add, safe_div, safe_mul, safe_sub, UPGRADE_TIMELOCK_DELAY,
     },
 };
@@ -1034,7 +1034,7 @@ impl MarketplaceContract {
             env.storage().persistent().get(&DataKey::Referrer(invoice_id));
         let split_bps = Self::referrer_split_bps(env, &config)?;
         let referral_fee = if referrer_opt.is_some() && split_bps > 0 {
-            safe_div(safe_mul(fee, split_bps as i128)?, 10_000)?
+            bps_of(fee, split_bps)?
         } else {
             0
         };

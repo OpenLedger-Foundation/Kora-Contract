@@ -369,6 +369,18 @@ The `scripts/check_unbounded_loops.py` checker runs in CI on every commit. Any n
 
 ---
 
+## Off-chain: Indexer Backfill
+
+`services/indexer` requests 100 events per batch and rejects any batch size of 0
+or above `MAX_BATCH_SIZE` (1,000) before contacting the RPC. Responses above the
+requested count or `MAX_RESPONSE_BYTES` (16 MiB) are rejected without ingesting.
+A full page resumes at its last ledger; a ledger that alone fills a batch is
+retried once at the hard cap, then the loop backs off instead of skipping events.
+
+Run `cargo test --manifest-path services/indexer/Cargo.toml`. No new env vars.
+
+---
+
 ## References
 
 - `scripts/check_unbounded_loops.py` - Static analysis tool

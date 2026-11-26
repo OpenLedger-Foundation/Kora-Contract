@@ -16,10 +16,16 @@ import {
   withUnknownOutcome,
 } from "./transactionRecovery";
 import type { TransactionReconciliation } from "./transactionRecovery";
+import { resolveFee } from "./feeHints";
 
 export interface NetworkConfig {
   rpcUrl: string;
   networkPassphrase: string;
+  /**
+   * Optional Kora fee-hint endpoint (`GET /network/fee-hint`). Only used when
+   * `KORA_USE_FEE_HINTS=true`; falls back to env `KORA_FEE_HINT_URL`.
+   */
+  feeHintUrl?: string;
 }
 
 export const TESTNET: NetworkConfig = {
@@ -53,11 +59,13 @@ export class BaseClient {
   protected server: rpc.Server;
   protected contract: Contract;
   protected networkPassphrase: string;
+  protected feeHintUrl?: string;
 
   constructor(contractId: string, network: NetworkConfig) {
     this.server = new rpc.Server(network.rpcUrl, { allowHttp: false });
     this.contract = new Contract(contractId);
     this.networkPassphrase = network.networkPassphrase;
+    this.feeHintUrl = network.feeHintUrl;
   }
 
   async reconcileTransaction(hash: string): Promise<TransactionReconciliation> {
@@ -99,8 +107,11 @@ export class BaseClient {
     const account = await this.server.getAccount(
       keypair?.publicKey() ?? this.contract.contractId()
     );
+    // Advisory surge-pricing hint (opt-in via KORA_USE_FEE_HINTS=true); any
+    // hint failure falls back to BASE_FEE.
+    const fee = await resolveFee(BASE_FEE, { url: this.feeHintUrl });
     const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
+      fee,
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(this.contract.call(method, ...args))

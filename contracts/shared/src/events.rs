@@ -840,6 +840,26 @@ pub fn secondary_market_fee_updated(env: &Env, fee_bps: u32) {
     );
 }
 
+/// Emitted when an address is added to the secondary-market fee-recipient
+/// allowlist. Schema: (admin, recipient, timestamp)
+pub fn secondary_market_fee_recipient_added(env: &Env, admin: &Address, recipient: &Address) {
+    emit(
+        env,
+        symbol_short!("SM_R_ADD"),
+        (admin.clone(), recipient.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when an address is removed from the secondary-market fee-recipient
+/// allowlist. Schema: (admin, recipient, timestamp)
+pub fn secondary_market_fee_recipient_removed(env: &Env, admin: &Address, recipient: &Address) {
+    emit(
+        env,
+        symbol_short!("SM_R_REM"),
+        (admin.clone(), recipient.clone(), env.ledger().timestamp()),
+    );
+}
+
 // ── Treasury Cap Events ───────────────────────────────────────────────────────
 
 /// Schema: (actor=admin, token, new_cap, timestamp)
@@ -1614,6 +1634,68 @@ pub fn vesting_grant_revoked(
             revoked_at,
             env.ledger().timestamp(),
         ),
+    );
+}
+
+// ── Parameter Registry Bootstrap Event ───────────────────────────────────────
+
+/// Emitted after `bootstrap_from_live_contracts` finishes seeding parameters
+/// from live peer contracts.  Off-chain indexers can use this event to detect
+/// the initial seed and invalidate any cached "not yet governed" state for the
+/// affected keys.
+///
+/// Schema: (actor=admin, seeded_count, checksum, timestamp)
+/// - `seeded_count` — number of parameter keys that were written during this call.
+/// - `checksum`     — concatenation of seeded values encoded as big-endian bytes,
+///                    so indexers can verify they cached the same set.
+pub fn parameter_registry_bootstrap(
+    env: &Env,
+    admin: &Address,
+    seeded_count: u32,
+    checksum: soroban_sdk::Bytes,
+) {
+    emit(
+        env,
+        Symbol::new(env, "PAR_BOOT"),
+        (
+            admin.clone(),
+            seeded_count,
+            checksum,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+// ── Debtor Attestation Policy Decision Event ──────────────────────────────────
+
+/// Emitted inside `require_debtor_attestation_if_needed` every time the
+/// marketplace evaluates whether attestation is required for a risk tier.
+/// Governance-sync dashboards subscribe to this event to track when and why
+/// a listing was gated (or allowed through) by the registry-controlled policy.
+///
+/// Schema: (invoice_id, tier_ordinal, required, timestamp)
+/// - `invoice_id`   — the invoice being listed or funded.
+/// - `tier_ordinal` — 0=AAA, 1=AA, 2=A, 3=B, 4=C (stable u32, not the enum
+///                    variant) so indexers never need to decode the XDR enum.
+/// - `required`     — `true` when the registry (or the closed-fail default)
+///                    demands a valid debtor attestation; `false` when optional.
+pub fn debtor_attestation_policy_decision(
+    env: &Env,
+    invoice_id: u64,
+    tier: &RiskTier,
+    required: bool,
+) {
+    let tier_ordinal: u32 = match tier {
+        RiskTier::AAA => 0,
+        RiskTier::AA  => 1,
+        RiskTier::A   => 2,
+        RiskTier::B   => 3,
+        RiskTier::C   => 4,
+    };
+    emit(
+        env,
+        Symbol::new(env, "DA_POLICY"),
+        (invoice_id, tier_ordinal, required, env.ledger().timestamp()),
     );
 }
 

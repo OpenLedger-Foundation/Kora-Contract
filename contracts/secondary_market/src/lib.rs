@@ -32,6 +32,10 @@ pub enum SecondaryMarketError {
     PositionNotFound = 9,
     ProtocolPaused = 10,
     SameAddress = 11,
+    /// A fill would take more than the listing's remaining size.
+    Overfill = 12,
+    /// The configured fee recipient is not on the allowlist (fails closed).
+    FeeRecipientNotAllowed = 13,
 }
 
 impl From<CommonError> for SecondaryMarketError {
@@ -53,6 +57,96 @@ pub enum DataKey {
     ProtocolFeeBps,
     Paused,
     Listing(u64, Address),
+    /// Whether an address is permitted to receive protocol fees (allowlist).
+    FeeRecipientAllowed(Address),
+}
+
+/// Settlement breakdown for one fill of a listing (fee disclosure).
+///
+/// Produced by [`quote_fill`]. For every quote:
+/// `fee + seller_proceeds == gross` and `filled_after + remaining == size`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FillQuote {
+    /// Amount the buyer pays for this fill.
+    pub gross: i128,
+    /// Protocol fee routed to the treasury.
+    pub fee: i128,
+    /// Amount routed to the seller (`gross - fee`).
+    pub seller_proceeds: i128,
+    /// Cumulative size filled after this fill.
+    pub filled_after: i128,
+    /// Size still open after this fill; `0` means the listing is closed.
+    pub remaining: i128,
+}
+
+/// Cumulative price owed for the first `filled` units of a `size`-unit
+/// listing priced at `price` in total: `floor(price * filled / size)`.
+fn cumulative_price(price: i128, size: i128, filled: i128) -> Result<i128, SecondaryMarketError> {
+    price
+        .checked_mul(filled)
+        .and_then(|v| v.checked_div(size))
+        .ok_or(SecondaryMarketError::InvalidAmount)
+}
+
+/// Quote one (partial or exact) fill of a listing.
+///
+/// A listing has a total `price` for `size` units, of which `filled` units are
+/// already sold. Buying `fill_amount` more units is priced and charged on a
+/// **cumulative** basis — the gross and fee for this fill are the difference
+/// between the cumulative totals after and before it — so that across any
+/// sequence of fills that fully closes the listing:
+///
+/// - `sum(gross) == price`
+/// - `sum(fee) == bps_of(price, fee_bps)` (no per-fill rounding drift)
+/// - `sum(seller_proceeds) == price - bps_of(price, fee_bps)`
+///
+/// See `docs/secondary-market.md` for the full invariant list.
+///
+/// **Errors:**
+/// - `SecondaryMarketError::InvalidAmount` — non-positive `price`, `size` or
+///   `fill_amount`; `filled` outside `0..=size`; or a fill too small to carry
+///   a non-zero price.
+/// - `SecondaryMarketError::Overfill` — `fill_amount > size - filled`
+///   (includes any fill on an already-closed listing).
+/// - `SecondaryMarketError::InvalidFeeRate` — `fee_bps` exceeds 1000.
+pub fn quote_fill(
+    price: i128,
+    size: i128,
+    filled: i128,
+    fill_amount: i128,
+    fee_bps: u32,
+) -> Result<FillQuote, SecondaryMarketError> {
+    require_valid_bps_range(fee_bps, 0, MAX_PROTOCOL_FEE_BPS)?;
+    if price <= 0 || size <= 0 || fill_amount <= 0 || filled < 0 || filled > size {
+        return Err(SecondaryMarketError::InvalidAmount);
+    }
+    let remaining_before = safe_sub(size, filled)?;
+    if fill_amount > remaining_before {
+        return Err(SecondaryMarketError::Overfill);
+    }
+    let filled_after = filled
+        .checked_add(fill_amount)
+        .ok_or(SecondaryMarketError::InvalidAmount)?;
+
+    let cum_before = cumulative_price(price, size, filled)?;
+    let cum_after = cumulative_price(price, size, filled_after)?;
+    let gross = safe_sub(cum_after, cum_before)?;
+    if gross <= 0 {
+        return Err(SecondaryMarketError::InvalidAmount);
+    }
+
+    let fee = safe_sub(bps_of(cum_after, fee_bps)?, bps_of(cum_before, fee_bps)?)?;
+    let seller_proceeds = safe_sub(gross, fee)?;
+    let remaining = safe_sub(size, filled_after)?;
+
+    Ok(FillQuote {
+        gross,
+        fee,
+        seller_proceeds,
+        filled_after,
+        remaining,
+    })
 }
 
 fn require_admin(env: &Env, caller: &Address) -> Result<(), SecondaryMarketError> {
@@ -75,6 +169,36 @@ fn require_not_paused(env: &Env) -> Result<(), SecondaryMarketError> {
         }
     }
     Ok(())
+}
+
+/// Marks `recipient` as a permitted fee recipient (idempotent).
+fn set_fee_recipient_allowed(env: &Env, recipient: &Address, allowed: bool) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::FeeRecipientAllowed(recipient.clone()), &allowed);
+}
+
+/// True when `recipient` is on the fee-recipient allowlist. Defaults to false
+/// (fail closed) when no entry exists.
+fn is_fee_recipient_allowed_storage(env: &Env, recipient: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::FeeRecipientAllowed(recipient.clone()))
+        .unwrap_or(false)
+}
+
+/// Ensures `recipient` is on the fee-recipient allowlist; fails closed with
+/// `FeeRecipientNotAllowed` otherwise so fees can never flow to an unbounded
+/// address (preventing fee skimming).
+fn require_fee_recipient_allowed(
+    env: &Env,
+    recipient: &Address,
+) -> Result<(), SecondaryMarketError> {
+    if is_fee_recipient_allowed_storage(env, recipient) {
+        Ok(())
+    } else {
+        Err(SecondaryMarketError::FeeRecipientNotAllowed)
+    }
 }
 
 #[contract]
@@ -112,6 +236,10 @@ impl SecondaryMarket {
         env.storage().persistent().set(&DataKey::Treasury, &treasury);
         env.storage().persistent().set(&DataKey::ProtocolFeeBps, &protocol_fee_bps);
         env.storage().persistent().set(&DataKey::Paused, &false);
+
+        // Auto-allowlist the configured treasury so existing deployments keep
+        // routing fees to it; every fee recipient must be on the allowlist.
+        set_fee_recipient_allowed(&env, &treasury, true);
 
         events::secondary_market_initialized(&env, &admin, &financing_pool, protocol_fee_bps);
         Ok(())
@@ -240,6 +368,7 @@ impl SecondaryMarket {
     /// - `SecondaryMarketError::ListingNotFound` — No active listing exists.
     /// - `SecondaryMarketError::SameAddress` — Buyer is the seller.
     /// - `SecondaryMarketError::PoolAlreadyClosed` — Pool is closed.
+    /// - `SecondaryMarketError::FeeRecipientNotAllowed` — Treasury is not on the fee-recipient allowlist (fails closed).
     pub fn buy_position(
         env: Env,
         buyer: Address,
@@ -284,24 +413,51 @@ impl SecondaryMarket {
             return Err(SecondaryMarketError::PoolAlreadyClosed);
         }
 
+        // Fee recipient allowlist: fees may only flow to an allowlisted address.
+        // Fails closed (FeeRecipientNotAllowed) if the treasury was removed.
+        require_fee_recipient_allowed(&env, &treasury)?;
+
         // Checks-effects-interactions: clear the listing before external calls.
         env.storage()
             .persistent()
             .remove(&DataKey::Listing(invoice_id, seller.clone()));
 
-        // Settle payment: fee to treasury, remainder to seller.
-        let fee = bps_of(listing.price, fee_bps)?;
-        let seller_proceeds = safe_sub(listing.price, fee)?;
+        // Settle payment: fee to treasury, remainder to seller. A whole-position
+        // purchase is the exact fill of a single-unit listing.
+        let quote = quote_fill(listing.price, 1, 0, 1, fee_bps)?;
 
         let token_client = soroban_sdk::token::Client::new(&env, &listing.token);
-        token_client.transfer(&buyer, &treasury, &fee);
-        token_client.transfer(&buyer, &seller, &seller_proceeds);
+        token_client.transfer(&buyer, &treasury, &quote.fee);
+        token_client.transfer(&buyer, &seller, &quote.seller_proceeds);
 
         // Atomically reassign position ownership in the financing pool.
         pool_client.transfer_position(&invoice_id, &seller, &buyer);
 
         events::position_sold(&env, invoice_id, &seller, &buyer, listing.price);
         Ok(())
+    }
+
+    /// Discloses the settlement breakdown a buyer would pay for an active
+    /// listing at the current protocol fee rate. Read-only.
+    ///
+    /// **Errors:**
+    /// - `SecondaryMarketError::ListingNotFound` — No active listing exists.
+    pub fn quote_purchase(
+        env: Env,
+        invoice_id: u64,
+        seller: Address,
+    ) -> Result<FillQuote, SecondaryMarketError> {
+        let listing: PositionSaleOffer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Listing(invoice_id, seller))
+            .ok_or(SecondaryMarketError::ListingNotFound)?;
+        let fee_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(DEFAULT_PROTOCOL_FEE_BPS);
+        quote_fill(listing.price, 1, 0, 1, fee_bps)
     }
 
     /// Cancels an active listing. Only the seller may cancel.
@@ -327,5 +483,52 @@ impl SecondaryMarket {
 
         events::listing_cancelled(&env, invoice_id, &seller);
         Ok(())
+    }
+
+    /// Adds an address to the fee-recipient allowlist. Admin-only.
+    ///
+    /// The protocol fee at settlement is only routed to the configured treasury
+    /// while it remains on this allowlist, bounding fee recipients and preventing
+    /// fee skimming via an unbounded destination. Idempotent: adding an
+    /// already-allowed recipient is a no-op.
+    ///
+    /// **Errors:**
+    /// - `SecondaryMarketError::NotAdmin` — caller is not the admin.
+    pub fn add_fee_recipient(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), SecondaryMarketError> {
+        require_admin(&env, &admin)?;
+        set_fee_recipient_allowed(&env, &recipient, true);
+        events::secondary_market_fee_recipient_added(&env, &admin, &recipient);
+        Ok(())
+    }
+
+    /// Removes an address from the fee-recipient allowlist. Admin-only.
+    ///
+    /// Idempotent. Removing the active treasury causes subsequent
+    /// `buy_position` calls to fail closed with `FeeRecipientNotAllowed` until
+    /// a permitted recipient is restored, so fees are never routed to an
+    /// unallowlisted address.
+    ///
+    /// **Errors:**
+    /// - `SecondaryMarketError::NotAdmin` — caller is not the admin.
+    pub fn remove_fee_recipient(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+    ) -> Result<(), SecondaryMarketError> {
+        require_admin(&env, &admin)?;
+        env.storage()
+            .persistent()
+            .remove(&DataKey::FeeRecipientAllowed(recipient.clone()));
+        events::secondary_market_fee_recipient_removed(&env, &admin, &recipient);
+        Ok(())
+    }
+
+    /// Returns whether `recipient` is on the fee-recipient allowlist.
+    pub fn is_fee_recipient_allowed(env: Env, recipient: Address) -> bool {
+        is_fee_recipient_allowed_storage(&env, &recipient)
     }
 }

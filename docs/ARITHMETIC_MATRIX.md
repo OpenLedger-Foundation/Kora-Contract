@@ -39,6 +39,8 @@ helpers used by every contract) and from per-contract arithmetic in
 | V-3 | `a * b` | `safe_mul` | ✅ `0 * MAX = 0` | ✅ `MAX * 2 → overflow` | ✅ `i128::MAX * 2 → overflow` | N/A | `test_safe_mul_*` | ✅ Covered |
 | V-4 | `a / b` | `safe_div` | ✅ `X / 0 → err` | ✅ `MAX / 1 = MAX` | ✅ `i128::MIN / -1 → overflow` | N/A | `test_safe_div_*` | ✅ Covered |
 | V-5 | `amount * bps / 10_000` | `bps_of` | ✅ `0 bps` and `0 amount` | ✅ `MAX_AMOUNT * 10_000` safe | ✅ `i128::MAX * bps → overflow` | ✅ mul-first order verified | `test_bps_of_*` | ✅ Covered |
+| V-5b | `part * 10_000 > cap_bps * whole` | `exceeds_bps_share` | ✅ `0 part`, `0 cap` | ✅ exact cap boundary | ✅ `i128::MAX * 10_000 → overflow` | ✅ division-free compare | `test_exceeds_bps_share_*` | ✅ Covered |
+| V-5c | `bps > 10_000` rejected | `bps_of`, `bps_of_normalized`, `exceeds_bps_share` | ✅ `10_000` accepted | — | — | — | `test_bps_of_rejects_rate_above_100_percent` | ✅ Covered |
 | V-6 | `amount * bps / 10_000` (normalised) | `bps_of_normalized` | ✅ zero amount | ✅ large amount | ✅ overflow path | ✅ decimal scale then bps | `test_bps_of_normalized_*` | ✅ Covered |
 | V-7 | `10^(scale)` | `normalize_amount` | ✅ 0 decimals diff = noop | ✅ large scale | ✅ overflow on extreme scale | N/A | `test_normalize_amount_*` | ✅ Covered |
 | V-8 | `amount > MAX_AMOUNT` | `require_within_max_amount` | ✅ `0 ok` | ✅ `MAX_AMOUNT ok`, `MAX_AMOUNT+1 err` | ✅ `i128::MAX err` | N/A | `test_require_within_max_amount_*` | ✅ Covered |
@@ -65,6 +67,8 @@ helpers used by every contract) and from per-contract arithmetic in
 | MP-C | `listing.funded_amount + listing_amount` | `fund_invoice_internal` | funded = 0, funded + amount = asking_price, overflow | N/A | `test_mp_funded_amount_overflow_*` | ✅ Covered |
 | MP-D | `prospective * 10_000 > cap_bps * asking_price` (concentration cap) | `fund_invoice_internal` | prev_gross = 0, at cap, over cap | ✅ mul-before-compare | `test_mp_concentration_cap_*` | ✅ Covered |
 | MP-E | `cap_bps * asking_price` overflow guard | `fund_invoice_internal` | asking_price = MAX_AMOUNT, cap_bps = 10_000 | ✅ | `test_mp_concentration_cap_overflow_guard` | ✅ Covered |
+| MP-F | `bps_of(fee, referrer_split_bps)` (was local `fee * split / 10_000`, #1188) | `fund_invoice_internal` | split = 0, 2_000, 10_000 | ✅ | `test_referral*` | ✅ Covered |
+| MP-G | `exceeds_bps_share(prospective, asking_price, cap_bps)` (was local checked compare, #1188) | `fund_invoice_internal` | at cap, cap + 1 | ✅ | `test_exceeds_bps_share_*` | ✅ Covered |
 
 ### 4. `contracts/treasury/src/lib.rs`
 
@@ -123,6 +127,16 @@ helpers used by every contract) and from per-contract arithmetic in
 
 ---
 
+### 10. `contracts/secondary_market/src/lib.rs`
+
+| ID | Function | Operation | Boundaries | Tests | Status |
+|----|----------|-----------|------------|-------|--------|
+| SM-1 | `buy_position` | `bps_of(price, fee_bps)` (mul before div) | 0, rounding edge, largest safe price (`i128::MAX / fee_bps`), MAX_AMOUNT and i128 extremes fail closed | `test_secondary_fee_*` | ✅ Covered |
+| SM-2 | `buy_position` | `safe_sub(price, fee)` | 0, largest safe price, 0–1000 bps | `test_secondary_fee_conserves_price` | ✅ Covered |
+| SM-3 | `update_protocol_fee_bps` | 0–1000 bps range | 1000, 1001, non-admin | `fee_rate_bounds_and_admin_are_enforced` (`secondary_market_fee_routing.rs`) | ✅ Covered |
+
+---
+
 ## Coverage Summary
 
 | Module | Operations enumerated | Covered | Gaps |
@@ -171,3 +185,11 @@ When adding a new arithmetic operation to any contract:
 4. Add at least one test per boundary class in
    `contracts/tests/arithmetic_overflow_matrix.rs`.
 5. Mark the row ✅ Covered.
+
+### Shared bps helpers (#1188)
+
+All basis-point math goes through `kora_shared::validation`
+(`BPS_DENOMINATOR`, `bps_of`, `bps_of_normalized`, `exceeds_bps_share`).
+Contracts must not inline `* bps / 10_000`; the helpers reject negative
+amounts and rates above 100 % and always round toward zero, so fee rounding
+cannot diverge between `marketplace`, `secondary_market` and `financing_pool`.
