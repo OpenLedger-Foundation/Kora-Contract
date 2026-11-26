@@ -141,3 +141,75 @@ pool.on("connect", async (client) => {
 Reporting routes that run queries longer than the API timeout must use a
 separately configured pool or database role with an explicit, reviewed timeout
 value. The main API pool must never be globally relaxed for export workloads.
+
+## Stale cache fail-closed (Closes #<issue_number> — Chaos GAP-1)
+
+### Problem
+
+During a DB network partition the read-through cache kept serving HTTP 200
+with stale data for up to ~8 s, violating the resilience contract: callers
+assumed live data but received outdated funding availability figures.
+
+### Fix
+
+Every cache entry is now timestamped.  `beginRead` applies three rules in
+priority order:
+
+| Rule | Condition | Outcome |
+|------|-----------|---------|
+| 1 — fail-closed | `store.health.available === false` | Evict all matching entries; throw `StaleCacheError` if an entry existed, `ApiUnavailableError` if no entry |
+| 2 — cache disabled | `CACHE_FRESHNESS_SLA_MS === 0` | Always miss (read-only / no-cache mode) |
+| 3 — expired entry | Entry age > `CACHE_FRESHNESS_SLA_MS` | Evict; fall through to live DB |
+| 4 — fresh hit | None of the above | Return cached page |
+
+### StaleCacheError
+
+A new error class distinct from `ApiUnavailableError` and `DbTimeoutError` so
+transport adapters and clients can apply targeted retry logic (wait for the
+partition to heal rather than immediately retrying a timed-out statement).
+
+```ts
+import { StaleCacheError } from "@kora/api-gateway";
+
+try {
+  const page = gateway.queryListings(filter, pageArgs, opts);
+} catch (err) {
+  if (err instanceof StaleCacheError) {
+    // err.code          → "STALE_CACHE"
+    // err.statusCode    → 503
+    // err.retryable     → true
+    // err.ageMs         → how old the evicted entry was
+    // err.retryAfterSeconds → how long to wait before retrying
+    res.setHeader("Retry-After", String(err.retryAfterSeconds));
+    res.status(503).json({ code: err.code, message: err.message, retryable: true });
+    return;
+  }
+}
+```
+
+### Environment variable
+
+| Variable | Default | Description |
+|---|---:|---|
+| `CACHE_FRESHNESS_SLA_MS` | `8000` | Maximum cache entry age in ms. Set to `0` to disable caching entirely (read-only/no-cache mode). Must be a non-negative integer. |
+
+### Chaos partition scenario
+
+```
+Baseline:    queryListings() → 200 (live data, entry cached at T)
+Partition:   store.health.available = false
+  T + 1 s:  queryListings() → StaleCacheError 503  (entry evicted, age reported)
+  T + 2 s:  queryListings() → StaleCacheError 503  (no entry, ApiUnavailableError)
+Recovery:   store.health.available = true
+  T + 10 s: queryListings() → 200 (live data, fresh entry cached)
+```
+
+No silent 200 is ever served while the store is degraded.
+
+### Read-through vs read-only cache modes
+
+| Mode | Config | Behaviour |
+|------|--------|-----------|
+| Read-through (default) | `CACHE_FRESHNESS_SLA_MS=8000` | Cache populated on first DB hit; evicted on DB failure or expiry |
+| No-cache | `CACHE_FRESHNESS_SLA_MS=0` | Every request hits the DB; `StaleCacheError` is impossible |
+| Extended cache | `CACHE_FRESHNESS_SLA_MS=30000` | Relaxed for high-read-low-write workloads; set alongside a tighter DB health probe |

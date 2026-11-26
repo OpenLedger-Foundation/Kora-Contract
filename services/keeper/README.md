@@ -98,6 +98,43 @@ with jittered backoff) and never corrupt SQLite job state. Unset
 
 ---
 
+## Lease Fencing (Multi-Replica Safety)
+
+When multiple keeper replicas run against the same job database (e.g. in an active-passive HA setup), only the **lease holder** runs dispatch ticks.  Other replicas skip the tick silently and re-contest the lease on the next poll cycle.
+
+### How it works
+
+1. Each replica has a unique `holderId` (defaults to `$HOSTNAME-$PID`).
+2. Before dispatching, the scheduler calls `LeaseStore.acquireLease("keeper:dispatch", holderId, ttlS)`.
+3. If acquired, the replica dispatches normally and renews the lease after the tick.
+4. If another non-expired replica holds the lease, the tick is skipped.
+5. If the holder crashes without releasing, the lease expires after `KEEPER_LEASE_TTL_S` seconds and the next replica to tick takes over.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `KEEPER_LEASE_DB_PATH` | `KEEPER_DB_PATH` | SQLite file for lease records (can share with job DB) |
+| `KEEPER_LEASE_TTL_S` | `60` | Lease TTL in seconds |
+| `KEEPER_HOLDER_ID` | `$HOSTNAME-$PID` | Unique replica identifier |
+
+Pass `KEEPER_LEASE_DB_PATH` to a shared volume so all replicas see the same lease table.
+
+### Clock skew
+
+The lease acquisition logic includes a 2-second clock-skew tolerance (`clockSkewTolS`).  Replicas whose clocks differ by up to 2 seconds will still elect a single holder correctly.  For larger skews, set `clockSkewTolS` via constructor injection in the `LeaseStore`.
+
+### Ops runbook
+
+| Situation | Action |
+|---|---|
+| Replica with the lease is healthy | Do nothing — lease renews automatically |
+| Replica with the lease is stuck / crashed | Wait up to `KEEPER_LEASE_TTL_S` seconds for the next replica to take over, or manually `DELETE FROM keeper_leases WHERE lease_name = 'keeper:dispatch'` and restart the target replica |
+| All replicas show "lease refused" in logs | Check that all replicas point to the same `KEEPER_LEASE_DB_PATH` |
+| Need to force-promote a specific replica | On the target replica: `DELETE FROM keeper_leases WHERE lease_name = 'keeper:dispatch'`; the next tick will acquire it |
+
+---
+
 ## Running
 
 ```bash
