@@ -28,10 +28,12 @@
     "testMatch": [
       "**/tests/transaction-recovery.test.ts",
       "**/tests/governance.test.ts",
-      "**/tests/clients.test.ts"
+      "**/tests/clients.test.ts",
+      "**/tests/invoice-v2-schema.test.ts"
     ],
     "collectCoverageFrom": [
-      "src/transactionRecovery.ts"
+      "src/transactionRecovery.ts",
+      "src/types.ts"
     ],
     "coverageThreshold": {
       "global": {
