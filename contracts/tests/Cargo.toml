@@ -127,6 +127,11 @@ path = "referral_rewards_e2e.rs"
 name = "referral_deposit_to_claim"
 path = "referral_deposit_to_claim.rs"
 
+# ── Fee clawback policy enforcement (Issue #1111) ────────────────────────────
+[[test]]
+name = "fee_clawback_policy"
+path = "fee_clawback_policy.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
