@@ -23,7 +23,12 @@ import * as fs from "fs";
 import * as path from "path";
 import pino from "pino";
 import { ExportJobQueue, ReportingDataSource } from "./exportJobQueue";
-import { ExportFormat, ExportScope, TreasuryQueryOptions } from "./types";
+import {
+  ExportFormat,
+  ExportScope,
+  TreasuryBalancesResponse,
+  TreasuryQueryOptions,
+} from "./types";
 
 const logger = pino({ name: "reporting:http" });
 
@@ -285,6 +290,26 @@ export function startRetentionSweeper(
 
 // ── HTTP server factory ───────────────────────────────────────────────────────
 
+/** Stellar asset codes are 1–12 alphanumeric characters. */
+const ASSET_CODE_RE = /^[A-Za-z0-9]{1,12}$/;
+
+/**
+ * Shape the multi-asset treasury balance view (issue #1184): every asset the
+ * treasury holds is returned (not only USDC), sorted by asset code, with an
+ * `assets` index. When `asset` is given, only that asset (case-insensitive) is
+ * returned; an unknown asset yields an empty list, not an error.
+ */
+export function shapeTreasuryBalances(
+  result: TreasuryBalancesResponse,
+  asset?: string
+): TreasuryBalancesResponse {
+  const wanted = asset?.toUpperCase();
+  const balances = result.balances
+    .filter((b) => wanted === undefined || b.asset.toUpperCase() === wanted)
+    .sort((a, b) => (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
+  return { ...result, balances, assets: balances.map((b) => b.asset) };
+}
+
 function parseTreasuryQuery(searchParams: URLSearchParams): TreasuryQueryOptions {
   const opts: TreasuryQueryOptions = {};
   const asset = searchParams.get("asset");
@@ -343,8 +368,14 @@ export function createReportingServer(
       }
       try {
         if (pathname === "/treasury/balances") {
+          const asset = parsedUrl.searchParams.get("asset");
+          if (asset !== null && !ASSET_CODE_RE.test(asset)) {
+            return json(res, 400, {
+              error: "asset must be a 1-12 character alphanumeric asset code",
+            });
+          }
           const result = await dataSource.getTreasuryBalances();
-          return json(res, 200, result);
+          return json(res, 200, shapeTreasuryBalances(result, asset ?? undefined));
         }
         if (pathname === "/treasury/inflows") {
           const opts = parseTreasuryQuery(parsedUrl.searchParams);

@@ -1,0 +1,13 @@
+# cargo-audit configuration (issue #1173).
+#
+# This allowlist MUST stay in sync with `[advisories] ignore` in deny.toml.
+# `scripts/security/check_advisory_allowlist.py` enforces that and fails the
+# CI `advisory-gate` job on any drift, missing reason, or expired exception.
+# Documented process: docs/DEPENDENCY_SECURITY.md#advisory-allowlist
+[advisories]
+ignore = []
+informational_warnings = ["unmaintained", "unsound"]
+
+[output]
+deny = ["warnings"]
+quiet = false

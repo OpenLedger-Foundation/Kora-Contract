@@ -26,7 +26,7 @@ members = [
 ]
 # contracts/fuzz/fuzz is the cargo-fuzz (libFuzzer, nightly) crate. It is built
 # only by `cargo fuzz`, never as part of the workspace.
-exclude = ["contracts/fuzz/fuzz"]
+exclude = ["contracts/fuzz/fuzz", "services/indexer"]
 resolver = "2"
 
 [workspace.dependencies]

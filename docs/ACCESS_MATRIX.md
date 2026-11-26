@@ -490,8 +490,11 @@ fn require_admin(&env, caller: &Address) -> Result<(), AccessControlError> {
 | `unpause` | **Admin** | Direct invoker must equal stored admin | No require_auth; invoker-equality check |
 | `update_protocol_fee_bps` | **Admin** | Direct invoker must equal stored admin; 0 to 1000 bps | No require_auth; invoker-equality check |
 | `list_position` | **Seller (Self)** | Pool open; seller holds financing_pool position; one active listing | Verifies position via pool cross-call |
-| `buy_position` | **Buyer (Self)** | Listing exists; buyer is not seller; pool open | Downstream pool transfer_position requires seller auth (see pool hook note) |
+| `buy_position` | **Buyer (Self)** | Listing exists; buyer is not seller; pool open; fee recipient (treasury) on the allowlist | Fails closed with `FeeRecipientNotAllowed` if the treasury is not allowlisted; downstream pool transfer_position requires seller auth (see pool hook note) |
 | `cancel_listing` | **Seller (Self)** | Listing exists | Only lister may cancel; not pause-gated |
+| `add_fee_recipient` | **Admin** | Direct invoker must equal stored admin | Adds an address to the fee-recipient allowlist (idempotent) |
+| `remove_fee_recipient` | **Admin** | Direct invoker must equal stored admin | Removes an address from the allowlist (idempotent); removing the active treasury fails `buy_position` closed |
+| `is_fee_recipient_allowed` | Permissionless | Read-only | Returns whether an address may receive protocol fees |
 
 **Pool-Authorized Hook (cross-reference):**
 - `buy_position` settles payment (fee to treasury, proceeds to seller) then calls `financing_pool.transfer_position`, which authenticates the seller (`from.require_auth()`). The seller's authorization is therefore enforced at the pool boundary even though `buy_position` itself only authenticates the buyer. Reviewers can trace `buy_position` here to `financing_pool.transfer_position` in section 5.
@@ -622,6 +625,20 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 **Enforcement:** `buy_position` authenticates only the buyer; position ownership moves through the pool's `transfer_position`, which requires the seller's authorization (`from.require_auth()`). The listing is cleared before external calls (checks-effects-interactions), and payment splits (protocol fee to treasury, proceeds to seller) settle before the ownership transfer.
 
 ---
+
+## Pause-Bypass Documentation Gate (issue #1183)
+
+`cargo run -p kora-xtask --bin check_pause_matrix` (CI: `ci.yml`) fails when a
+pause-guarded entrypoint (body calls `require_not_paused`, directly or through a
+private helper) is missing either:
+
+- a `✓ YES` row in `docs/SECURITY.md` → *Pause-Semantics Enforcement Matrix*, or
+- a row in this file under its `### <n>. <contract>` section.
+
+An undocumented pausable entrypoint is treated as an undocumented pause bypass:
+integrators and incident responders cannot tell whether it halts under
+`pause()`. To fix a failure, add the entrypoint row here and the `✓ YES` row in
+SECURITY.md. No new env vars or config are introduced.
 
 ## Automated Verification Checker
 

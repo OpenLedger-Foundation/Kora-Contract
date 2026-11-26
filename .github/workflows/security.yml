@@ -29,3 +29,52 @@ jobs:
           else
             echo "OK: bad fixture correctly rejected"
           fi
+      - name: Check env example drift
+        run: |
+          node infra/secrets/check-env-example.js
+          node --test infra/secrets/check-env-example.test.js
+
+  # Issue #1173 — RustSec advisory gate with a documented, time-bounded allowlist.
+  advisory-gate:
+    name: rustsec advisories (cargo audit + cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate advisory allowlist (reason, expiry, deny/audit sync)
+        run: |
+          python3 scripts/security/check_advisory_allowlist.py
+          bash scripts/tests/test-advisory-allowlist.sh
+      - name: cargo audit (fails on any non-allowlisted advisory)
+        run: |
+          cargo install cargo-audit --locked --version 0.21.1
+          cargo audit
+      - name: cargo deny advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  # Issue #1174 — base images must be pinned by immutable digest.
+  pinned-digests:
+    name: pinned builder image digests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Dockerfiles are digest-pinned
+        run: |
+          bash scripts/check-pinned-digests.sh
+          bash scripts/tests/test-pinned-digests.sh
+
+  # Issues #1175 / #1176 — ops helper tests.
+  ops-helpers:
+    name: pause-effect verifier + sev classifier tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: bash scripts/tests/test-verify-pause-effect.sh
+      - run: python3 -m unittest scripts/tests/test_classify_incident_sev.py

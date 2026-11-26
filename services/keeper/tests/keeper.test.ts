@@ -16,7 +16,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { JobStore } from "../src/jobStore";
-import { Dispatcher } from "../src/dispatcher";
+import { DEFAULT_MARK_KINDS, Dispatcher, SimulationResult } from "../src/dispatcher";
 import { Scheduler } from "../src/scheduler";
 import { ListingTtlKeeper } from "../src/ttlKeeper";
 import { Deadline, Job, KeeperConfig, TriggerResult } from "../src/types";
@@ -63,6 +63,18 @@ const BASE_CONFIG: KeeperConfig = {
 
 class MockDispatcher extends Dispatcher {
   responses: Array<TriggerResult | Error> = [];
+  simulations: Array<SimulationResult | Error> = [];
+  submitted: string[] = [];
+
+  protected override async _simulateStellarTransaction(
+    _contractAddress: string,
+    _fnName: string,
+    _invoiceId: string
+  ): Promise<SimulationResult> {
+    const next = this.simulations.shift() ?? { ok: true };
+    if (next instanceof Error) throw next;
+    return next;
+  }
 
   setNextResponse(r: TriggerResult | Error): void {
     this.responses.push(r);
@@ -74,6 +86,7 @@ class MockDispatcher extends Dispatcher {
     invoiceId: string,
     _fee: number
   ): Promise<string> {
+    this.submitted.push(fnName);
     const next = this.responses.shift();
     if (!next) throw new Error("No mock response configured");
     if (next instanceof Error) throw next;
@@ -278,6 +291,88 @@ describe("Dispatcher", () => {
       makeJob({ kind: "grace_period_end", dedupKey: "grace_period_end:1" })
     );
     expect(result.outcome).toBe("submitted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default-mark eligibility precheck (issue #1187)
+// ---------------------------------------------------------------------------
+
+describe("Dispatcher default-mark precheck", () => {
+  let dispatcher: MockDispatcher;
+
+  beforeEach(() => {
+    dispatcher = new MockDispatcher(BASE_CONFIG);
+  });
+
+  function job(kind: Job["kind"], overrides: Partial<Job> = {}): Job {
+    return {
+      id: 1, dedupKey: `${kind}:1`, kind, invoiceId: "1", deadlineTs: 100, contractAddress: "CTEST",
+      status: "ready", attempts: 0, lastAttemptAt: null, lastOutcome: null, lastTxHash: null,
+      lastError: null, createdAt: 0, updatedAt: 0, ...overrides,
+    };
+  }
+
+  test("only default-mark kinds are prechecked", () => {
+    expect([...DEFAULT_MARK_KINDS].sort()).toEqual(["due_date", "grace_period_end"]);
+  });
+
+  test("eligible simulation proceeds to submit", async () => {
+    dispatcher.simulations.push({ ok: true });
+    dispatcher.setNextResponse({ dedupKey: "grace_period_end:1", outcome: "submitted", txHash: "0x9" });
+    const result = await dispatcher.dispatch(job("grace_period_end"));
+    expect(result).toMatchObject({ outcome: "submitted", txHash: "0x9" });
+    expect(dispatcher.submitted).toEqual(["mark_defaulted"]);
+    expect(dispatcher.getPrecheckMetrics()).toEqual({ simulations: 1, skippedIneligible: 0, simulationErrors: 0 });
+  });
+
+  test("already-defaulted simulation completes without submitting (idempotent re-entry)", async () => {
+    dispatcher.simulations.push({ ok: false, error: "HostError: Error(Contract, #7) AlreadyDefaulted" });
+    const result = await dispatcher.dispatch(job("grace_period_end"));
+    expect(result.outcome).toBe("already_triggered");
+    expect(dispatcher.submitted).toHaveLength(0);
+  });
+
+  test("not-yet-eligible / paused simulation defers without submitting", async () => {
+    dispatcher.simulations.push({ ok: false, error: "GracePeriodNotElapsed" });
+    dispatcher.simulations.push({ ok: false, error: "ContractPaused" });
+    expect(await dispatcher.dispatch(job("grace_period_end"))).toMatchObject({
+      outcome: "failed",
+      error: "precheck: GracePeriodNotElapsed",
+    });
+    expect(await dispatcher.dispatch(job("due_date"))).toMatchObject({ outcome: "failed" });
+    expect(dispatcher.submitted).toHaveLength(0);
+    expect(dispatcher.getPrecheckMetrics().skippedIneligible).toBe(2);
+  });
+
+  test("permanent simulation errors dead-letter without submitting", async () => {
+    dispatcher.simulations.push({ ok: false, error: "no such contract" });
+    const result = await dispatcher.dispatch(job("due_date"));
+    expect(result.outcome).toBe("permanent_failure");
+    expect(dispatcher.submitted).toHaveLength(0);
+  });
+
+  test("degraded RPC fails closed instead of submitting blind", async () => {
+    dispatcher.simulations.push(new Error("ECONNREFUSED"));
+    const result = await dispatcher.dispatch(job("due_date"));
+    expect(result).toMatchObject({ outcome: "failed", error: "precheck_unavailable: ECONNREFUSED" });
+    expect(dispatcher.submitted).toHaveLength(0);
+    expect(dispatcher.getPrecheckMetrics().simulationErrors).toBe(1);
+  });
+
+  test("skipped prechecks do not consume the rate-limit budget", async () => {
+    for (let i = 0; i < 15; i++) dispatcher.simulations.push({ ok: false, error: "AlreadyDefaulted" });
+    for (let i = 0; i < 15; i++) await dispatcher.dispatch(job("due_date"));
+    dispatcher.setNextResponse({ dedupKey: "funding_expiry:1", outcome: "submitted", txHash: "0x1" });
+    expect((await dispatcher.dispatch(job("funding_expiry"))).outcome).toBe("submitted");
+  });
+
+  test("non default-mark kinds skip simulation", async () => {
+    dispatcher.simulations.push({ ok: false, error: "should not be consumed" });
+    dispatcher.setNextResponse({ dedupKey: "funding_expiry:1", outcome: "submitted" });
+    await dispatcher.dispatch(job("funding_expiry"));
+    expect(dispatcher.getPrecheckMetrics().simulations).toBe(0);
+    expect(dispatcher.simulations).toHaveLength(1);
   });
 });
 

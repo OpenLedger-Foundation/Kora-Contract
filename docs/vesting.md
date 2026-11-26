@@ -166,7 +166,7 @@ All vesting contract events are emitted using the shared `kora_shared::events` s
 | Topic | Trigger | Payload |
 |-------|---------|---------|
 | `VEST_INIT` | `initialize` | `(admin, token, timestamp)` |
-| `VEST_GRANT` | `create_grant` | `(admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp)` |
+| `VEST_GRNT` | `create_grant` | `(admin, beneficiary, total_amount, start_time, cliff_duration, vesting_duration, timestamp)` |
 | `VEST_REL` | `release` | `(beneficiary, amount, timestamp)` |
 | `VEST_REV` | `revoke_grant` | `(admin, beneficiary, revoked_at, timestamp)` |
 | `UPG_PROP` | `propose_upgrade` | `(admin, wasm_hash, timestamp)` |

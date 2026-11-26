@@ -185,6 +185,25 @@ jobs:
       - name: cargo run -p kora-xtask --bin check_pause_matrix
         run: cargo run -p kora-xtask --bin check_pause_matrix
 
+      - name: EVENTS.md is in sync with shared event definitions
+        run: |
+          cargo test -p kora-xtask --bin gen_events
+          cargo run -p kora-xtask --bin gen_events -- --check
+
+  # ── Community node packaging and SDK error mapping ────────────────────────
+  node-packaging:
+    name: community node and SDK errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: ./packaging/test-community-node.sh
+      - run: node sdk/scripts/generate-errors.js --check
+      - run: npm ci && npx jest tests/error-mapping.test.ts
+        working-directory: sdk
+
   # ── Unit & integration tests ──────────────────────────────────────────────
   test:
     name: cargo test
@@ -303,6 +322,29 @@ jobs:
         env:
           FUZZ_ITERS: "100"
         run: cargo test -p kora-fuzz --test smoke fuzz_dispute_resolution -- --ignored
+
+  # ── Reentrancy / CEI audit gate (issue #808) ─────────────────────────────
+  #
+  # Enforces that:
+  #   1. docs/REENTRANCY_AUDIT.md still has >= 27 matrix rows.
+  #   2. reentrancy_cei_regression.rs still has >= 20 tests.
+  #   3. The two documented open items (TR-6, RR-6) each have a regression test.
+  #   4. All guarded contracts (financing_pool, marketplace, treasury,
+  #      risk_registry, invoice_nft, access_control) still reference their
+  #      expected guard types (RepaymentLock / ReentrancyGuard).
+  #   5. The shared reentrancy module is intact.
+  #
+  # New cross-contract call sites must be added to the audit matrix and have a
+  # regression test before the PR can merge. See scripts/check_reentrancy_audit.sh
+  # for the full allowlist policy and how to add new safe call sites.
+  reentrancy-audit-gate:
+    name: reentrancy audit gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run reentrancy / CEI audit gate
+        run: bash scripts/check_reentrancy_audit.sh
 
   # ── deploy.sh parameter_registry order guard (issue #1083) ──────────────
   #

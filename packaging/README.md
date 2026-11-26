@@ -106,6 +106,31 @@ cd /opt/kora
 ./tools/verify-indexer.sh
 ```
 
+## WASM Release Attestation
+
+Contract WASM releases are verifiable independently of the indexer packaging.
+`.github/workflows/reproducible-build.yml` rebuilds every release tag from
+source, fails if any hash differs from the committed
+`releases/vX.Y.Z.hashes`, and on a full match uploads a signed
+build-provenance attestation and the `wasm-attestation-vX.Y.Z` artifact
+(`vX.Y.Z.attestation.json`, the verified manifest and the binaries).
+
+```bash
+# Compare a local build against the committed manifest (writes attestation/)
+./scripts/attest-wasm-hashes.sh v0.2.0
+
+# Verify a CI-built binary's signed provenance
+gh attestation verify kora_treasury.wasm --repo OpenLedger-Foundation/Kora-Contract
+```
+
+| Input | Where | Purpose |
+|---|---|---|
+| `version` | `workflow_dispatch` input | Re-run attestation for an existing `vX.Y.Z` |
+| `releases/vX.Y.Z.hashes` | committed file | Expected hashes (from `scripts/record-wasm-hashes.sh`) |
+
+Full verifier instructions, the report schema and platform-drift notes are in
+[docs/REPRODUCIBLE_BUILD.md](../docs/REPRODUCIBLE_BUILD.md).
+
 ## Resource Limits
 
 The systemd service includes default resource limits:
@@ -230,3 +255,18 @@ free -h
 - Environment variables isolated in `/opt/kora/services/indexer/.env` (mode 600)
 
 For security issues, see [SECURITY.md](../SECURITY.md).
+
+## Community Node (indexer + API + health)
+
+```bash
+cp packaging/.env.example .env   # fill in CONTRACT_* and TREASURY_CONTRACT_ID
+./packaging/community-node.sh
+```
+
+Starts Postgres, the indexer (`:3000`), the treasury API (`:3001`) and the health
+aggregator (`http://localhost:8081/health`), and waits until all are healthy.
+Re-running is safe. Missing configuration exits 2 before any container starts;
+a degraded or failed dependency fails the wait. Set `KORA_INDEXER_IMAGE` to run a
+prebuilt indexer. `services/indexer` currently ships only a library, with no
+server binary, so a local indexer build requires one to be added first.
+`HEALTH_SERVICES` limits which upstreams the aggregator polls.

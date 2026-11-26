@@ -388,4 +388,218 @@ mod tests {
             EscrowError::AlreadyDisputed
         );
     }
+
+    // ── Escrow release coupling tests ─────────────────────────────────────────
+    //
+    // These tests verify that:
+    // 1. Resolution routes funds exactly as instructed (pool vs. payer).
+    // 2. After resolution the dispute is permanently finalized — a second
+    //    resolve call returns `Resolved`, not a fund-movement side effect.
+    // 3. The escrow contract holds exactly the disputed amount in custody
+    //    while the dispute is open — the pool balance is not credited early.
+    // 4. Timeout refund is not available before the deadline.
+    // 5. Governance resolve is not available after the timeout.
+
+    /// Funds are locked in escrow (not in pool) while the dispute is open.
+    #[test]
+    fn escrow_holds_funds_while_dispute_open() {
+        let (env, escrow, pool, _admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+
+        let pre_escrow_balance = token.balance(&escrow.address);
+        let pre_pool_balance = token.balance(&pool.address);
+        escrow.open_dispute(&sme, &sme, &100, &80);
+
+        // Funds must be locked in escrow, not sent to pool
+        assert_eq!(
+            token.balance(&escrow.address),
+            pre_escrow_balance + 80,
+            "escrow must hold the disputed amount"
+        );
+        assert_eq!(
+            token.balance(&pool.address),
+            pre_pool_balance,
+            "pool must not receive funds before resolution"
+        );
+
+        let dispute = escrow.get_dispute(&100).unwrap();
+        assert!(!dispute.resolved, "dispute must remain open");
+        assert!(!dispute.paid_to_pool, "paid_to_pool must be false before resolution");
+    }
+
+    /// Governance resolve with pay_pool=true transfers funds to pool and
+    /// marks the dispute as paid_to_pool=true.
+    #[test]
+    fn escrow_resolution_pay_pool_routes_to_pool() {
+        let (env, escrow, pool, admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+        escrow.open_dispute(&sme, &sme, &101, &70);
+
+        escrow.resolve_dispute(&admin, &101, &true);
+
+        assert_eq!(token.balance(&escrow.address), 0, "escrow must be empty after resolution");
+        assert_eq!(token.balance(&pool.address), 70, "pool must receive funds when pay_pool=true");
+        assert_eq!(token.balance(&sme), 230, "sme must keep the balance minus escrowed amount");
+
+        let dispute = escrow.get_dispute(&101).unwrap();
+        assert!(dispute.resolved);
+        assert!(dispute.paid_to_pool);
+    }
+
+    /// Governance resolve with pay_pool=false refunds to payer.
+    #[test]
+    fn escrow_resolution_refund_routes_to_payer() {
+        let (env, escrow, pool, admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+        escrow.open_dispute(&sme, &sme, &102, &65);
+
+        escrow.resolve_dispute(&admin, &102, &false);
+
+        assert_eq!(token.balance(&escrow.address), 0, "escrow must be empty after refund");
+        assert_eq!(token.balance(&pool.address), 0, "pool must not receive funds when refunding");
+        assert_eq!(token.balance(&sme), 300, "sme must receive full refund");
+
+        let dispute = escrow.get_dispute(&102).unwrap();
+        assert!(dispute.resolved);
+        assert!(!dispute.paid_to_pool);
+    }
+
+    /// After resolution, every subsequent resolve call returns `Resolved` —
+    /// no second fund movement can occur.
+    #[test]
+    fn escrow_resolved_dispute_is_immutable_no_double_spend() {
+        let (env, escrow, _pool, admin, sme, _asset) = setup();
+        escrow.open_dispute(&sme, &sme, &103, &50);
+        escrow.resolve_dispute(&admin, &103, &true);
+
+        // Both resolve paths must be blocked after finality
+        let result_gov = escrow.try_resolve_dispute(&admin, &103, &false);
+        assert_eq!(
+            result_gov.unwrap_err().unwrap(),
+            EscrowError::Resolved,
+            "governance resolve on finalized dispute must return Resolved"
+        );
+
+        let result_timeout = escrow.try_resolve_timeout(&103);
+        assert_eq!(
+            result_timeout.unwrap_err().unwrap(),
+            EscrowError::Resolved,
+            "timeout resolve on finalized dispute must return Resolved"
+        );
+    }
+
+    /// Timeout resolve before the deadline returns `TimeoutNotReached` —
+    /// it must not release funds early.
+    #[test]
+    fn escrow_timeout_before_deadline_blocked_typed_error() {
+        let (env, escrow, _pool, _admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+        escrow.open_dispute(&sme, &sme, &104, &40);
+
+        // Advance to 1 second before timeout
+        env.ledger().set(LedgerInfo {
+            timestamp: 100 + DISPUTE_TIMEOUT - 1,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = escrow.try_resolve_timeout(&104);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            EscrowError::TimeoutNotReached,
+            "timeout before deadline must surface typed TimeoutNotReached"
+        );
+        // Funds must still be locked in escrow
+        assert_eq!(token.balance(&escrow.address), 40, "funds must remain in escrow");
+    }
+
+    /// Governance resolve after the timeout deadline returns `TimeoutExpired`.
+    #[test]
+    fn escrow_governance_resolve_after_timeout_blocked_typed_error() {
+        let (env, escrow, _pool, admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+        escrow.open_dispute(&sme, &sme, &105, &35);
+
+        // Advance to exactly the timeout boundary (opened_at=100, timeout=100+DISPUTE_TIMEOUT)
+        env.ledger().set(LedgerInfo {
+            timestamp: 100 + DISPUTE_TIMEOUT,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        let result = escrow.try_resolve_dispute(&admin, &105, &true);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            EscrowError::TimeoutExpired,
+            "governance resolve at/after timeout must surface typed TimeoutExpired"
+        );
+        // Escrow still holds the amount — no unintended release
+        assert_eq!(token.balance(&escrow.address), 35, "funds must stay in escrow when governance resolve is blocked");
+    }
+
+    /// Timeout resolve at exactly the deadline (opened_at + DISPUTE_TIMEOUT) succeeds.
+    #[test]
+    fn escrow_timeout_at_exact_boundary_succeeds() {
+        let (env, escrow, _pool, _admin, sme, asset) = setup();
+        let token = token::Client::new(&env, &asset);
+        escrow.open_dispute(&sme, &sme, &106, &45);
+
+        // Advance to exactly the timeout boundary
+        env.ledger().set(LedgerInfo {
+            timestamp: 100 + DISPUTE_TIMEOUT,
+            protocol_version: 21,
+            sequence_number: 2,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 1_000,
+            min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 1_000_000,
+        });
+
+        // resolve_timeout uses `< DISPUTE_TIMEOUT`, so at exactly the boundary it should succeed
+        let result = escrow.try_resolve_timeout(&106);
+        assert!(
+            result.is_ok(),
+            "timeout at exactly the boundary must succeed"
+        );
+        assert_eq!(token.balance(&sme), 300, "payer must be fully refunded after timeout");
+    }
+
+    /// Non-admin cannot perform governance adjudication.
+    #[test]
+    fn escrow_non_admin_resolve_rejected() {
+        let (env, escrow, _pool, _admin, sme, _asset) = setup();
+        escrow.open_dispute(&sme, &sme, &107, &30);
+
+        let stranger = Address::generate(&env);
+        let result = escrow.try_resolve_dispute(&stranger, &107, &true);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            EscrowError::Unauthorized,
+            "non-admin adjudication must be rejected"
+        );
+    }
+
+    /// Opening a dispute for an invoice that already has one is rejected.
+    #[test]
+    fn escrow_duplicate_dispute_rejected() {
+        let (env, escrow, _pool, _admin, sme, _asset) = setup();
+        escrow.open_dispute(&sme, &sme, &108, &20);
+        let result = escrow.try_open_dispute(&sme, &sme, &108, &10);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            EscrowError::AlreadyDisputed,
+            "duplicate dispute on same invoice must be rejected"
+        );
+    }
 }

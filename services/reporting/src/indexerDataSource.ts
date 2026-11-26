@@ -261,15 +261,19 @@ export class IndexerReportingDataSource implements ReportingDataSource {
     const outflows = this._collectTreasuryOutflows(rows);
 
     const byAsset = new Map<string, { inflows: bigint; outflows: bigint }>();
+    // Asset codes are normalised to upper-case so "usdc" and "USDC" events
+    // roll up into one balance rather than two (issue #1184).
     for (const inf of inflows) {
-      const entry = byAsset.get(inf.asset) ?? { inflows: 0n, outflows: 0n };
+      const key = inf.asset.toUpperCase();
+      const entry = byAsset.get(key) ?? { inflows: 0n, outflows: 0n };
       entry.inflows += bigint(inf.amount);
-      byAsset.set(inf.asset, entry);
+      byAsset.set(key, entry);
     }
     for (const out of outflows) {
-      const entry = byAsset.get(out.asset) ?? { inflows: 0n, outflows: 0n };
+      const key = out.asset.toUpperCase();
+      const entry = byAsset.get(key) ?? { inflows: 0n, outflows: 0n };
       entry.outflows += bigint(out.amount);
-      byAsset.set(out.asset, entry);
+      byAsset.set(key, entry);
     }
 
     const balances: TreasuryBalance[] = Array.from(byAsset.entries()).map(

@@ -102,6 +102,45 @@ failure or an explicit user decision. Wallet connection state is owned by the
 integrating application; this SDK API provides the on-chain status needed to
 recover its transaction tracker.
 
+## Invoice type — schema v2
+
+The `Invoice` interface tracks the on-chain `kora_shared::types::Invoice` struct at schema version 2. All v2 fields are present:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `bigint` | Monotonically incrementing NFT id |
+| `sme` | `string` | SME account address (hex-encoded Ed25519 key) |
+| `debtorHash` | `Buffer` | SHA-256 of debtor PII — stays off-chain |
+| `amount` | `bigint` | Face value in stroops (7 decimals) |
+| `currency` | `string` | Token symbol, e.g. `"USDC"` |
+| `dueDate` | `bigint` | Unix timestamp |
+| `ipfsCid` | `string` | IPFS CID of full invoice metadata |
+| `metadataHash` | `Buffer` | **v2** — 32-byte SHA-256 content commitment. Empty `Buffer` (length 0) on pre-migration or un-committed records. |
+| `riskScore` | `number` | 0–100 |
+| `riskTier` | `RiskTier` | `"AAA"` \| `"AA"` \| `"A"` \| `"B"` \| `"C"` |
+| `status` | `InvoiceStatus` | `"Created"` \| `"Listed"` \| `"Funded"` \| `"Repaid"` \| `"Defaulted"` |
+| `createdAt` | `bigint` | Unix timestamp |
+| `fundedAt` | `bigint \| null` | `null` until the invoice reaches `Funded` state |
+| `repaidAt` | `bigint \| null` | `null` until repaid |
+| `notes` | `string \| null` | **v2** — optional free-text memo set at mint time. `null` on pre-v2 records. |
+
+### Handling pre-migration (v1) records
+
+Records minted before the v2 migration have both v2 fields in a default state:
+
+- `metadataHash` — empty `Buffer` (`.length === 0`). Check `.length === 32` before treating it as a committed hash.
+- `notes` — `null`. Treat as "no memo" rather than an error.
+
+`decodeInvoice` handles both v1 and v2 records transparently; callers never need to branch on schema version.
+
+### Unknown-field policy
+
+The on-chain `ScVal` map returned by `get_invoice` may contain additional keys in future schema versions. `decodeInvoice` **silently ignores** any key it does not recognise — it never throws on unknown fields. This means:
+
+- Existing SDK consumers are unaffected by additive on-chain schema changes.
+- New required fields added in a future v3 migration will be absent from the decoded object until the SDK is updated. Subscribe to the [changelog](../CHANGELOG.md) for breaking schema changes.
+- If `decodeInvoice` is given a ScVal that is missing a **required** field (e.g. `id`, `amount`, `currency`) it throws a descriptive error: `decodeInvoice: missing field "<key>"`.
+
 ## Contract clients
 
 | Client | Contract |
@@ -218,4 +257,70 @@ In addition to the core 7 contracts, the SDK provides typed clients for extended
 - **`SecondaryMarketClient`** (`contracts/secondary_market`): List investor positions for secondary sale, purchase listed positions, and manage secondary trading fees.
 - **`GovernanceVotingClient`** (`contracts/governance_voting`): Create and vote on governance proposals (Standard and Quadratic voting), manage vote delegation, configure vesting weight sources, and execute proposals.
 
-These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
+These clients are available as standalone exports or optionally attached to `KoraClient` by specifying their addresses in `KoraAddresses`. Error mappings for all four contracts are exported via `DISPUTE_ESCROW_ERROR_MESSAGES`, `FRACTIONALIZER_ERROR_MESSAGES`, `SECONDARY_MARKET_ERROR_MESSAGES`, `GOVERNANCE_VOTING_ERROR_MESSAGES`, and `getErrorMessage`.
+
+## Transaction helpers: surge-pricing fee hints
+
+During Stellar surge pricing, transactions submitted at the 100-stroop minimum
+inclusion fee may not be included in time (e.g. before a funding deadline).
+The SDK can apply the advisory multiplier served by the Kora fee-hint endpoint
+(`GET /network/fee-hint`, see `services/fx-ingestion/README.md`).
+
+Fee hints are **opt-in** and **advisory** — they improve the chance of
+inclusion but guarantee neither inclusion nor ordering.
+
+```bash
+export KORA_USE_FEE_HINTS=true
+export KORA_FEE_HINT_URL=https://api.kora.example/network/fee-hint
+# optional client-side cap (bps, default 100000 = 10x)
+export KORA_FEE_HINT_MAX_BPS=50000
+```
+
+With `KORA_USE_FEE_HINTS=true`, every contract client built on `BaseClient`
+resolves its `TransactionBuilder` fee through the hint. The URL can also be set
+per network:
+
+```ts
+import { KoraClient, TESTNET } from "@kora-protocol/sdk";
+
+const kora = new KoraClient(addresses, { ...TESTNET, feeHintUrl: "https://api.kora.example/network/fee-hint" });
+```
+
+For transactions you build yourself:
+
+```ts
+import { BASE_FEE, TransactionBuilder } from "@stellar/stellar-sdk";
+import { applyFeeHint, fetchFeeHint, resolveFee } from "@kora-protocol/sdk";
+
+// Honours KORA_USE_FEE_HINTS; returns BASE_FEE unchanged when disabled or on any error.
+const fee = await resolveFee(BASE_FEE);
+const tx = new TransactionBuilder(account, { fee, networkPassphrase }) /* … */;
+
+// Or explicitly:
+const hint = await fetchFeeHint({ url: "https://api.kora.example/network/fee-hint" });
+if (hint?.stale) console.warn("fee hint is stale/degraded; using it as a floor only");
+const explicitFee = applyFeeHint(BASE_FEE, hint, 30_000); // clamp to 3x
+```
+
+Behaviour:
+
+- The multiplier is clamped to `[1.0x, maxMultiplierBps]`; the result is never
+  below the base fee.
+- Network errors, non-2xx responses, timeouts (2 s) and malformed bodies fall
+  back to the base fee.
+- Only the inclusion fee is scaled; Soroban resource fees from
+  `prepareTransaction` are unchanged. Fees are in stroops on both testnet and
+  pubnet.
+
+## Typed contract errors
+
+```ts
+import { KoraErrorCode, mapContractError } from "@kora-protocol/sdk";
+
+const { code, retryable } = mapContractError(err, "marketplace");
+if (code === KoraErrorCode.ProtocolPaused) showPausedBanner();
+```
+
+Codes are per contract; unrecognised contracts or codes map to
+`KoraErrorCode.Unknown` and are not retryable. After changing a contract error
+enum, run `npm run generate:errors`.

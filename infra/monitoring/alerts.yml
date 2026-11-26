@@ -113,3 +113,68 @@ groups:
         annotations:
           summary: Kora treasury sweep observed
           description: Verify the sweep amount and authorized transaction; expected sweeps do not page on-call.
+  # Issue #1175 — proof that an emergency pause / drill took effect on every
+  # target contract. Series are written by scripts/verify-pause-effect.sh.
+  - name: kora-pause-effect
+    rules:
+      - alert: KoraPauseNotEffective
+        expr: kora_pause_effective == 0
+        for: 0m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Pause not effective on {{ $labels.target }}
+          description: is_paused did not return true for {{ $labels.target }} ({{ $labels.contract }}) after a pause/drill. Re-run the pause for this target immediately.
+
+      - alert: KoraPauseProbeFailed
+        expr: kora_pause_probe_error == 1
+        for: 0m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Pause state unverifiable for {{ $labels.target }}
+          description: The is_paused probe failed for {{ $labels.target }}; treat the target as NOT paused until verified.
+
+
+  - name: kora-fx-ingestion
+    rules:
+      - alert: KoraFxRateStale
+        expr: max by (base, quote) (kora_fx_rate_age_seconds) > 1800
+        for: 5m
+        labels:
+          severity: warning
+          tier: sev-2
+        annotations:
+          summary: Kora FX rate for {{ $labels.base }}/{{ $labels.quote }} is stale
+          description: >
+            No successful FX publication for {{ $labels.base }}/{{ $labels.quote }}
+            in {{ $value }} seconds (threshold 1800s, sustained 5m).
+            Multi-currency invoice displays and funding math depend on fresh rates;
+            inspect the fx-ingestion /metrics endpoint and source availability.
+
+      - alert: KoraFxRateNeverPublished
+        expr: absent(kora_fx_rate_age_seconds)
+        for: 15m
+        labels:
+          severity: warning
+          tier: sev-2
+        annotations:
+          summary: Kora FX ingestion has never published a rate
+          description: >
+            The staleness gauge kora_fx_rate_age_seconds has been absent for 15
+            minutes — no FX pair has been successfully ingested since startup.
+            Check FX_RELAY_SECRET, source API keys, and the oracle contract address.
+
+      - alert: KoraFxIngestionDown
+        expr: up{job="kora-fx-ingestion-rates"} == 0
+        for: 3m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora FX ingestion metrics endpoint unreachable
+          description: >
+            The fx-ingestion /metrics scrape has been failing for at least three
+            minutes. FX staleness may be going undetected.

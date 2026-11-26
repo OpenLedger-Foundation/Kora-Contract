@@ -52,6 +52,54 @@ No manual intervention is needed for a failed deploy.
 ./infra/blue-green/deploy.sh both --rollback
 ```
 
+## Automated Cutover Checklist
+
+Before running `deploy.sh`, use `cutover-checklist.sh` to verify all health and metrics gates.  The script exits `0` only when every gate passes; a failed gate prints rollback instructions and exits `1`.
+
+```bash
+# Verify gates for both services
+./infra/blue-green/cutover-checklist.sh both
+
+# Dry-run in CI — prints gates without live HTTP calls, always exits 0
+./infra/blue-green/cutover-checklist.sh both --dry-run
+```
+
+### Gates checked
+
+| # | Gate | Failure action |
+|---|------|---------------|
+| 1 | New instance `/health` responds 200 | Block cutover |
+| 2 | `/metrics` endpoint is parseable | Block cutover |
+| 3 | `kora_indexer_lag_seconds` ≤ `CHECKLIST_MAX_INDEXER_LAG_S` | Block cutover |
+| 4 | `kora_keeper_jobs{status="dead"}` == 0 | Block cutover |
+| 5 | No `circuit_breaker_trip` events observed | Block cutover |
+| 6 | Active colour confirmed in state file | Warn on first deploy |
+| 7 | No critical alerts active in Alertmanager | Block cutover |
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHECKLIST_API_BLUE_URL` | `http://localhost:3001` | api-blue base URL |
+| `CHECKLIST_API_GREEN_URL` | `http://localhost:3002` | api-green base URL |
+| `CHECKLIST_INDEXER_BLUE_URL` | `http://localhost:8081` | indexer-blue base URL |
+| `CHECKLIST_INDEXER_GREEN_URL` | `http://localhost:8082` | indexer-green base URL |
+| `CHECKLIST_ALERTMANAGER_URL` | `http://localhost:9093` | Alertmanager API |
+| `CHECKLIST_MAX_INDEXER_LAG_S` | `60` | Max indexer lag before blocking |
+| `CHECKLIST_HEALTH_TIMEOUT_S` | `5` | Per-request curl timeout |
+| `CHECKLIST_RETRIES` | `3` | Retries per gate |
+| `CHECKLIST_RETRY_INTERVAL_S` | `2` | Seconds between retries |
+
+### Partial-service healthy scenario
+
+If only one of the two services fails its gates:
+
+1. Roll back only the failing service: `./deploy.sh <service> --rollback`
+2. Leave the passing service on its new colour
+3. Re-run the checklist for the failing service alone once the issue is resolved
+
+---
+
 ## Usage
 
 ```bash

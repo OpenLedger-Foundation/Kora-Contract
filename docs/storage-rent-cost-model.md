@@ -124,6 +124,24 @@ A keeper bot must periodically call `extend_ttl` on persistent keys before they 
 
 4. **Batch where possible** — multiple `extend_ttl` operations can be packed into a single transaction to reduce fee overhead.
 
+### Dry-run rehearsal (#<keeper-dry-run>)
+
+Before burning fees on a mass extend, operators can rehearse the decision
+read-only using the keeper's dry-run mode (`services/keeper`):
+
+- `KEEPER_DRY_RUN=1 npm start` runs once, prints a JSON report, and exits
+  without starting the scheduler or submitting any transaction.
+- `GET /dry-run` (on the running keeper) returns the same report on demand.
+
+The dry run classifies each watched key as **instance** (the contract instance
+entry, whose TTL covers all instance-storage keys at once) or **persistent**
+(per-listing `Listing` entries), reports each key's `remainingLedgers` against
+`KEEPER_TTL_THRESHOLD_LEDGERS`, and flags `needsBump` for keys below the
+threshold. Missing (archived/expired) entries are flagged `needsBump + missing`
+rather than silently skipped. Use it to size a planned extend and to confirm
+the instance bump (cheap, covers all instance keys) separately from the more
+numerous persistent listing bumps.
+
 **Priority order for bumping:**
 1. Pool + Positions (investor funds at risk if archived)
 2. Invoice entries (canonical state machine)

@@ -1,0 +1,123 @@
+name: Reproducible Build Attestation
+
+# Builds release WASM with the pinned toolchain, compares every binary against
+# the committed manifest releases/<version>.hashes, and — only when all hashes
+# match — uploads a signed build-provenance attestation plus a JSON report.
+#
+# A mismatch, a missing binary, or a missing/empty manifest fails the job and
+# nothing is attested. See docs/REPRODUCIBLE_BUILD.md for verifier steps.
+#
+# Platform drift: canonical hashes are produced on ubuntu-22.04 x86_64 with the
+# toolchain pinned in rust-toolchain.toml. The runner image is pinned (not
+# ubuntu-latest) so an image rollover cannot silently change the build host.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - "releases/*.hashes"
+      - "scripts/attest-wasm-hashes.sh"
+      - "scripts/tests/test-attest-wasm-hashes.sh"
+      - ".github/workflows/reproducible-build.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to verify (vX.Y.Z); must have releases/<version>.hashes"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  attestation-script-tests:
+    name: Attestation script fixture tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run fixture tests
+        run: bash scripts/tests/test-attest-wasm-hashes.sh
+
+  reproducible-build:
+    name: Build, compare hashes, attest
+    runs-on: ubuntu-22.04
+    needs: attestation-script-tests
+    # PRs only run the fixture tests; the full build + attestation runs for
+    # release tags and manual dispatches.
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      id-token: write      # OIDC token for Sigstore signing
+      attestations: write  # store the build-provenance attestation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must be vX.Y.Z, got '$VERSION'"
+            exit 1
+          fi
+          if [ ! -f "releases/$VERSION.hashes" ]; then
+            echo "::error::Missing committed manifest releases/$VERSION.hashes (run scripts/record-wasm-hashes.sh $VERSION and commit it before tagging)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+
+      - name: Clean release build (no cache — every byte comes from source)
+        run: |
+          # Same flags verifiers use (docs/REPRODUCIBLE_BUILD.md) so absolute
+          # checkout / cargo-home paths never leak into the binaries.
+          export RUSTFLAGS="--remap-path-prefix=$(pwd)=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          make clean
+          make build
+
+      - name: Compare against committed hashes
+        run: |
+          bash scripts/attest-wasm-hashes.sh "${{ steps.version.outputs.version }}" \
+            --out attestation \
+            --commit "${GITHUB_SHA}"
+
+      - name: Generate signed build-provenance attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            target/wasm32-unknown-unknown/release/kora_*.wasm
+
+      - name: Upload attestation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-attestation-${{ steps.version.outputs.version }}
+          path: |
+            attestation/${{ steps.version.outputs.version }}.attestation.json
+            attestation/${{ steps.version.outputs.version }}.hashes
+            target/wasm32-unknown-unknown/release/kora_*.wasm
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          {
+            echo "## Reproducible build: ${{ steps.version.outputs.version }}"
+            echo ""
+            echo "All WASM hashes match \`releases/${{ steps.version.outputs.version }}.hashes\`."
+            echo ""
+            echo '```'
+            cat "attestation/${{ steps.version.outputs.version }}.hashes"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

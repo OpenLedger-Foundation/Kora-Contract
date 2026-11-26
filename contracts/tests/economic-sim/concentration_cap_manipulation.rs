@@ -6,33 +6,57 @@
 //! 1. Using multiple Sybil addresses to exceed intended concentration limits
 //! 2. Gaming the fee-tier mechanism through artificial volume splitting
 //! 3. Manipulating position-share mechanics to consolidate beyond caps
+//! 4. Splitting one contribution into many `fund_invoice` calls, each under
+//!    the cap on its own
+//! 5. Funding before a cap is enabled or lowered, then topping up
 //!
 //! ## Expected Defenses
 //!
-//! - KYC/accreditation requirements making Sybil attacks expensive
-//! - Volume tracking at entity level, not address level (future)
-//! - Position-share transfers maintain concentration checks
+//! - `marketplace` records a running gross contribution per
+//!   `(invoice_id, investor)` (`get_gross_contribution`) and rejects any
+//!   funding call that would take it above `MaxInvestorShareBps` of the
+//!   asking price with `InvestorConcentrationExceeded`. The exact cap is
+//!   allowed and the next unit is rejected
+//! - The cap is measured in listing-token units after oracle conversion
+//! - A rejected call leaves the listing and the running total untouched
+//! - Unaccredited addresses cannot fund at all (`InvestorNotAccredited`)
 //! - Gas costs make micro-splitting uneconomical
+//!
+//! ## Sybil note
+//!
+//! The cap is per address. N accredited addresses controlled by one entity can
+//! hold up to `N * cap` of a listing; no on-chain check can link them. The
+//! on-chain defense is that every funding address must be individually
+//! accredited by the admin (`set_investor_accredited`); entity-level linking
+//! is an off-chain KYC responsibility. `test_contract_sybil_requires_accreditation`
+//! pins both halves of that statement.
+//!
+//! Post-funding consolidation through `financing_pool::transfer_position`
+//! merges positions without re-checking `MaxPositionBps`; see
+//! `test_position_share_consolidation` and the docs note.
 
 #![cfg(test)]
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
-    Address, Env, Vec,
+    Address, Bytes, Env, String, Symbol, Vec,
 };
 
-use crate::economic_sim::{AttackMetrics, estimate_gas_cost};
+use kora_marketplace::MarketplaceContractClient;
+use kora_shared::errors::KoraError;
+
+use crate::economic_sim::{estimate_gas_cost, AttackMetrics};
 
 fn setup_concentration_env() -> (
     Env,
-    Address, // admin
+    Address,      // admin
     Vec<Address>, // attacker_sybil_addresses (10)
-    i128,    // listing_size
-    u32,     // concentration_cap_bps (e.g., 1000 = 10%)
+    i128,         // listing_size
+    u32,          // concentration_cap_bps (e.g., 1000 = 10%)
 ) {
     let env = Env::default();
     env.mock_all_auths();
-    
+
     env.ledger().set(LedgerInfo {
         timestamp: 1_700_000_000,
         protocol_version: 21,
@@ -45,240 +69,470 @@ fn setup_concentration_env() -> (
     });
 
     let admin = Address::generate(&env);
-    
+
     let mut sybil_addresses = Vec::new(&env);
     for _ in 0..10 {
         sybil_addresses.push_back(Address::generate(&env));
     }
-    
+
     let listing_size = 5_000_000_000_000i128; // 5M listing
     let concentration_cap_bps = 1_000; // 10% cap per investor
 
-    (env, admin, sybil_addresses, listing_size, concentration_cap_bps)
+    (
+        env,
+        admin,
+        sybil_addresses,
+        listing_size,
+        concentration_cap_bps,
+    )
 }
+
+// ── Model scenarios ───────────────────────────────────────────────────────────
 
 #[test]
 fn test_sybil_concentration_bypass() {
     let (_env, _admin, sybil_addresses, listing_size, cap_bps) = setup_concentration_env();
-    
     let mut metrics = AttackMetrics::new();
-    
-    // Attacker wants to control >10% of listing using Sybil addresses
+
+    // Attacker wants 40% of a listing with a 10% per-address cap.
     let max_per_address = listing_size * (cap_bps as i128) / 10_000;
-    let desired_control = listing_size * 40 / 100; // wants 40% control
-    let addresses_needed = (desired_control / max_per_address) as u32 + 1;
-    
+    let desired_control = listing_size * 40 / 100;
+    let addresses_needed = ((desired_control + max_per_address - 1) / max_per_address) as u32;
+
     metrics.capital_deployed = desired_control;
-    
-    // Cost per Sybil address:
-    // - KYC/accreditation cost (if required)
-    // - Gas for funding transaction
-    // - Fee on contribution
-    
-    let kyc_cost_per_address = 1_000_000_000i128; // 1K USDC per fake KYC (expensive!)
-    let fee_bps = 200; // 2%
+    let fee_bps = 200;
     let fee_per_address = max_per_address * fee_bps / 10_000;
     let gas_per_address = estimate_gas_cost(50) * 1_000;
-    
-    let cost_per_address = kyc_cost_per_address + fee_per_address + gas_per_address;
-    let total_cost = cost_per_address * (addresses_needed as i128);
-    
-    // Net profit: attacker still has positions worth desired_control
-    // But paid extra cost for Sybil infrastructure
-    metrics.net_profit = -total_cost; // pure cost, no extra profit from having multiple addresses
+    let total_cost = (fee_per_address + gas_per_address) * addresses_needed as i128;
+    metrics.net_profit = -total_cost; // splitting yields no extra return
     metrics.tx_count = addresses_needed;
-    
-    let cost_overhead_bps = (total_cost * 10_000) / desired_control;
-    
     metrics.outcome = format!(
-        "Sybil bypass requires {} addresses at {} cost overhead ({}bps). {}",
-        addresses_needed,
-        total_cost,
-        cost_overhead_bps,
-        if cost_overhead_bps > 500 { "Attack FAILED - too expensive" } else { "ALERT: Sybil bypass economically viable!" }
+        "Sybil bypass needs {} separately accredited addresses (cap {}bps each)",
+        addresses_needed, cap_bps
     );
-    
-    println!("Sybil Concentration Bypass Attack Results:");
-    println!("  Desired control: {} ({}%)", desired_control, 40);
-    println!("  Addresses needed: {}", addresses_needed);
-    println!("  Max per address: {}", max_per_address);
-    println!("  Cost per Sybil: {}", cost_per_address);
-    println!("  Total cost: {}", total_cost);
-    println!("  Cost overhead: {}bps", cost_overhead_bps);
-    println!("  Outcome: {}", metrics.outcome);
-    
-    // Sybil attack should be expensive enough to discourage (>5% overhead)
-    assert!(cost_overhead_bps > 500,
-        "CRITICAL: Sybil bypass too cheap ({}bps overhead). Increase KYC requirements or address-creation costs!",
-        cost_overhead_bps);
+    println!("Sybil Concentration Bypass: {}", metrics.outcome);
+
+    assert!(
+        addresses_needed > 1,
+        "a single address must never be able to exceed the {}bps cap",
+        cap_bps
+    );
+    assert!(
+        addresses_needed <= sybil_addresses.len(),
+        "scenario must be within the 10-address attacker budget"
+    );
+    assert!(
+        max_per_address * addresses_needed as i128 >= desired_control,
+        "per-address cap arithmetic inconsistent"
+    );
+    // Splitting is never cheaper than funding the same amount from one address.
+    assert!(
+        metrics.net_profit < 0,
+        "sybil splitting must not be profitable"
+    );
+    assert!(!metrics.is_exploitable(), "sybil exploit: {:?}", metrics);
 }
 
 #[test]
 fn test_position_share_consolidation() {
-    let (_env, _admin, sybil_addresses, listing_size, cap_bps) = setup_concentration_env();
-    
-    let mut metrics = AttackMetrics::new();
-    
-    // Scenario: Attacker uses multiple addresses to fund within cap,
-    // then attempts to consolidate shares post-funding via position-share transfers
-    
-    let num_addresses = 5;
-    let per_address = listing_size * (cap_bps as i128) / 10_000; // 10% each
-    let total_funded = per_address * (num_addresses as i128);
-    
-    metrics.capital_deployed = total_funded;
-    
-    // Cost to fund via multiple addresses
-    let fee_bps = 200;
-    let funding_fees = total_funded * fee_bps / 10_000;
-    metrics.tx_count = num_addresses; // funding txs
-    
-    // Attempt to transfer shares to consolidate into one address
-    let transfer_gas_per_share = estimate_gas_cost(40) * 1_000;
-    let total_transfer_cost = transfer_gas_per_share * ((num_addresses - 1) as i128);
-    metrics.tx_count += num_addresses - 1; // transfer txs
-    
-    // Check if position-share contract enforces concentration cap on transfers
-    let consolidation_blocked = true; // Expected defense: transfers check caps
-    
-    if consolidation_blocked {
-        metrics.net_profit = -total_transfer_cost; // wasted gas on failed transfers
-        metrics.outcome = format!(
-            "Position-share consolidation BLOCKED. Attacker wasted {} on failed transfers. Defense working: concentration caps enforced on transfers.",
-            total_transfer_cost
-        );
-    } else {
-        metrics.net_profit = 0; // successful consolidation but no extra profit
-        metrics.outcome = format!(
-            "ALERT: Position-share consolidation SUCCEEDED! Attacker bypassed {}% cap. FIX: Enforce concentration caps on share transfers.",
-            cap_bps / 100
-        );
-    }
-    
-    println!("Position Share Consolidation Attack Results:");
-    println!("  Addresses used: {}", num_addresses);
-    println!("  Total funded: {} ({}%)", total_funded, (total_funded * 100) / listing_size);
-    println!("  Funding fees: {}", funding_fees);
-    println!("  Transfer attempt cost: {}", total_transfer_cost);
-    println!("  Consolidation blocked: {}", consolidation_blocked);
-    println!("  Outcome: {}", metrics.outcome);
-    
-    // Defense check: consolidation must be blocked
-    assert!(consolidation_blocked,
-        "CRITICAL: Position-share transfers must enforce concentration caps!");
+    let (_env, _admin, _sybil_addresses, listing_size, cap_bps) = setup_concentration_env();
+
+    // Five capped addresses fund 10% each, then try to merge into one 50%
+    // position. The marketplace leg is capped per address (see the contract
+    // tests below); the merge itself happens in financing_pool.
+    let num_addresses = 5i128;
+    let per_address = listing_size * cap_bps as i128 / 10_000;
+    let consolidated_bps = per_address * num_addresses * 10_000 / listing_size;
+
+    println!(
+        "Position Share Consolidation: {} addresses x {}bps -> {}bps after merge",
+        num_addresses, cap_bps, consolidated_bps
+    );
+
+    // Every funding leg is individually within the cap.
+    assert!(per_address * 10_000 <= cap_bps as i128 * listing_size);
+    // The merged position exceeds the marketplace cap: this is the open item
+    // documented in the module header. The financing_pool MaxPositionBps
+    // check runs in record_position, not in transfer_position.
+    assert!(
+        consolidated_bps > cap_bps as i128,
+        "model drift: consolidation scenario no longer exceeds the cap"
+    );
 }
 
 #[test]
 fn test_micro_splitting_fee_optimization() {
-    let (_env, _admin, _sybil_addresses, listing_size, _cap_bps) = setup_concentration_env();
-    
+    let (_env, _admin, _sybil_addresses, _listing_size, _cap_bps) = setup_concentration_env();
     let mut metrics = AttackMetrics::new();
-    
-    // Scenario: Attacker splits contribution across many tiny transactions
-    // attempting to exploit fee tiers or avoid concentration tracking
-    
+
     let total_investment = 1_000_000_000_000i128; // 1M investment
     let micro_tx_size = 10_000_000_000i128; // 10K per transaction
     let num_micro_txs = (total_investment / micro_tx_size) as u32;
-    
+
     metrics.capital_deployed = total_investment;
     metrics.tx_count = num_micro_txs;
-    
-    // Fee per transaction (flat 2%, no volume discount for micro-splitting)
-    let fee_bps = 200;
-    let total_fees = total_investment * fee_bps / 10_000;
-    
-    // Gas cost for each micro transaction
+
     let gas_per_tx = estimate_gas_cost(50) * 1_000;
     let total_gas = gas_per_tx * (num_micro_txs as i128);
-    
-    // Compare to single large transaction
     let single_tx_gas = estimate_gas_cost(50) * 1_000;
     let gas_overhead = total_gas - single_tx_gas;
-    
-    // Check if attacker gains any fee advantage
-    let fee_advantage = 0i128; // No tiered fees on size, so no advantage
-    
+    let fee_advantage = 0i128; // flat fee, no size tiers
+
     metrics.net_profit = fee_advantage - gas_overhead;
-    
     metrics.outcome = format!(
-        "Micro-splitting {} txs costs {} extra gas with {} fee advantage. Net: {}. Attack FAILED - gas costs exceed any benefit.",
-        num_micro_txs,
-        gas_overhead,
-        fee_advantage,
-        metrics.net_profit
+        "Micro-splitting {} txs costs {} extra gas for {} fee advantage",
+        num_micro_txs, gas_overhead, fee_advantage
     );
-    
-    println!("Micro-Splitting Fee Optimization Attack Results:");
-    println!("  Total investment: {}", total_investment);
-    println!("  Micro transactions: {}", num_micro_txs);
-    println!("  Tx size: {}", micro_tx_size);
-    println!("  Extra gas cost: {}", gas_overhead);
-    println!("  Fee advantage: {}", fee_advantage);
-    println!("  Net result: {}", metrics.net_profit);
-    println!("  Outcome: {}", metrics.outcome);
-    
-    assert!(metrics.net_profit < 0,
-        "Micro-splitting should not be profitable due to gas costs");
-    
-    assert!(!metrics.is_exploitable(),
-        "Micro-splitting attack should not be exploitable");
+    println!("Micro-Splitting Fee Optimization: {}", metrics.outcome);
+
+    assert!(
+        metrics.net_profit < 0,
+        "Micro-splitting should not be profitable due to gas costs"
+    );
+    assert!(
+        !metrics.is_exploitable(),
+        "Micro-splitting attack should not be exploitable"
+    );
 }
 
 #[test]
 fn test_volume_tier_gaming_via_splitting() {
     let (_env, _admin, _sybil_addresses, _listing_size, _cap_bps) = setup_concentration_env();
-    
     let mut metrics = AttackMetrics::new();
-    
-    // Scenario: Attacker attempts to game volume-based fee tiers by:
-    // 1. Funding many listings with small amounts across multiple addresses
-    // 2. Accumulating "volume" in the system
-    // 3. Then making large investments at reduced fee rates
-    
-    let volume_to_accumulate = 10_000_000_000_000i128; // 10M volume needed for 1.5% -> 0.5% reduction
+
+    let volume_to_accumulate = 10_000_000_000_000i128; // 10M volume
     let capital_available = 2_000_000_000_000i128; // only 2M capital
-    
-    // To fake 10M volume with 2M capital, need to cycle 5 times
-    // But each cycle loses fees
-    
     let cycles = (volume_to_accumulate / capital_available) as u32;
-    let fee_per_cycle_bps = 200; // 2% fee
-    let fee_per_cycle = capital_available * fee_per_cycle_bps / 10_000;
+    let fee_per_cycle = capital_available * 200 / 10_000;
     let total_fees_lost = fee_per_cycle * (cycles as i128);
-    
+
     metrics.capital_deployed = capital_available;
-    metrics.tx_count = cycles * 2; // fund + refund per cycle
+    metrics.tx_count = cycles * 2;
     metrics.estimated_gas_cost = estimate_gas_cost(50) * (cycles as i128) * 2;
-    
-    // Potential savings: 100 bps (1%) on future investments
+
     let savings_bps = 100;
-    
-    // Break-even calculation: how much real investment needed to recoup costs?
     let breakeven_investment = (total_fees_lost * 10_000) / (savings_bps as i128);
-    
     metrics.net_profit = -total_fees_lost - (metrics.estimated_gas_cost * 1_000);
-    
-    metrics.outcome = format!(
-        "Volume gaming costs {} to fake {}M volume. Need {}M real investment to break even. Attack FAILED - economically irrational for all realistic scales.",
-        -metrics.net_profit,
-        volume_to_accumulate / 1_000_000_000_000,
-        breakeven_investment / 1_000_000_000_000
+    println!(
+        "Volume Tier Gaming: {} lost, breakeven at {}",
+        -metrics.net_profit, breakeven_investment
     );
-    
-    println!("Volume Tier Gaming Attack Results:");
-    println!("  Target volume: {}M", volume_to_accumulate / 1_000_000_000_000);
-    println!("  Capital available: {}M", capital_available / 1_000_000_000_000);
-    println!("  Cycles needed: {}", cycles);
-    println!("  Total fees lost: {}", total_fees_lost);
-    println!("  Fee savings rate: {}bps", savings_bps);
-    println!("  Breakeven investment: {}M", breakeven_investment / 1_000_000_000_000);
-    println!("  Net cost: {}", -metrics.net_profit);
-    println!("  Outcome: {}", metrics.outcome);
-    
-    assert!(breakeven_investment > volume_to_accumulate,
-        "Volume gaming should require >1x investment to break even");
-    
-    assert!(!metrics.is_exploitable(),
-        "Volume tier gaming should not be exploitable");
+
+    assert!(
+        breakeven_investment > volume_to_accumulate,
+        "Volume gaming should require >1x investment to break even"
+    );
+    assert!(
+        !metrics.is_exploitable(),
+        "Volume tier gaming should not be exploitable"
+    );
+}
+
+// ── Contract scenarios (real marketplace) ─────────────────────────────────────
+
+const ASKING: i128 = 10_000_000;
+const FACE: i128 = 11_000_000;
+const CAP_BPS: u32 = 2_500;
+const CAP_AMOUNT: i128 = ASKING * CAP_BPS as i128 / 10_000;
+
+struct Mkt {
+    env: Env,
+    admin: Address,
+    seller: Address,
+    token: Address,
+    mp: MarketplaceContractClient<'static>,
+    nft: kora_invoice_nft::InvoiceNftContractClient<'static>,
+}
+
+fn set_time(env: &Env, ts: u64, seq: u32) {
+    env.ledger().set(LedgerInfo {
+        timestamp: ts,
+        protocol_version: 21,
+        sequence_number: seq,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 1000,
+        min_persistent_entry_ttl: 1000,
+        max_entry_ttl: 100_000,
+    });
+}
+
+/// Real marketplace wired to real access_control, treasury, NFT, risk
+/// registry, price oracle, parameter registry and financing_pool (same wiring
+/// as `marketplace_edge_cases.rs`).
+fn setup_marketplace() -> Mkt {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    set_time(&env, 1_700_000_000, 1);
+
+    let admin = Address::generate(&env);
+    let seller = Address::generate(&env);
+
+    let ac = env.register_contract(None, kora_access_control::AccessControlContract);
+    kora_access_control::AccessControlContractClient::new(&env, &ac).initialize(&admin);
+    let treasury_id = env.register_contract(None, kora_treasury::TreasuryContract);
+    let treasury = kora_treasury::TreasuryContractClient::new(&env, &treasury_id);
+    treasury.initialize(&admin, &50u32);
+    let nft_id = env.register_contract(None, kora_invoice_nft::InvoiceNftContract);
+    let nft = kora_invoice_nft::InvoiceNftContractClient::new(&env, &nft_id);
+    nft.initialize(&admin, &ac);
+
+    let registry_id = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
+    let registry = kora_risk_registry::RiskRegistryContractClient::new(&env, &registry_id);
+    let staking_token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    registry.initialize(&admin, &nft_id, &staking_token, &1_000_000i128, &5_000u32);
+
+    let token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let oracle_id = env.register_contract(None, kora_price_oracle::PriceOracleContract);
+    kora_price_oracle::PriceOracleContractClient::new(&env, &oracle_id).initialize(&admin, &ac);
+    let preg_id = env.register_contract(None, kora_parameter_registry::ParameterRegistryContract);
+    kora_parameter_registry::ParameterRegistryContractClient::new(&env, &preg_id)
+        .initialize(&admin, &None);
+
+    let pool_id = env.register_contract(None, kora_financing_pool::FinancingPoolContract);
+    kora_financing_pool::FinancingPoolContractClient::new(&env, &pool_id).initialize(
+        &admin,
+        &nft_id,
+        &registry_id,
+        &treasury_id,
+        &ac,
+        &200u32,
+        &oracle_id,
+        &10_000u32,
+        &0u64,
+        &Address::generate(&env),
+    );
+
+    let mp_id = env.register_contract(None, kora_marketplace::MarketplaceContract);
+    let mp = MarketplaceContractClient::new(&env, &mp_id);
+    mp.initialize(
+        &admin,
+        &nft_id,
+        &pool_id,
+        &treasury_id,
+        &ac,
+        &oracle_id,
+        &registry_id,
+        &preg_id,
+        &50u32,
+        &0u32,
+    );
+
+    mp.propose_token_whitelist(&admin, &token);
+    set_time(&env, 1_700_000_000 + 86_400 + 1, 2);
+    mp.execute_token_whitelist(&admin, &token);
+    treasury.whitelist_token(&admin, &token);
+    treasury.set_marketplace(&admin, &mp_id);
+    mp.set_token_currency(&admin, &token, &Symbol::new(&env, "USDC"));
+    nft.set_authorized_callers(&admin, &mp_id, &pool_id);
+    mp.set_min_contribution(&admin, &1);
+
+    let verifier = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &staking_token)
+        .mint(&verifier, &1_000_000i128);
+    registry.add_verifier(&admin, &verifier, &1_000_000i128);
+    registry.register_sme(&verifier, &seller, &50u32, &true);
+
+    Mkt {
+        env,
+        admin,
+        seller,
+        token,
+        mp,
+        nft,
+    }
+}
+
+impl Mkt {
+    /// Mint and list a fresh invoice; returns its id.
+    fn listing(&self, salt: u8) -> u64 {
+        let id = self.nft.mint_invoice(
+            &self.seller,
+            &Bytes::from_slice(&self.env, &[salt; 32]),
+            &FACE,
+            &Symbol::new(&self.env, "USDC"),
+            &(self.env.ledger().timestamp() + 86_400 * 30),
+            &String::from_str(&self.env, "ipfs://cap"),
+            &50u32,
+            &None,
+        );
+        self.mp.list_invoice(
+            &self.seller,
+            &id,
+            &ASKING,
+            &FACE,
+            &self.token,
+            &(self.env.ledger().timestamp() + 86_400),
+            &None,
+        );
+        id
+    }
+
+    fn investor(&self) -> Address {
+        let a = Address::generate(&self.env);
+        self.mp.set_investor_accredited(&self.admin, &a, &true);
+        soroban_sdk::token::StellarAssetClient::new(&self.env, &self.token)
+            .mint(&a, &(ASKING * 10));
+        a
+    }
+
+    fn fund(&self, who: &Address, id: u64, amount: i128) -> Result<(), KoraError> {
+        match self.mp.try_fund_invoice(who, &id, &amount, &None) {
+            Ok(Ok(())) => Ok(()),
+            Err(Ok(e)) => Err(e),
+            other => panic!("unexpected host failure funding {}: {:?}", amount, other),
+        }
+    }
+
+    fn assert_rejected_cleanly(&self, who: &Address, id: u64, amount: i128, why: &str) {
+        let gross = self.mp.get_gross_contribution(&id, who);
+        let funded = self.mp.get_listing(&id).funded_amount;
+        assert_eq!(
+            self.fund(who, id, amount),
+            Err(KoraError::InvestorConcentrationExceeded),
+            "{}: funding {} on top of {} must hit the {}bps cap",
+            why,
+            amount,
+            gross,
+            self.mp.get_max_investor_share_bps()
+        );
+        assert_eq!(
+            self.mp.get_gross_contribution(&id, who),
+            gross,
+            "{}: rejected call changed the investor's running total",
+            why
+        );
+        assert_eq!(
+            self.mp.get_listing(&id).funded_amount,
+            funded,
+            "{}: rejected call changed funded_amount",
+            why
+        );
+    }
+}
+
+#[test]
+fn test_contract_cap_exact_boundary() {
+    let m = setup_marketplace();
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    let id = m.listing(1);
+    let inv = m.investor();
+
+    m.fund(&inv, id, CAP_AMOUNT)
+        .expect("exactly the cap must be allowed");
+    assert_eq!(m.mp.get_gross_contribution(&id, &inv), CAP_AMOUNT);
+    m.assert_rejected_cleanly(&inv, id, 1, "one unit over the cap");
+}
+
+/// Before the running total was recorded, every call was checked on its own,
+/// so this sequence funded 100% of the listing from one address.
+#[test]
+fn test_contract_micro_splitting_cannot_bypass_cap() {
+    let m = setup_marketplace();
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    let id = m.listing(2);
+    let inv = m.investor();
+
+    let slice = CAP_AMOUNT / 25;
+    for i in 0..25 {
+        m.fund(&inv, id, slice)
+            .unwrap_or_else(|e| panic!("slice {} within cap rejected: {:?}", i, e));
+    }
+    assert_eq!(m.mp.get_gross_contribution(&id, &inv), CAP_AMOUNT);
+    m.assert_rejected_cleanly(&inv, id, slice, "26th micro-slice");
+    m.assert_rejected_cleanly(&inv, id, 1, "dust after micro-slices");
+}
+
+#[test]
+fn test_contract_cap_enabled_or_lowered_counts_prior_funding() {
+    let m = setup_marketplace();
+    let id = m.listing(3);
+    let inv = m.investor();
+
+    // Uncapped: fund 20% before any cap exists.
+    m.fund(&inv, id, ASKING / 5).expect("uncapped funding");
+    assert_eq!(m.mp.get_gross_contribution(&id, &inv), ASKING / 5);
+
+    // Enabling a 25% cap leaves exactly 5% of headroom, not a fresh 25%.
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    m.assert_rejected_cleanly(&inv, id, ASKING / 20 + 1, "headroom after enabling cap");
+    m.fund(&inv, id, ASKING / 20).expect("remaining headroom");
+
+    // Lowering the cap below the current holding blocks any top-up but does
+    // not claw back the existing position.
+    m.mp.set_max_investor_share_bps(&m.admin, &1_000u32);
+    m.assert_rejected_cleanly(&inv, id, 1, "top-up after cap lowered");
+    assert_eq!(m.mp.get_gross_contribution(&id, &inv), CAP_AMOUNT);
+
+    // Disabling the cap (0) restores uncapped funding.
+    m.mp.set_max_investor_share_bps(&m.admin, &0u32);
+    m.fund(&inv, id, 1).expect("cap disabled");
+}
+
+#[test]
+fn test_contract_sybil_requires_accreditation() {
+    let m = setup_marketplace();
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    let id = m.listing(4);
+
+    // An unaccredited sybil cannot fund at all.
+    let sybil = Address::generate(&m.env);
+    soroban_sdk::token::StellarAssetClient::new(&m.env, &m.token).mint(&sybil, &ASKING);
+    assert_eq!(
+        m.fund(&sybil, id, 1),
+        Err(KoraError::InvestorNotAccredited),
+        "unaccredited sybil must be rejected before the cap is even consulted"
+    );
+
+    // Accredited sybils are each capped independently (see Sybil note).
+    let sybils: std::vec::Vec<Address> = (0..3).map(|_| m.investor()).collect();
+    for s in &sybils {
+        m.fund(s, id, CAP_AMOUNT)
+            .expect("each accredited address up to cap");
+        m.assert_rejected_cleanly(s, id, 1, "accredited sybil over cap");
+        assert!(m.mp.get_gross_contribution(&id, s) * 10_000 <= CAP_BPS as i128 * ASKING);
+    }
+    let total: i128 = sybils
+        .iter()
+        .map(|s| m.mp.get_gross_contribution(&id, s))
+        .sum();
+    assert_eq!(
+        total,
+        CAP_AMOUNT * 3,
+        "sybil aggregate is n * cap, never more"
+    );
+}
+
+#[test]
+fn test_contract_cap_is_scoped_per_listing() {
+    let m = setup_marketplace();
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    let a = m.listing(5);
+    let b = m.listing(6);
+    let inv = m.investor();
+
+    m.fund(&inv, a, CAP_AMOUNT).expect("cap on listing a");
+    m.assert_rejected_cleanly(&inv, a, 1, "listing a full");
+    m.fund(&inv, b, CAP_AMOUNT)
+        .expect("listing b has its own cap budget");
+    assert_eq!(m.mp.get_gross_contribution(&b, &inv), CAP_AMOUNT);
+    m.assert_rejected_cleanly(&inv, b, 1, "listing b full");
+}
+
+#[test]
+fn test_contract_oversized_single_call_rejected() {
+    let m = setup_marketplace();
+    m.mp.set_max_investor_share_bps(&m.admin, &CAP_BPS);
+    let id = m.listing(7);
+    let inv = m.investor();
+    m.assert_rejected_cleanly(&inv, id, CAP_AMOUNT + 1, "single call over cap");
+    assert_eq!(m.mp.get_gross_contribution(&id, &inv), 0);
+    // Other investors are unaffected by the rejected attempt.
+    let other = m.investor();
+    m.fund(&other, id, CAP_AMOUNT)
+        .expect("independent investor");
 }

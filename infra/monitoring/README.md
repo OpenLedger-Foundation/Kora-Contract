@@ -60,6 +60,44 @@ Scrape target (already in `prometheus.yml` job `kora-indexer`):
     - targets: ["indexer:9090"]
 ```
 
+## FX ingestion `/metrics`
+
+The FX ingestion service (`services/fx-ingestion`) exposes Prometheus 0.0.4
+text at `GET /metrics` on configurable `FX_METRICS_PORT` (default `8081`):
+
+- `kora_fx_rate_age_seconds{base,quote}`: gauge = seconds since the last
+  successful FX rate publication for a pair. Emits a comment instead of a bogus
+  zero when no sample exists yet (so a missing series, not `0`, drives alerts).
+- `kora_fx_last_ingestion_timestamp_seconds{base,quote}`: gauge = unix
+  timestamp of the last successful publication per pair.
+- `kora_fx_ingestion_cycles_total`: counter incremented once per completed
+  ingestion cycle.
+- `kora_fx_publication_skipped_total{reason}`: counter of skipped publications
+  by reason (e.g. `no_sources_available`, `insufficient_sources_for_cross_check`,
+  `source_divergence_*`, `stale_rate`, `rate_limited`).
+
+Scrape target (already in `prometheus.yml` job `kora-fx-ingestion-rates`):
+
+```yaml
+- job_name: kora-fx-ingestion-rates
+  metrics_path: /metrics
+  static_configs:
+    - targets: ["fx-ingestion:8081"]
+```
+
+### FX staleness alerts
+
+| Alert | Expression | For | Tier |
+|---|---|---|---|
+| `KoraFxRateStale` | `max by (base,quote) (kora_fx_rate_age_seconds) > 1800` | 5m | Sev-2 warning |
+| `KoraFxRateNeverPublished` | `absent(kora_fx_rate_age_seconds)` | 15m | Sev-2 warning |
+| `KoraFxIngestionDown` | `up{job="kora-fx-ingestion-rates"} == 0` | 3m | Sev-3 warning |
+
+The staleness threshold (1800s) is half the oracle's 3600s `maxStalenessSeconds`
+budget so operators are paged before the on-chain staleness guard begins
+rejecting rates. Tune via a recording rule or threshold override per
+environment.
+
 ## Severity and routing
 
 Severity follows [the incident response runbook](../../docs/INCIDENT_RESPONSE.md):
@@ -72,6 +110,8 @@ Severity follows [the incident response runbook](../../docs/INCIDENT_RESPONSE.md
 | Keeper/indexer scrape unavailable for 3 minutes | Sev-3 / warning | Operations channel | Degradation; does not by itself establish risk to funds |
 | Keeper dead-letter jobs for 5 minutes | Sev-3 / warning | Operations channel | Operator follow-up required, no automatic page |
 | Default or treasury-sweep events | Sev-2 / warning or Sev-3 / warning | Operations channel | Events may be expected; inspect transaction, amount, and authorization before escalation |
+| FX rate stale beyond 30 min for any pair | Sev-2 / warning | Operations channel | Multi-currency invoice displays and funding math depend on fresh rates; inspect source availability and the fx-ingestion `/metrics` endpoint |
+| FX ingestion scrape unavailable for 3 minutes | Sev-3 / warning | Operations channel | Degradation; FX staleness may be going undetected |
 
 Rules use `for` windows; Alertmanager groups by alert and service, delays
 initial notifications, and applies repeat intervals to reduce flapping and
@@ -92,3 +132,155 @@ resolution. Never inject test events into production contracts or mainnet.
 
 Keep alert-rule changes reviewed by the security/on-call owner, and exercise
 the routing path during the regular incident-response tabletop.
+
+---
+
+## Timeseries downsampling retention policy
+
+The timeseries service maintains four granularity tiers.  Raw points feed the
+finest tier; coarser tiers survive longer so long-range APR and marketplace
+charts remain queryable after raw data has been pruned.
+
+| Granularity | Retained for | Primary use |
+|---|---|---|
+| 5-minute | 7 days | Real-time dashboards, recent anomaly detection |
+| Hourly | 90 days | Matches raw retention; covers quarterly views |
+| Daily | 730 days (2 years) | Default resolution for APR/marketplace charts |
+| Weekly | 1 825 days (5 years) | Long-range trend views and investor reports |
+
+Raw points follow `RetentionPolicy.rawRetentionDays` (default 90 days).
+After raw pruning, downsampled buckets remain queryable up to their tier
+window.
+
+The `DownsamplingJob` runs on a cron schedule (recommended: every 5 minutes)
+and automatically calls `enforceRetention` at the end of each pass, so no
+separate pruning job is needed.
+
+### Env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `TIMESERIES_URL` | `http://timeseries:8080/health` | Health probe URL for the timeseries service |
+
+### Alert guidance
+
+Add the following rule to `alerts.yml` to catch a stalled downsampling job:
+
+```yaml
+- alert: TimeseriesDownsamplingStalled
+  expr: kora_service_timeseries_lagSeconds > 3600
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Timeseries downsampling job has not run for >1 hour"
+    description: >
+      The DownsamplingJob lagSeconds metric exceeds the down threshold (3 600 s).
+      Long-range APR and marketplace charts will show stale data.
+      Check the timeseries service logs and cron scheduler.
+```
+
+---
+
+## Governance-sandbox simulation snapshots
+
+The `simulateAndSnapshot` function persists each simulation result under a
+deterministic SHA-256 snapshot ID derived from the serialised (change,
+protocolSnapshot) pair.  Voters can share the ID and retrieve an identical
+summary at any point before the snapshot store is reset.
+
+### Nondeterminism sources
+
+The snapshot ID is stable only when all four sources of nondeterminism are
+controlled.
+
+1. **`capturedAt`** — always pass a canonical ledger sequence string (e.g.
+   `"ledger-12345"`), never a wall-clock timestamp.  Two simulations over the
+   same state but different `capturedAt` values produce different IDs.
+
+2. **BigInt serialisation** — the store converts BigInt values to
+   `{"__bigint__":"<n>"}` before hashing.  Do not bypass this step or the
+   digest will differ across runtimes.
+
+3. **Plugin registration order** — registering a new plugin for an existing
+   change type between two runs changes the computed Impact and therefore the
+   ID, even with identical inputs.  Treat plugin registration as an
+   append-only, versioned operation.
+
+4. **Object key ordering** — the store normalises keys alphabetically before
+   hashing, so insertion-order differences in the input objects are safe.
+
+### Payload size limit
+
+The store rejects payloads larger than 1 MiB (1 048 576 bytes).  Proposals
+with very large `listings` or `investors` arrays should paginate or summarise
+the ProtocolSnapshot before passing it to `simulateAndSnapshot`.
+
+### Env vars
+
+None.  The snapshot store is in-process; production deployments should replace
+`InMemorySnapshotStore` with a persistent backend and configure its connection
+parameters separately.
+
+---
+
+## Risk-pipeline batch scoring idempotency
+
+`BatchScorer` wraps `RiskPipeline.score()` with an idempotency layer so that
+retry storms, duplicate webhook deliveries, and operator re-runs cannot produce
+duplicate scores, tier flips, or spurious attestation triggers.
+
+### Idempotency key scheme
+
+Every submission requires a caller-supplied `idempotencyKey`.  The recommended
+format is:
+
+```
+<smeAddress>:<invoiceId>:<formulaVersion>:<dataEpochSeconds>
+```
+
+Where `dataEpochSeconds` is the Unix second at which the input signals were
+snapshotted.  Two runs over the same signals at the same epoch produce the same
+key and therefore the same result.  A genuine re-score after new data arrives
+uses a later epoch and gets a fresh key.
+
+**Always include a stable invoice identifier.**  Two different invoices that
+share the same key will collide: the second submission silently returns the
+first invoice's result.  The store does not validate key contents.
+
+### Duplicate metrics
+
+`BatchScorer.metrics()` returns:
+
+| Field | Prometheus metric | Description |
+|---|---|---|
+| `totalJobs` | `kora_risk_pipeline_total_jobs` | Unique idempotency keys stored |
+| `duplicatesBlocked` | `kora_risk_pipeline_duplicates_blocked_total` | Submissions short-circuited by an existing key |
+
+Wire `duplicatesBlocked` into the Prometheus exporter.  A sustained non-zero
+rate indicates a retry loop or misconfigured caller; a sudden spike may indicate
+a replay attack.
+
+### Alert guidance
+
+```yaml
+- alert: RiskPipelineDuplicateRateHigh
+  expr: rate(kora_risk_pipeline_duplicates_blocked_total[5m]) > 0.05
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Risk pipeline duplicate submission rate above 5 %"
+    description: >
+      More than 5 % of batch scoring submissions are duplicates.
+      Investigate the calling service for retry loops or misconfigured
+      idempotency keys.  Persistent duplicates can mask genuine re-score
+      requests and stale tier data.
+```
+
+### Env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `RISK_PIPELINE_URL` | `http://risk-pipeline:8080/health` | Health probe URL for the risk-pipeline service |
+| `GOVERNANCE_SANDBOX_URL` | `http://governance-sandbox:8080/health` | Health probe URL for the governance-sandbox service |
