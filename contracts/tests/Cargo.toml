@@ -140,6 +140,20 @@ path = "referral_deposit_to_claim.rs"
 [[test]]
 name = "fee_clawback_policy"
 path = "fee_clawback_policy.rs"
+# ── Council failed-election grace path (Issue #1103) ─────────────────────────
+[[test]]
+name = "council_election_grace"
+path = "council_election_grace.rs"
+
+# ── Secondary market partial-fill accounting invariants (Issue #1101) ─────────
+[[test]]
+name = "secondary_market_fill_invariants"
+path = "secondary_market_fill_invariants.rs"
+
+# ── Tranche waterfall distribution properties (Issue #1102) ──────────────────
+[[test]]
+name = "tranche_waterfall_property"
+path = "tranche_waterfall_property.rs"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -159,4 +173,5 @@ kora-vesting = { path = "../vesting" }
 kora-dispute-escrow = { path = "../dispute_escrow" }
 kora-dispute-resolution = { path = "../dispute_resolution" }
 kora-governance-voting = { path = "../governance_voting" }
+kora-tranche = { path = "../tranche" }
 proptest = "1.4"

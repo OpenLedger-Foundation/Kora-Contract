@@ -8,6 +8,8 @@ import { CrossChecker } from "./crosscheck";
 import { OracleRelay } from "./relay";
 import { IngestionEngine } from "./engine";
 import { FxIngestionConfig, CurrencyCode } from "./types";
+import { SurgePricingMonitor, loadFeeMonitorConfig } from "./fee-monitor";
+import { startFeeHintServer, loadFeeHintServerConfig } from "./fee-hint-server";
 import pino from "pino";
 
 const logger = pino({ name: "fx-ingestion" });
@@ -54,9 +56,21 @@ async function main(): Promise<void> {
 
   engine.start();
 
+  // Surge-pricing monitor + advisory fee hints (#1034). Only the public RPC
+  // URL is passed in — the relay secret never reaches the monitor.
+  let feeMonitor: SurgePricingMonitor | null = null;
+  let feeServer: ReturnType<typeof startFeeHintServer> | null = null;
+  if ((process.env.FEE_HINT_ENABLED ?? "true") !== "false") {
+    feeMonitor = new SurgePricingMonitor({ ...loadFeeMonitorConfig(), rpcUrl: config.rpcUrl });
+    feeMonitor.start();
+    feeServer = startFeeHintServer(feeMonitor, loadFeeHintServerConfig());
+  }
+
   const shutdown = (): void => {
     logger.info("Shutting down FX ingestion service…");
     engine.stop();
+    feeMonitor?.stop();
+    feeServer?.close();
     process.exit(0);
   };
 

@@ -14,6 +14,32 @@
 //! tranche as well, so junior/senior expectations are explicit and consistent.
 //! The flag is stored under [`DataKey::CrossDefaultPropagation`] and fails
 //! closed: if it is unset, propagation is treated as disabled.
+//!
+//! ## Repayment waterfall
+//!
+//! Repayments flowing into a tranche are distributed by [`compute_waterfall`]
+//! (class level) and [`split_pro_rata`] (holder level within a class). The
+//! math is pure and side-effect free so it can be property-tested
+//! (`contracts/tests/tranche_waterfall_property.rs`).
+//!
+//! Invariants (hold for every non-negative input):
+//!
+//! 1. **No over-distribution:** `senior + junior + residual == available`, and
+//!    `senior + junior <= available`.
+//! 2. **Senior priority:** junior receives nothing until senior is paid in
+//!    full (`junior > 0 => senior == senior_owed`).
+//! 3. **Caps:** `senior <= senior_owed`, `junior <= junior_owed`; any excess
+//!    is reported as `residual` and never paid to either class.
+//! 4. **Zero junior:** with `junior_owed == 0` the junior payout is always 0
+//!    and everything beyond `senior_owed` is residual.
+//! 5. **Monotonic:** more `available` never decreases any class payout.
+//!
+//! **Dust remainder policy:** within a class, [`split_pro_rata`] pays each
+//! holder `floor(class_payout * weight / total_weight)`. The rounding dust
+//! (`class_payout - sum(holder payouts)`, always `< number of holders`) is
+//! returned to the caller and is *not* assigned to any holder; it stays with
+//! the tranche and is carried into the next distribution (or swept to the
+//! treasury on close). Rounding therefore can never over-distribute.
 
 use kora_shared::{
     errors::CommonError,
@@ -73,6 +99,88 @@ pub struct Tranche {
     pub total_funded: i128,
     pub is_closed: bool,
     pub created_at: u64,
+}
+
+/// Class-level result of a waterfall distribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WaterfallPayout {
+    /// Amount paid to the senior class (`<= senior_owed`).
+    pub senior: i128,
+    /// Amount paid to the junior class (`<= junior_owed`), only after senior is whole.
+    pub junior: i128,
+    /// Amount left over after both classes are paid in full.
+    pub residual: i128,
+}
+
+/// Distribute `available` across the senior and junior classes, senior first.
+///
+/// See the module docs for the invariants this function guarantees.
+///
+/// **Errors:**
+/// - `TrancheError::InvalidAmount` — any input is negative.
+pub fn compute_waterfall(
+    available: i128,
+    senior_owed: i128,
+    junior_owed: i128,
+) -> Result<WaterfallPayout, TrancheError> {
+    if available < 0 || senior_owed < 0 || junior_owed < 0 {
+        return Err(TrancheError::InvalidAmount);
+    }
+    let senior = available.min(senior_owed);
+    let after_senior = available
+        .checked_sub(senior)
+        .ok_or(TrancheError::ArithmeticOverflow)?;
+    let junior = after_senior.min(junior_owed);
+    let residual = after_senior
+        .checked_sub(junior)
+        .ok_or(TrancheError::ArithmeticOverflow)?;
+    Ok(WaterfallPayout { senior, junior, residual })
+}
+
+/// Split a class payout pro-rata across holder `weights`, writing each
+/// holder's share into `out` (same length as `weights`).
+///
+/// Each holder receives `floor(amount * weight / total_weight)`. Returns the
+/// undistributed rounding dust, which is always `>= 0` and `< weights.len()`
+/// (see the dust remainder policy in the module docs). When the total weight
+/// is zero nothing is paid and the whole `amount` is returned as dust.
+///
+/// **Errors:**
+/// - `TrancheError::InvalidAmount` — negative amount/weight or length mismatch.
+/// - `TrancheError::ArithmeticOverflow` — `amount * weight` overflows `i128`.
+pub fn split_pro_rata(
+    amount: i128,
+    weights: &[i128],
+    out: &mut [i128],
+) -> Result<i128, TrancheError> {
+    if amount < 0 || weights.len() != out.len() {
+        return Err(TrancheError::InvalidAmount);
+    }
+    let mut total_weight: i128 = 0;
+    for w in weights.iter() {
+        if *w < 0 {
+            return Err(TrancheError::InvalidAmount);
+        }
+        total_weight = total_weight
+            .checked_add(*w)
+            .ok_or(TrancheError::ArithmeticOverflow)?;
+    }
+    for slot in out.iter_mut() {
+        *slot = 0;
+    }
+    if total_weight == 0 {
+        return Ok(amount);
+    }
+    let mut paid: i128 = 0;
+    for (w, slot) in weights.iter().zip(out.iter_mut()) {
+        let share = amount
+            .checked_mul(*w)
+            .and_then(|v| v.checked_div(total_weight))
+            .ok_or(TrancheError::ArithmeticOverflow)?;
+        *slot = share;
+        paid = paid.checked_add(share).ok_or(TrancheError::ArithmeticOverflow)?;
+    }
+    amount.checked_sub(paid).ok_or(TrancheError::ArithmeticOverflow)
 }
 
 #[contract]
