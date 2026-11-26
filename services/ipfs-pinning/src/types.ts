@@ -70,6 +70,11 @@ export interface PinningServiceConfig {
   allowedContentTypes: string[];
   /** Allowed filename extensions (allowlist, lowercase, with dot). */
   allowedExtensions: string[];
+  /**
+   * Optional per-content-type size caps (bytes), tighter than
+   * `maxFileSizeBytes`. Keys are normalized MIME types (issue #1186).
+   */
+  maxSizeBytesByContentType?: Record<string, number>;
   /** Minimum successful provider pins required (default 1; 2 = full redundancy). */
   minSuccesses?: number;
   /** Total pin attempts per provider, including the first attempt. */

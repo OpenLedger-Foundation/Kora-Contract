@@ -101,7 +101,7 @@ pub fn require_risk_score_within_ceiling(score: u32, ceiling: u32) -> Result<(),
 /// Reject fee rates above 10_000 bps (100 %).
 #[inline]
 pub fn require_valid_fee_bps(bps: u32) -> Result<(), CommonError> {
-    if bps > 10_000 {
+    if bps > BPS_DENOMINATOR {
         return Err(CommonError::InvalidFeeRate);
     }
     Ok(())
@@ -230,17 +230,43 @@ pub fn require_batch_size_within_limit(batch_size: u32) -> Result<(), CommonErro
 
 // ── Safe arithmetic ────────────────────────────────────────────────────────────
 
+/// Basis-point denominator (100 % = 10 000 bps). Every fee call site must use
+/// this constant through the helpers below rather than a local literal, so
+/// rounding (always floor, toward zero) is identical protocol-wide (#1188).
+pub const BPS_DENOMINATOR: u32 = 10_000;
+
 /// Compute `amount * bps / 10_000` with overflow protection.
-/// Rejects negative amounts to prevent silent negative fees.
+/// Rejects negative amounts to prevent silent negative fees and rates above
+/// 100 % (`InvalidFeeRate`). Rounds down, so a fee never exceeds `amount`.
 #[inline]
 pub fn bps_of(amount: i128, bps: u32) -> Result<i128, CommonError> {
     if amount < 0 {
         return Err(CommonError::InvalidAmount);
     }
+    require_valid_fee_bps(bps)?;
     amount
         .checked_mul(bps as i128)
-        .and_then(|v| v.checked_div(10_000))
+        .and_then(|v| v.checked_div(BPS_DENOMINATOR as i128))
         .ok_or(CommonError::ArithmeticOverflow)
+}
+
+/// Returns `true` when `part / whole` is strictly greater than `cap_bps`,
+/// evaluated without division (`part * 10_000 > cap_bps * whole`) so there is
+/// no rounding at the boundary. Both amounts must be non-negative and
+/// `whole` must be positive.
+#[inline]
+pub fn exceeds_bps_share(part: i128, whole: i128, cap_bps: u32) -> Result<bool, CommonError> {
+    if part < 0 || whole <= 0 {
+        return Err(CommonError::InvalidAmount);
+    }
+    require_valid_fee_bps(cap_bps)?;
+    let lhs = part
+        .checked_mul(BPS_DENOMINATOR as i128)
+        .ok_or(CommonError::ArithmeticOverflow)?;
+    let rhs = (cap_bps as i128)
+        .checked_mul(whole)
+        .ok_or(CommonError::ArithmeticOverflow)?;
+    Ok(lhs > rhs)
 }
 
 /// Safe addition — returns `ArithmeticOverflow` on overflow.
@@ -340,10 +366,7 @@ pub fn bps_of_normalized(
         return Err(CommonError::InvalidAmount);
     }
     let normalized = normalize_amount(amount, token_decimals)?;
-    let result = normalized
-        .checked_mul(bps as i128)
-        .and_then(|v| v.checked_div(10_000))
-        .ok_or(CommonError::ArithmeticOverflow)?;
+    let result = bps_of(normalized, bps)?;
     denormalize_amount(result, token_decimals)
 }
 
@@ -507,6 +530,44 @@ mod tests {
         assert_eq!(bps_of(10_000, 100).unwrap(), 100);
         assert_eq!(bps_of(1_000_000, 50).unwrap(), 5_000);
         assert!(bps_of(i128::MAX, 10_000).is_err());
+    }
+
+    #[test]
+    fn test_bps_of_rejects_rate_above_100_percent() {
+        assert_eq!(bps_of(1_000, BPS_DENOMINATOR + 1), Err(CommonError::InvalidFeeRate));
+        assert_eq!(bps_of(1_000, BPS_DENOMINATOR), Ok(1_000));
+        assert_eq!(bps_of(0, BPS_DENOMINATOR + 1), Err(CommonError::InvalidFeeRate));
+        assert_eq!(bps_of_normalized(1_000, BPS_DENOMINATOR + 1, 7), Err(CommonError::InvalidFeeRate));
+    }
+
+    #[test]
+    fn test_bps_of_rounds_down_consistently() {
+        assert_eq!(bps_of(9_999, 1).unwrap(), 0);
+        assert_eq!(bps_of(19_999, 1).unwrap(), 1);
+        // Splitting a fee by bps never produces more than the fee itself.
+        let fee = bps_of(1_000_003, 250).unwrap();
+        assert!(bps_of(fee, 2_000).unwrap() <= fee);
+    }
+
+    #[test]
+    fn test_exceeds_bps_share_boundary_is_exact() {
+        // exactly at the cap is allowed
+        assert_eq!(exceeds_bps_share(2_500, 10_000, 2_500), Ok(false));
+        // one unit above the cap exceeds it (no rounding slack)
+        assert_eq!(exceeds_bps_share(2_501, 10_000, 2_500), Ok(true));
+        assert_eq!(exceeds_bps_share(1, 3, 3_333), Ok(true));
+        assert_eq!(exceeds_bps_share(0, 1, 0), Ok(false));
+        assert_eq!(exceeds_bps_share(1, 1, 0), Ok(true));
+    }
+
+    #[test]
+    fn test_exceeds_bps_share_rejects_invalid_inputs() {
+        assert_eq!(exceeds_bps_share(-1, 10, 100), Err(CommonError::InvalidAmount));
+        assert_eq!(exceeds_bps_share(1, 0, 100), Err(CommonError::InvalidAmount));
+        assert_eq!(exceeds_bps_share(1, -5, 100), Err(CommonError::InvalidAmount));
+        assert_eq!(exceeds_bps_share(1, 10, BPS_DENOMINATOR + 1), Err(CommonError::InvalidFeeRate));
+        assert_eq!(exceeds_bps_share(i128::MAX, 10, 100), Err(CommonError::ArithmeticOverflow));
+        assert_eq!(exceeds_bps_share(1, i128::MAX, 10_000), Err(CommonError::ArithmeticOverflow));
     }
 
     #[test]

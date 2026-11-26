@@ -173,7 +173,23 @@ export class MemoryVoteStore implements VoteStore {
   }
 }
 
+const VOTE_CHOICES: ReadonlySet<string> = new Set<VoteChoice>(['for', 'against']);
+
+/**
+ * Canonical vote message (issue #1185). Fields are newline-delimited, so any
+ * field containing a line break, a NUL, surrounding whitespace or non-NFC text
+ * could make two distinct (chainId, proposalId, voter, choice) tuples share a
+ * signature or one action have several encodings. Such input is rejected
+ * rather than silently normalized, so each signature binds exactly one tuple.
+ */
 export function voteMessage(chainId: string, proposalId: string, voter: string, choice: VoteChoice): Buffer {
+  for (const [name, value] of [['chainId', chainId], ['proposalId', proposalId], ['voter', voter]] as const) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`Non-canonical vote field: ${name} is empty`);
+    if (/[\r\n\u0000]/.test(value) || value !== value.trim() || value !== value.normalize('NFC')) {
+      throw new Error(`Non-canonical vote field: ${name}`);
+    }
+  }
+  if (!VOTE_CHOICES.has(choice)) throw new Error('Non-canonical vote field: choice');
   return Buffer.from(`KORA_OFFCHAIN_VOTE_V1\n${chainId}\n${proposalId}\n${voter}\n${choice}`, 'utf8');
 }
 
@@ -199,9 +215,9 @@ export class OffchainVotingService {
     if (!(await this.store.reserveMode(proposalId, 'offchain'))) throw new Error('Proposal already uses another voting path');
     const rules = await this.source.rules(proposalId);
     if (this.now() >= rules.votingEndsAt) throw new Error('Voting is closed');
+    const message = voteMessage(this.chainId, proposalId, voter, choice);
     const weight = await this.source.votingWeight(proposalId, voter);
     if (weight <= 0n) throw new Error('Voter is not eligible');
-    const message = voteMessage(this.chainId, proposalId, voter, choice);
     let valid = false;
     try {
       valid = Keypair.fromPublicKey(voter).verify(message, Buffer.from(signature, 'base64'));
