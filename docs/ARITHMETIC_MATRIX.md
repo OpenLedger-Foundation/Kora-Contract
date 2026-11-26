@@ -127,6 +127,16 @@ helpers used by every contract) and from per-contract arithmetic in
 
 ---
 
+### 10. `contracts/secondary_market/src/lib.rs`
+
+| ID | Function | Operation | Boundaries | Tests | Status |
+|----|----------|-----------|------------|-------|--------|
+| SM-1 | `buy_position` | `bps_of(price, fee_bps)` (mul before div) | 0, rounding edge, largest safe price (`i128::MAX / fee_bps`), MAX_AMOUNT and i128 extremes fail closed | `test_secondary_fee_*` | ✅ Covered |
+| SM-2 | `buy_position` | `safe_sub(price, fee)` | 0, largest safe price, 0–1000 bps | `test_secondary_fee_conserves_price` | ✅ Covered |
+| SM-3 | `update_protocol_fee_bps` | 0–1000 bps range | 1000, 1001, non-admin | `fee_rate_bounds_and_admin_are_enforced` (`secondary_market_fee_routing.rs`) | ✅ Covered |
+
+---
+
 ## Coverage Summary
 
 | Module | Operations enumerated | Covered | Gaps |
